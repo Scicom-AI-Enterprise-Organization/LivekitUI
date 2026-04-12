@@ -173,6 +173,7 @@
   }
 }
 
+
 /* Collapsible animations */
 @keyframes collapsible-down {
   from { height: 0; opacity: 0; }
