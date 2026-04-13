@@ -13,7 +13,6 @@ import {
   Search,
   SlidersHorizontal,
   MoreHorizontal,
-  ExternalLink,
   Rocket,
 } from "lucide-react";
 
@@ -42,18 +41,12 @@ export default function AgentsPage() {
         showRefresh
         showTimeRange
         actions={
-          <div className="flex items-center gap-2">
-            <Button variant="outline" size="sm">
-              <ExternalLink className="size-3" />
-              <span>Launch Console</span>
-            </Button>
-            <Button variant="default" size="sm" asChild>
-              <Link href="/agents/builder">
-                <Rocket className="size-3" />
-                <span>Deploy new agent</span>
-              </Link>
-            </Button>
-          </div>
+          <Button variant="default" size="sm" asChild>
+            <Link href="/agents/builder">
+              <Rocket className="size-3" />
+              <span>Deploy new agent</span>
+            </Link>
+          </Button>
         }
       />
 

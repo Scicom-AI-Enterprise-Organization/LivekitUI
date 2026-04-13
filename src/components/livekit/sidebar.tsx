@@ -179,8 +179,10 @@ export function LiveKitSidebar() {
                   </Link>
                 )}
                 {item.action === "add" && (
-                  <Button variant="ghost" size="icon-xs" className="ml-0.5 text-muted-foreground">
-                    <Plus className="size-3.5" />
+                  <Button variant="ghost" size="icon-xs" className="ml-0.5 text-muted-foreground" asChild>
+                    <Link href="/agents/builder">
+                      <Plus className="size-3.5" />
+                    </Link>
                   </Button>
                 )}
               </div>

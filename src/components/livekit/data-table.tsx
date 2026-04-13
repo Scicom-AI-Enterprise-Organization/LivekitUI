@@ -25,18 +25,11 @@ export function DataTable({ columns, data, emptyMessage = "No results.", classNa
               <th
                 key={col.key}
                 className={cn(
-                  "px-4 py-3 text-left text-xs font-mono uppercase tracking-wider text-muted-foreground",
+                  "px-4 py-3 text-left text-xs font-medium text-muted-foreground",
                   col.className
                 )}
               >
-                <span className="flex items-center gap-1">
-                  {col.label}
-                  {col.sortable && (
-                    <svg className="size-3 text-muted-foreground" viewBox="0 0 12 12" fill="currentColor">
-                      <path d="M6 2l3 4H3zM6 10l-3-4h6z" />
-                    </svg>
-                  )}
-                </span>
+                {col.label}
               </th>
             ))}
           </tr>

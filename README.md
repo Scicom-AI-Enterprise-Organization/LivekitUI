@@ -65,13 +65,13 @@ Phone numbers can always be added manually. To import from a provider, add crede
 
 ## Roles
 
-| Permission | Owner | Admin | Member |
-|---|---|---|---|
-| View all pages | Yes | Yes | Yes |
-| Manage agents, telephony, egress/ingress | Yes | Yes | No |
-| Manage settings, API keys, webhooks | Yes | Yes | No |
-| Invite & remove team members | Yes | No | No |
-| Delete project (danger zone) | Yes | No | No |
+| Permission | Admin | Member |
+|---|---|---|
+| View all pages | Yes | Yes |
+| Manage agents, telephony, egress/ingress | Yes | No |
+| Manage settings, API keys, webhooks | Yes | No |
+| Invite & remove team members | Yes | No |
+| Delete project (danger zone) | Yes | No |
 
 ## Project Structure
 

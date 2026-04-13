@@ -3,6 +3,7 @@
 import { TopBar } from "@/components/livekit/top-bar";
 import { StatCard } from "@/components/livekit/stat-card";
 import { DataTable } from "@/components/livekit/data-table";
+import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { PhoneIncoming, PhoneOutgoing } from "lucide-react";
 
@@ -20,8 +21,8 @@ export default function SipTrunksPage() {
         title="SIP trunks"
         breadcrumb={["husein", "Telephony"]}
         actions={
-          <Button size="sm">
-            Create new trunk
+          <Button size="sm" asChild>
+            <Link href="/telephony/sip-trunks/new">Create new trunk</Link>
           </Button>
         }
       />
