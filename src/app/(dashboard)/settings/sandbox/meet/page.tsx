@@ -1,8 +1,25 @@
 "use client";
 
+import { useState } from "react";
 import { TopBar } from "@/components/livekit/top-bar";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Card, CardContent } from "@/components/ui/card";
+import {
+  Collapsible,
+  CollapsibleTrigger,
+  CollapsibleContent,
+} from "@/components/ui/collapsible";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+  DialogFooter,
+} from "@/components/ui/dialog";
 import {
   Video,
   ExternalLink,
@@ -11,19 +28,47 @@ import {
   BookOpen,
   Eye,
   User,
+  ChevronDown,
+  Copy,
+  Check,
+  Loader2,
 } from "lucide-react";
 
+function CopyBlock({ command }: { command: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <div className="flex items-center gap-2 rounded-md border bg-muted/50 px-3 py-2">
+      <code className="flex-1 text-xs text-foreground whitespace-pre-wrap">{command}</code>
+      <Button
+        variant="ghost"
+        size="icon-xs"
+        onClick={() => {
+          navigator.clipboard.writeText(command);
+          setCopied(true);
+          setTimeout(() => setCopied(false), 2000);
+        }}
+      >
+        {copied ? <Check className="size-3 text-green-500" /> : <Copy className="size-3" />}
+      </Button>
+    </div>
+  );
+}
+
 export default function MeetTemplatePage() {
+  const [dialogOpen, setDialogOpen] = useState(false);
+  const [bootstrapOpen, setBootstrapOpen] = useState(false);
+  const [sandboxName, setSandboxName] = useState("");
+  const [creating, setCreating] = useState(false);
+  const [createdName, setCreatedName] = useState("");
+  const [createError, setCreateError] = useState("");
+
   return (
     <div className="flex h-full flex-col">
-      <TopBar
-        title="meet"
-        breadcrumb={["husein", "Settings", "Sandbox", "Templates"]}
-      />
+      <TopBar title="meet" />
 
       <div className="flex-1 overflow-y-auto">
         <div className="flex gap-8 p-6">
-          {/* Left — Main content */}
+          {/* Left -- Main content */}
           <div className="flex-1 min-w-0 space-y-8">
             {/* Preview area */}
             <div className="overflow-hidden rounded-lg border border-border">
@@ -35,7 +80,7 @@ export default function MeetTemplatePage() {
                   <div className="h-2.5 w-2.5 rounded-full bg-green-500/60" />
                 </div>
                 <div className="ml-3 flex-1 rounded bg-muted px-3 py-1 text-xs text-muted-foreground">
-                  https://meet.sandbox.livekit.io
+                  https://meet.{process.env.NEXT_PUBLIC_SANDBOX_DOMAIN || "sandbox.example.com"}
                 </div>
               </div>
 
@@ -76,10 +121,14 @@ export default function MeetTemplatePage() {
                 LiveKit Meet
               </h2>
               <p className="text-sm text-muted-foreground leading-relaxed">
-                Try the demo &middot; LiveKit Components &middot; LiveKit Docs &middot; LiveKit Cloud &middot; Blog
+                Try the demo &middot; LiveKit Components &middot; LiveKit Docs
+                &middot; LiveKit Cloud &middot; Blog
               </p>
               <p className="text-sm text-muted-foreground leading-relaxed">
-                LiveKit Meet is an open source video conferencing app built on LiveKit Components, LiveKit Cloud, and Next.js. It&apos;s been completely redesigned from the ground up using our new components library.
+                LiveKit Meet is an open source video conferencing app built on
+                LiveKit Components, LiveKit Cloud, and Next.js. It&apos;s been
+                completely redesigned from the ground up using our new components
+                library.
               </p>
             </div>
 
@@ -178,32 +227,78 @@ export default function MeetTemplatePage() {
                   </span>{" "}
                   to see the result.
                 </li>
-                <li>Start development 🚀</li>
+                <li>Start development</li>
               </ol>
             </div>
           </div>
 
-          {/* Right — Sidebar info */}
+          {/* Right -- Sidebar info */}
           <div className="w-[280px] shrink-0 space-y-6">
             <div>
               <h2 className="text-lg font-bold text-foreground mb-2">
                 Video conference
               </h2>
               <p className="text-sm text-muted-foreground leading-relaxed">
-                An open source video conferencing app built on LiveKit Components, LiveKit Cloud, and Next.js.
+                An open source video conferencing app built on LiveKit
+                Components, LiveKit Cloud, and Next.js.
               </p>
             </div>
 
             {/* Actions */}
             <div className="flex gap-2">
-              <Button size="sm" className="gap-1.5">
+              <Button
+                size="sm"
+                className="gap-1.5"
+                onClick={() => {
+                  setSandboxName("");
+                  setCreatedName("");
+                  setCreateError("");
+                  setDialogOpen(true);
+                }}
+              >
                 Create sandbox
               </Button>
-              <Button variant="outline" size="sm" className="gap-1.5">
-                <Code className="size-3" />
-                Code
+              <Button variant="outline" size="sm" className="gap-1.5" asChild>
+                <a
+                  href="https://github.com/livekit-examples/meet"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  <Code className="size-3" />
+                  Code
+                </a>
               </Button>
             </div>
+
+            {/* Bootstrap this template */}
+            <Collapsible open={bootstrapOpen} onOpenChange={setBootstrapOpen}>
+              <CollapsibleTrigger className="flex w-full items-center justify-between text-sm font-semibold text-foreground">
+                Bootstrap this template
+                <ChevronDown
+                  className={`size-4 text-muted-foreground transition-transform ${
+                    bootstrapOpen ? "rotate-180" : ""
+                  }`}
+                />
+              </CollapsibleTrigger>
+              <CollapsibleContent className="mt-3 space-y-3">
+                <Card className="bg-muted/50">
+                  <CardContent className="p-3">
+                    <div className="flex items-center justify-between">
+                      <code className="text-xs text-foreground">
+                        lk app create --template meet
+                      </code>
+                      <button className="text-muted-foreground hover:text-foreground">
+                        <Copy className="size-3.5" />
+                      </button>
+                    </div>
+                  </CardContent>
+                </Card>
+                <p className="text-xs text-muted-foreground leading-relaxed">
+                  Once you&apos;ve set up the sandbox app locally, launch it to
+                  begin testing and interacting with the application.
+                </p>
+              </CollapsibleContent>
+            </Collapsible>
 
             {/* About template */}
             <div className="space-y-3">
@@ -253,6 +348,119 @@ export default function MeetTemplatePage() {
           </div>
         </div>
       </div>
+
+      {/* Create sandbox dialog */}
+      <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
+        <DialogContent className="max-w-md">
+          {createdName ? (
+            <>
+              <DialogHeader>
+                <DialogTitle>Sandbox created</DialogTitle>
+                <DialogDescription>{createdName}</DialogDescription>
+              </DialogHeader>
+              <div className="space-y-5 py-2">
+                <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                  <span className="size-5 flex items-center justify-center rounded-full border text-xs">⟳</span>
+                  Finish setting up your sandbox app
+                </div>
+
+                <div className="space-y-2">
+                  <p className="text-sm font-medium text-foreground">1. Install the CLI</p>
+                  <CopyBlock command="brew install livekit-cli" />
+                  <p className="text-xs text-muted-foreground">
+                    View full instructions in our{" "}
+                    <a href="https://docs.livekit.io/deploy/admin/sandbox/" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">documentation</a>
+                  </p>
+                </div>
+
+                <div className="space-y-2">
+                  <p className="text-sm font-medium text-foreground">2. Bootstrap an app from template</p>
+                  <CopyBlock command={`lk app create \\\n  --sandbox ${createdName}`} />
+                  <p className="text-xs text-muted-foreground">
+                    Once you&apos;ve set up the sandbox app locally, launch it to begin testing and interacting with the application.
+                  </p>
+                </div>
+              </div>
+              <DialogFooter className="flex items-center justify-between sm:justify-between">
+                <a
+                  href="https://docs.livekit.io/deploy/admin/sandbox/"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-sm text-muted-foreground hover:text-foreground transition-colors"
+                >
+                  Learn more in the docs
+                </a>
+                <Button onClick={() => setDialogOpen(false)}>Done</Button>
+              </DialogFooter>
+            </>
+          ) : (
+            <>
+              <DialogHeader>
+                <DialogTitle>Create video conference</DialogTitle>
+                <DialogDescription>
+                  Rapidly prototype your apps and share them with others, cutting out
+                  the boilerplate.{" "}
+                  <a href="https://docs.livekit.io/deploy/admin/sandbox/" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">Learn more about Sandboxes</a>
+                </DialogDescription>
+              </DialogHeader>
+
+              {createError && (
+                <div className="rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+                  {createError}
+                </div>
+              )}
+
+              <div className="space-y-4 py-2">
+                <div className="space-y-2">
+                  <Label>Hosted URL</Label>
+                  <div className="flex items-center gap-2">
+                    <Input
+                      placeholder="enter-generated-name"
+                      className="flex-1"
+                      value={sandboxName}
+                      onChange={(e) => setSandboxName(e.target.value)}
+                    />
+                    <span className="shrink-0 text-sm text-muted-foreground">
+                      .{process.env.NEXT_PUBLIC_SANDBOX_DOMAIN || "sandbox.example.com"}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              <DialogFooter>
+                <Button
+                  disabled={creating}
+                  onClick={async () => {
+                    setCreateError("");
+                    const name = sandboxName.trim() || `meet-${Math.random().toString(36).slice(2, 8)}`;
+                    setCreating(true);
+                    try {
+                      const res = await fetch("/api/sandbox-apps", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ name, template: "meet" }),
+                      });
+                      const data = await res.json();
+                      if (!res.ok) {
+                        setCreateError(data.error || "Failed to create sandbox");
+                        return;
+                      }
+                      setCreatedName(name);
+                    } catch {
+                      setCreateError("Something went wrong");
+                    } finally {
+                      setCreating(false);
+                    }
+                  }}
+                >
+                  {creating && <Loader2 className="size-4 animate-spin" />}
+                  Done
+                </Button>
+              </DialogFooter>
+            </>
+          )}
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

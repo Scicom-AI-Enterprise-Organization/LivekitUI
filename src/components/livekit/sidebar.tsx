@@ -83,7 +83,6 @@ const navItems: NavItem[] = [
       { label: "Project", href: "/settings/project" },
       { label: "Sandbox", href: "/settings/sandbox" },
       { label: "Team members", href: "/settings/team-members" },
-      { label: "API keys", href: "/settings/api-keys" },
       { label: "Webhooks", href: "/settings/webhooks" },
     ],
   },

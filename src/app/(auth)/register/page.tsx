@@ -41,6 +41,14 @@ function RegisterForm() {
   const [confirmPassword, setConfirmPassword] = useState("");
   const [error, setError] = useState("");
   const [inviteEmail, setInviteEmail] = useState("");
+  const [isFirstUser, setIsFirstUser] = useState(false);
+
+  useEffect(() => {
+    fetch("/api/auth/setup-check")
+      .then((res) => res.json())
+      .then((data) => { if (!data.hasUsers) setIsFirstUser(true); })
+      .catch(() => {});
+  }, []);
 
   useEffect(() => {
     if (inviteToken) {
@@ -178,13 +186,20 @@ function RegisterForm() {
 
         <div className="w-full max-w-[440px]">
           <h1 className="mb-1 text-2xl font-semibold text-foreground">
-            {isInvite ? "Join your team" : "Create your account"}
+            {isFirstUser ? "Welcome to LiveKit" : isInvite ? "Join your team" : "Create your account"}
           </h1>
-          <p className="mb-8 text-sm text-muted-foreground">
-            {isInvite
-              ? "You've been invited to join a LiveKit Cloud project. Set up your profile to get started."
-              : "Get started with LiveKit Cloud in minutes"}
+          <p className="mb-4 text-sm text-muted-foreground">
+            {isFirstUser
+              ? "No users found. Please create the first admin account to get started."
+              : isInvite
+                ? "You've been invited to join a LiveKit Cloud project. Set up your profile to get started."
+                : "Get started with LiveKit Cloud in minutes"}
           </p>
+          {isFirstUser && (
+            <div className="mb-4 rounded-lg border border-primary/30 bg-primary/5 px-3 py-2.5 text-sm text-primary">
+              This account will have full admin privileges.
+            </div>
+          )}
 
           {error && (
             <div className="mb-4 rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2.5 text-sm text-destructive">
@@ -294,8 +309,8 @@ function RegisterForm() {
             </div>
           </div>
 
-          {/* Company — hidden for invite registrations */}
-          {!isInvite && (
+          {/* Company — only shown for first user setup */}
+          {isFirstUser && (
           <div className="mb-4">
             <label className="mb-1.5 block text-sm font-medium text-foreground">
               Company{" "}

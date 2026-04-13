@@ -456,9 +456,9 @@ You are interacting with the user via voice, and must apply the following rules 
 # Conversational Flow`,
   welcomeMessage: "Greet the user and offer your assistance.",
   pipelineMode: "stt-llm-tts",
-  ttsModel: "cartesia",
-  ttsVoice: "savannah",
-  llmModel: "gpt4o",
+  ttsModel: "openai-tts",
+  ttsVoice: "coral",
+  llmModel: "gpt-5.4-mini",
   sttModel: "deepgram",
   sttLanguage: "en",
 };
@@ -559,7 +559,7 @@ function ModelsVoiceTab({
         <p className="text-xs text-muted-foreground">Choose how your agent processes conversations.</p>
         <div className="grid grid-cols-2 gap-2">
           <button
-            onClick={() => onChange({ pipelineMode: "stt-llm-tts" })}
+            onClick={() => onChange({ pipelineMode: "stt-llm-tts", llmModel: "gpt-5.4-mini", ttsVoice: "coral" })}
             className={`rounded-lg border px-4 py-3 text-left text-sm transition-colors ${
               config.pipelineMode === "stt-llm-tts"
                 ? "border-primary bg-primary/5 text-foreground"
@@ -572,7 +572,7 @@ function ModelsVoiceTab({
             </div>
           </button>
           <button
-            onClick={() => onChange({ pipelineMode: "realtime" })}
+            onClick={() => onChange({ pipelineMode: "realtime", llmModel: "gpt-realtime-1.5", ttsVoice: "alloy" })}
             className={`rounded-lg border px-4 py-3 text-left text-sm transition-colors ${
               config.pipelineMode === "realtime"
                 ? "border-primary bg-primary/5 text-foreground"
@@ -596,7 +596,7 @@ function ModelsVoiceTab({
               <div className="text-xs text-muted-foreground">
                 <p>This model requires you to bring your own API key.</p>
                 <p className="mt-1">
-                  Make sure <code className="rounded bg-muted px-1.5 py-0.5 text-xs text-foreground">XAI_API_KEY</code> secret is set in the Advanced tab.
+                  Make sure <code className="rounded bg-muted px-1.5 py-0.5 text-xs text-foreground">OPENAI_API_KEY</code> secret is set in the Advanced tab.
                 </p>
               </div>
             </div>
@@ -607,7 +607,7 @@ function ModelsVoiceTab({
             <label className="text-sm font-medium text-foreground">Realtime model</label>
             <p className="text-xs text-muted-foreground">
               The AI model that handles both conversation and voice generation.{" "}
-              <span className="text-primary cursor-pointer">Learn more</span>
+              <a href="https://docs.livekit.io/agents/models/realtime/" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">Learn more</a>
             </p>
             <div className="grid grid-cols-2 gap-3">
               <div>
@@ -617,9 +617,8 @@ function ModelsVoiceTab({
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="grok-realtime">xAI Grok Voice Agent API</SelectItem>
-                    <SelectItem value="gpt4o-realtime">OpenAI GPT-4o Realtime</SelectItem>
-                    <SelectItem value="gemini-live">Gemini 2.0 Live</SelectItem>
+                    <SelectItem value="gpt-realtime-1.5">OpenAI GPT Realtime 1.5</SelectItem>
+                    <SelectItem value="gpt-realtime-mini">OpenAI GPT Realtime Mini</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
@@ -649,7 +648,7 @@ function ModelsVoiceTab({
             <label className="text-sm font-medium text-foreground">Text-to-speech (TTS)</label>
             <p className="text-xs text-muted-foreground">
               Convert your agent&apos;s text response into speech using the selected voice.{" "}
-              <span className="text-primary cursor-pointer">Learn more</span>
+              <a href="https://docs.livekit.io/agents/models/tts/" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">Learn more</a>
             </p>
             <div className="grid grid-cols-2 gap-3">
               <div>
@@ -659,9 +658,11 @@ function ModelsVoiceTab({
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
+                    <SelectItem value="openai-tts">OpenAI gpt-4o-mini-tts</SelectItem>
+                    <SelectItem value="openai-tts1">OpenAI tts-1</SelectItem>
+                    <SelectItem value="openai-tts1-hd">OpenAI tts-1-hd</SelectItem>
                     <SelectItem value="cartesia">Cartesia Sonic S</SelectItem>
                     <SelectItem value="elevenlabs">ElevenLabs</SelectItem>
-                    <SelectItem value="openai-tts">OpenAI TTS</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
@@ -672,9 +673,19 @@ function ModelsVoiceTab({
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="savannah">savannah - English (United States)</SelectItem>
-                    <SelectItem value="nova">Nova</SelectItem>
+                    <SelectItem value="coral">Coral</SelectItem>
                     <SelectItem value="alloy">Alloy</SelectItem>
+                    <SelectItem value="ash">Ash</SelectItem>
+                    <SelectItem value="ballad">Ballad</SelectItem>
+                    <SelectItem value="echo">Echo</SelectItem>
+                    <SelectItem value="fable">Fable</SelectItem>
+                    <SelectItem value="nova">Nova</SelectItem>
+                    <SelectItem value="onyx">Onyx</SelectItem>
+                    <SelectItem value="sage">Sage</SelectItem>
+                    <SelectItem value="shimmer">Shimmer</SelectItem>
+                    <SelectItem value="verse">Verse</SelectItem>
+                    <SelectItem value="marin">Marin</SelectItem>
+                    <SelectItem value="cedar">Cedar</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
@@ -686,7 +697,7 @@ function ModelsVoiceTab({
             <label className="text-sm font-medium text-foreground">Large Language model (LLM)</label>
             <p className="text-xs text-muted-foreground">
               Your agent&apos;s brain responsible for generating responses and using tools.{" "}
-              <span className="text-primary cursor-pointer">Learn more</span>
+              <a href="https://docs.livekit.io/agents/start/builder/#models" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">Learn more</a>
             </p>
             <div className="grid grid-cols-2 gap-3">
               <div>
@@ -696,9 +707,19 @@ function ModelsVoiceTab({
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="gpt4o">OpenAI GPT-4.5 Chat</SelectItem>
-                    <SelectItem value="claude">Claude Sonnet 4</SelectItem>
-                    <SelectItem value="gemini">Gemini 2.5 Pro</SelectItem>
+                    <SelectItem value="gpt-5.4">OpenAI GPT-5.4</SelectItem>
+                    <SelectItem value="gpt-5.4-mini">OpenAI GPT-5.4 Mini</SelectItem>
+                    <SelectItem value="gpt-5.4-nano">OpenAI GPT-5.4 Nano</SelectItem>
+                    <SelectItem value="gpt-5.3-chat">OpenAI GPT-5.3 Chat</SelectItem>
+                    <SelectItem value="gpt-5.3-codex">OpenAI GPT-5.3 Codex</SelectItem>
+                    <SelectItem value="claude-opus-4-6">Claude Opus 4.6</SelectItem>
+                    <SelectItem value="claude-sonnet-4-6">Claude Sonnet 4.6</SelectItem>
+                    <SelectItem value="claude-haiku-4-5">Claude Haiku 4.5</SelectItem>
+                    <SelectItem value="claude-opus-4-5">Claude Opus 4.5</SelectItem>
+                    <SelectItem value="claude-sonnet-4-5">Claude Sonnet 4.5</SelectItem>
+                    <SelectItem value="claude-opus-4-1">Claude Opus 4.1</SelectItem>
+                    <SelectItem value="claude-sonnet-4">Claude Sonnet 4</SelectItem>
+                    <SelectItem value="claude-opus-4">Claude Opus 4</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
@@ -725,7 +746,7 @@ function ModelsVoiceTab({
         <label className="text-sm font-medium text-foreground">Speech-to-text (STT)</label>
         <p className="text-xs text-muted-foreground">
           Transcribes the user&apos;s speech into text for input to the LLM.{" "}
-          <span className="text-primary cursor-pointer">Learn more</span>
+          <a href="https://docs.livekit.io/agents/start/builder/#models" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">Learn more</a>
         </p>
         <div className="grid grid-cols-2 gap-3">
           <div>
@@ -762,7 +783,7 @@ function ModelsVoiceTab({
         <label className="text-sm font-medium text-foreground">Background audio</label>
         <p className="text-xs text-muted-foreground">
           Select background audio to play during conversations.{" "}
-          <span className="text-primary cursor-pointer">Learn more</span>
+          <a href="https://docs.livekit.io/agents/multimodality/audio/#background-audio" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">Learn more</a>
         </p>
         <Select defaultValue="none">
           <SelectTrigger>
@@ -1185,14 +1206,26 @@ const sttModelMap: Record<string, string> = {
   whisper: "openai/whisper-large-v3",
 };
 const llmModelMap: Record<string, string> = {
-  gpt4o: "openai/gpt-4.1-mini",
-  claude: "anthropic/claude-sonnet-4",
-  gemini: "google/gemini-2.5-pro",
+  "gpt-5.4": "openai/gpt-5.4",
+  "gpt-5.4-mini": "openai/gpt-5.4-mini",
+  "gpt-5.4-nano": "openai/gpt-5.4-nano",
+  "gpt-5.3-chat": "openai/gpt-5.3-chat-latest",
+  "gpt-5.3-codex": "openai/gpt-5.3-codex",
+  "claude-opus-4-6": "anthropic/claude-opus-4-6",
+  "claude-sonnet-4-6": "anthropic/claude-sonnet-4-6",
+  "claude-haiku-4-5": "anthropic/claude-haiku-4-5",
+  "claude-opus-4-5": "anthropic/claude-opus-4-5",
+  "claude-sonnet-4-5": "anthropic/claude-sonnet-4-5",
+  "claude-opus-4-1": "anthropic/claude-opus-4-1",
+  "claude-sonnet-4": "anthropic/claude-sonnet-4-0",
+  "claude-opus-4": "anthropic/claude-opus-4-0",
 };
 const ttsModelMap: Record<string, string> = {
+  "openai-tts": "openai/gpt-4o-mini-tts",
+  "openai-tts1": "openai/tts-1",
+  "openai-tts1-hd": "openai/tts-1-hd",
   cartesia: "cartesia/sonic-3",
   elevenlabs: "elevenlabs/eleven_multilingual_v2",
-  "openai-tts": "openai/tts-1",
 };
 const languageMap: Record<string, string> = {
   en: "en",

@@ -46,6 +46,15 @@ export interface DbPhoneNumber {
   created_at: string;
 }
 
+export interface DbSandboxApp {
+  id: number;
+  name: string;
+  template: string;
+  url: string;
+  status: string;
+  created_at: string;
+}
+
 export interface Database {
   init(): Promise<void>;
   findUserByEmail(email: string): Promise<DbUser | null>;
@@ -72,6 +81,9 @@ export interface Database {
   getAllPhoneNumbers(): Promise<DbPhoneNumber[]>;
   deletePhoneNumber(id: number): Promise<void>;
   findPhoneNumberByNumber(number: string): Promise<DbPhoneNumber | null>;
+  createSandboxApp(name: string, template: string, url: string): Promise<DbSandboxApp>;
+  getAllSandboxApps(): Promise<DbSandboxApp[]>;
+  deleteSandboxApp(id: number): Promise<void>;
 }
 
 // ---------------------------------------------------------------------------
@@ -123,6 +135,14 @@ function createSqliteDb(): Database {
           provider TEXT NOT NULL DEFAULT 'manual',
           provider_sid TEXT,
           capabilities TEXT NOT NULL DEFAULT '{"voice":true,"sms":false}',
+          created_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE TABLE IF NOT EXISTS sandbox_apps (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          name TEXT UNIQUE NOT NULL,
+          template TEXT NOT NULL,
+          url TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'running',
           created_at TEXT DEFAULT (datetime('now'))
         );
       `);
@@ -233,6 +253,21 @@ function createSqliteDb(): Database {
     async findPhoneNumberByNumber(number) {
       return db.prepare("SELECT * FROM phone_numbers WHERE number = ?").get(number) as DbPhoneNumber | null;
     },
+
+    async createSandboxApp(name, template, url) {
+      const result = db.prepare(
+        "INSERT INTO sandbox_apps (name, template, url) VALUES (?, ?, ?)"
+      ).run(name, template, url);
+      return db.prepare("SELECT * FROM sandbox_apps WHERE id = ?").get(result.lastInsertRowid) as DbSandboxApp;
+    },
+
+    async getAllSandboxApps() {
+      return db.prepare("SELECT * FROM sandbox_apps ORDER BY created_at DESC").all() as DbSandboxApp[];
+    },
+
+    async deleteSandboxApp(id) {
+      db.prepare("DELETE FROM sandbox_apps WHERE id = ?").run(id);
+    },
   };
 }
 
@@ -290,6 +325,14 @@ function createPostgresDb(): Database {
           provider TEXT NOT NULL DEFAULT 'manual',
           provider_sid TEXT,
           capabilities TEXT NOT NULL DEFAULT '{"voice":true,"sms":false}',
+          created_at TIMESTAMPTZ DEFAULT NOW()
+        );
+        CREATE TABLE IF NOT EXISTS sandbox_apps (
+          id SERIAL PRIMARY KEY,
+          name TEXT UNIQUE NOT NULL,
+          template TEXT NOT NULL,
+          url TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'running',
           created_at TIMESTAMPTZ DEFAULT NOW()
         );
       `);
@@ -410,6 +453,23 @@ function createPostgresDb(): Database {
     async findPhoneNumberByNumber(number) {
       const { rows } = await pool.query("SELECT * FROM phone_numbers WHERE number = $1", [number]);
       return rows[0] || null;
+    },
+
+    async createSandboxApp(name, template, url) {
+      const { rows } = await pool.query(
+        "INSERT INTO sandbox_apps (name, template, url) VALUES ($1, $2, $3) RETURNING *",
+        [name, template, url]
+      );
+      return rows[0];
+    },
+
+    async getAllSandboxApps() {
+      const { rows } = await pool.query("SELECT * FROM sandbox_apps ORDER BY created_at DESC");
+      return rows;
+    },
+
+    async deleteSandboxApp(id) {
+      await pool.query("DELETE FROM sandbox_apps WHERE id = $1", [id]);
     },
   };
 }
