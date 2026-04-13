@@ -189,3 +189,64 @@
 [data-slot="collapsible-content"][data-state="closed"] {
   animation: collapsible-up 200ms ease-out;
 }
+
+/* LiveKit agent preview — override via CSS custom properties */
+.lk-agent-preview {
+  --lk-border-radius: 9999px;
+  --lk-fg: #e6edf3;
+  --lk-bg: #0d1117;
+  --lk-bg2: #161b22;
+  --lk-bg3: rgba(255, 255, 255, 0.08);
+  --lk-border-color: rgba(255, 255, 255, 0.15);
+  --lk-control-fg: #e6edf3;
+  --lk-control-bg: rgba(255, 255, 255, 0.08);
+  --lk-control-hover-bg: rgba(255, 255, 255, 0.15);
+  --lk-control-active-bg: rgba(255, 255, 255, 0.2);
+  --lk-control-active-hover-bg: rgba(255, 255, 255, 0.25);
+  --lk-danger: #dc2626;
+  --lk-danger2: #ef4444;
+  --lk-danger3: #f87171;
+  --lk-danger-fg: #fff;
+  --lk-box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+}
+.lk-agent-preview .lk-button-group {
+  border-radius: 9999px;
+}
+.lk-agent-preview .lk-button-group > .lk-button {
+  border-top-right-radius: 0 !important;
+  border-bottom-right-radius: 0 !important;
+}
+.lk-agent-preview .lk-button-group-menu > .lk-button {
+  border-top-left-radius: 0 !important;
+  border-bottom-left-radius: 0 !important;
+}
+.lk-agent-preview .lk-device-menu {
+  background: #161b22;
+  border-color: rgba(255, 255, 255, 0.15);
+  border-radius: 0.75rem;
+}
+.lk-agent-preview .lk-device-menu li,
+.lk-agent-preview .lk-device-menu label,
+.lk-agent-preview .lk-device-menu .lk-button {
+  color: #e6edf3 !important;
+  border-radius: 0.5rem !important;
+  background: transparent !important;
+}
+.lk-agent-preview .lk-device-menu li:hover,
+.lk-agent-preview .lk-device-menu li:hover > .lk-button {
+  background: rgba(255, 255, 255, 0.08) !important;
+}
+.lk-agent-preview .lk-device-menu li[data-lk-active="true"],
+.lk-agent-preview .lk-device-menu li[data-lk-active="true"] > .lk-button {
+  background: rgba(255, 255, 255, 0.12) !important;
+  color: var(--lk-danger2, #ef4444) !important;
+}
+.lk-agent-preview .lk-control-bar {
+  background: transparent;
+  border: none;
+}
+.lk-agent-preview *:focus,
+.lk-agent-preview *:focus-visible {
+  outline: none !important;
+  box-shadow: none !important;
+}

@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { cn } from "@/lib/utils";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
@@ -27,7 +27,7 @@ import {
   Plus,
   LogOut,
 } from "lucide-react";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 
 interface NavItem {
   label: string;
@@ -83,12 +83,26 @@ const navItems: NavItem[] = [
       { label: "Project", href: "/settings/project" },
       { label: "Sandbox", href: "/settings/sandbox" },
       { label: "Team members", href: "/settings/team-members" },
+      { label: "API keys", href: "/settings/api-keys" },
+      { label: "Webhooks", href: "/settings/webhooks" },
     ],
   },
 ];
 
 export function LiveKitSidebar() {
   const pathname = usePathname();
+  const router = useRouter();
+  const [user, setUser] = useState<{ firstName: string; lastName: string; email: string; role: string } | null>(null);
+
+  useEffect(() => {
+    fetch("/api/auth/me")
+      .then((res) => res.ok ? res.json() : null)
+      .then((data) => { if (data?.user) setUser(data.user); });
+  }, []);
+
+  const displayName = user ? `${user.firstName} ${user.lastName}` : "...";
+  const initials = user ? user.firstName.charAt(0).toUpperCase() : "?";
+
   const [expandedSections, setExpandedSections] = useState<string[]>(() => {
     const expanded: string[] = [];
     navItems.forEach((item) => {
@@ -218,11 +232,20 @@ export function LiveKitSidebar() {
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2.5">
             <Avatar size="sm">
-              <AvatarFallback className="text-xs">H</AvatarFallback>
+              <AvatarFallback className="text-xs">{initials}</AvatarFallback>
             </Avatar>
-            <span className="text-sm text-sidebar-foreground/70">husein</span>
+            <span className="text-sm text-sidebar-foreground/70 truncate">{displayName}</span>
           </div>
-          <Button variant="ghost" size="icon-xs" className="text-muted-foreground hover:text-destructive">
+          <Button
+            variant="ghost"
+            size="icon-xs"
+            className="text-muted-foreground hover:text-destructive"
+            onClick={async () => {
+              await fetch("/api/auth/logout", { method: "POST" });
+              router.push("/login");
+              router.refresh();
+            }}
+          >
             <LogOut className="size-3.5" />
           </Button>
         </div>

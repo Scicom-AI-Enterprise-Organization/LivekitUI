@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { useRouter } from "next/navigation";
 import Link from "next/link";
 import {
   Lock,
@@ -10,14 +11,46 @@ import {
   Check,
   Github,
   Chrome,
+  Loader2,
 } from "lucide-react";
 
 export default function LoginPage() {
+  const router = useRouter();
   const [focusedField, setFocusedField] = useState<string | null>(null);
   const [showPassword, setShowPassword] = useState(false);
   const [rememberMe, setRememberMe] = useState(false);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError("");
+    setLoading(true);
+
+    try {
+      const res = await fetch("/api/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email, password }),
+      });
+
+      const data = await res.json();
+
+      if (!res.ok) {
+        setError(data.error || "Login failed");
+        return;
+      }
+
+      router.push("/");
+      router.refresh();
+    } catch {
+      setError("Something went wrong. Please try again.");
+    } finally {
+      setLoading(false);
+    }
+  };
 
   return (
     <div className="flex min-h-screen">
@@ -73,6 +106,12 @@ export default function LoginPage() {
             Enter your credentials to access your dashboard
           </p>
 
+          {error && (
+            <div className="mb-4 rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2.5 text-sm text-destructive">
+              {error}
+            </div>
+          )}
+
           {/* Social Login */}
           <div className="mb-6 flex gap-3">
             <button className="flex flex-1 items-center justify-center gap-2 rounded-lg border border-border py-2.5 text-sm font-medium text-foreground transition-colors hover:bg-muted">
@@ -93,6 +132,7 @@ export default function LoginPage() {
             <div className="h-px flex-1 bg-border" />
           </div>
 
+          <form onSubmit={handleSubmit}>
           {/* Email */}
           <div className="mb-4">
             <label className="mb-1.5 block text-sm font-medium text-foreground">
@@ -180,9 +220,15 @@ export default function LoginPage() {
           </label>
 
           {/* Submit */}
-          <button className="w-full rounded-lg bg-primary py-2.5 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90">
+          <button
+            type="submit"
+            disabled={loading}
+            className="flex w-full items-center justify-center gap-2 rounded-lg bg-primary py-2.5 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-50"
+          >
+            {loading && <Loader2 className="size-4 animate-spin" />}
             Sign in
           </button>
+          </form>
 
           <p className="mt-6 text-center text-sm text-muted-foreground">
             Don&apos;t have an account?{" "}

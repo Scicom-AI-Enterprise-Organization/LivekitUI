@@ -1,6 +1,7 @@
 "use client";
 
-import { useState } from "react";
+import { Suspense, useState, useEffect } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import {
   Lock,
@@ -12,9 +13,23 @@ import {
   Building2,
   Github,
   Chrome,
+  Loader2,
 } from "lucide-react";
 
 export default function RegisterPage() {
+  return (
+    <Suspense>
+      <RegisterForm />
+    </Suspense>
+  );
+}
+
+function RegisterForm() {
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const inviteToken = searchParams.get("invite");
+  const isInvite = !!inviteToken;
+
   const [focusedField, setFocusedField] = useState<string | null>(null);
   const [showPassword, setShowPassword] = useState(false);
   const [agreedTerms, setAgreedTerms] = useState(false);
@@ -24,6 +39,64 @@ export default function RegisterPage() {
   const [company, setCompany] = useState("");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
+  const [error, setError] = useState("");
+  const [inviteEmail, setInviteEmail] = useState("");
+
+  useEffect(() => {
+    if (inviteToken) {
+      fetch(`/api/auth/invite-info?token=${inviteToken}`)
+        .then((res) => res.json())
+        .then((data) => { if (data.email) setInviteEmail(data.email); })
+        .catch(() => {});
+    }
+  }, [inviteToken]);
+  const [loading, setLoading] = useState(false);
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError("");
+
+    if (password !== confirmPassword) {
+      setError("Passwords do not match");
+      return;
+    }
+
+    if (!agreedTerms) {
+      setError("You must agree to the Terms of Service");
+      return;
+    }
+
+    setLoading(true);
+
+    try {
+      const payload: Record<string, string> = { password, firstName, lastName, company };
+      if (isInvite) {
+        payload.invite = inviteToken!;
+      } else {
+        payload.email = email;
+      }
+
+      const res = await fetch("/api/auth/register", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+
+      const data = await res.json();
+
+      if (!res.ok) {
+        setError(data.error || "Registration failed");
+        return;
+      }
+
+      router.push("/");
+      router.refresh();
+    } catch {
+      setError("Something went wrong. Please try again.");
+    } finally {
+      setLoading(false);
+    }
+  };
 
   const getPasswordStrength = (pw: string) => {
     let strength = 0;
@@ -105,32 +178,45 @@ export default function RegisterPage() {
 
         <div className="w-full max-w-[440px]">
           <h1 className="mb-1 text-2xl font-semibold text-foreground">
-            Create your account
+            {isInvite ? "Join your team" : "Create your account"}
           </h1>
           <p className="mb-8 text-sm text-muted-foreground">
-            Get started with LiveKit Cloud in minutes
+            {isInvite
+              ? "You've been invited to join a LiveKit Cloud project. Set up your profile to get started."
+              : "Get started with LiveKit Cloud in minutes"}
           </p>
 
-          {/* Social Sign-up */}
-          <div className="mb-6 flex gap-3">
-            <button className="flex flex-1 items-center justify-center gap-2 rounded-lg border border-border py-2.5 text-sm font-medium text-foreground transition-colors hover:bg-muted">
-              <Chrome className="h-4 w-4" />
-              Google
-            </button>
-            <button className="flex flex-1 items-center justify-center gap-2 rounded-lg border border-border py-2.5 text-sm font-medium text-foreground transition-colors hover:bg-muted">
-              <Github className="h-4 w-4" />
-              GitHub
-            </button>
-          </div>
+          {error && (
+            <div className="mb-4 rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2.5 text-sm text-destructive">
+              {error}
+            </div>
+          )}
 
-          <div className="mb-6 flex items-center gap-3">
-            <div className="h-px flex-1 bg-border" />
-            <span className="text-xs text-muted-foreground">
-              or register with email
-            </span>
-            <div className="h-px flex-1 bg-border" />
-          </div>
+          {!isInvite && (
+            <>
+              {/* Social Sign-up */}
+              <div className="mb-6 flex gap-3">
+                <button className="flex flex-1 items-center justify-center gap-2 rounded-lg border border-border py-2.5 text-sm font-medium text-foreground transition-colors hover:bg-muted">
+                  <Chrome className="h-4 w-4" />
+                  Google
+                </button>
+                <button className="flex flex-1 items-center justify-center gap-2 rounded-lg border border-border py-2.5 text-sm font-medium text-foreground transition-colors hover:bg-muted">
+                  <Github className="h-4 w-4" />
+                  GitHub
+                </button>
+              </div>
 
+              <div className="mb-6 flex items-center gap-3">
+                <div className="h-px flex-1 bg-border" />
+                <span className="text-xs text-muted-foreground">
+                  or register with email
+                </span>
+                <div className="h-px flex-1 bg-border" />
+              </div>
+            </>
+          )}
+
+          <form onSubmit={handleSubmit}>
           {/* Name Row */}
           <div className="mb-4 grid grid-cols-2 gap-3">
             <div>
@@ -187,25 +273,29 @@ export default function RegisterPage() {
             </label>
             <div
               className={`flex items-center gap-2 rounded-lg border px-3 py-2.5 text-sm transition-all ${
-                focusedField === "email"
-                  ? "border-primary ring-2 ring-primary/20"
-                  : "border-border"
+                isInvite
+                  ? "border-border bg-muted"
+                  : focusedField === "email"
+                    ? "border-primary ring-2 ring-primary/20"
+                    : "border-border"
               }`}
             >
               <Mail className="h-4 w-4 text-muted-foreground" />
               <input
                 type="email"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                onFocus={() => setFocusedField("email")}
-                onBlur={() => setFocusedField(null)}
+                value={isInvite ? inviteEmail : email}
+                onChange={isInvite ? undefined : (e) => setEmail(e.target.value)}
+                onFocus={isInvite ? undefined : () => setFocusedField("email")}
+                onBlur={isInvite ? undefined : () => setFocusedField(null)}
                 placeholder="name@company.com"
-                className="flex-1 bg-transparent outline-none placeholder:text-muted-foreground"
+                readOnly={isInvite}
+                className={`flex-1 bg-transparent outline-none placeholder:text-muted-foreground ${isInvite ? "cursor-not-allowed text-muted-foreground" : ""}`}
               />
             </div>
           </div>
 
-          {/* Company */}
+          {/* Company — hidden for invite registrations */}
+          {!isInvite && (
           <div className="mb-4">
             <label className="mb-1.5 block text-sm font-medium text-foreground">
               Company{" "}
@@ -232,6 +322,7 @@ export default function RegisterPage() {
               />
             </div>
           </div>
+          )}
 
           {/* Password */}
           <div className="mb-4">
@@ -349,9 +440,15 @@ export default function RegisterPage() {
           </label>
 
           {/* Submit */}
-          <button className="w-full rounded-lg bg-primary py-2.5 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90">
+          <button
+            type="submit"
+            disabled={loading}
+            className="flex w-full items-center justify-center gap-2 rounded-lg bg-primary py-2.5 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-50"
+          >
+            {loading && <Loader2 className="size-4 animate-spin" />}
             Create account
           </button>
+          </form>
 
           <p className="mt-6 text-center text-sm text-muted-foreground">
             Already have an account?{" "}

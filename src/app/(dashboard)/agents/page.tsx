@@ -7,6 +7,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import Link from "next/link";
 import {
   ChevronDown,
   Search,
@@ -46,9 +47,11 @@ export default function AgentsPage() {
               <ExternalLink className="size-3" />
               <span>Launch Console</span>
             </Button>
-            <Button variant="default" size="sm">
-              <Rocket className="size-3" />
-              <span>Deploy new agent</span>
+            <Button variant="default" size="sm" asChild>
+              <Link href="/agents/builder">
+                <Rocket className="size-3" />
+                <span>Deploy new agent</span>
+              </Link>
             </Button>
           </div>
         }

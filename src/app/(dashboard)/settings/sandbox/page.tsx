@@ -1,6 +1,7 @@
 "use client";
 
 import { TopBar } from "@/components/livekit/top-bar";
+import Link from "next/link";
 import {
   Download,
   Info,
@@ -18,12 +19,14 @@ const templates = [
     description:
       "A starter app for Next.js, featuring a flexible voice AI frontend",
     icon: AudioLines,
+    href: "/settings/sandbox/agent-starter-react",
   },
   {
     name: "Video conference",
     description:
       "An open source video conferencing app built on LiveKit Components, LiveKit Cloud, and...",
     icon: Video,
+    href: "/settings/sandbox/meet",
   },
 ];
 
@@ -44,8 +47,8 @@ export default function SandboxPage() {
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             {templates.map((t) => (
+              <Link key={t.name} href={t.href}>
               <Card
-                key={t.name}
                 className="group relative hover:border-primary/40 transition-colors cursor-pointer"
               >
                 <CardContent className="p-5">
@@ -67,6 +70,7 @@ export default function SandboxPage() {
                   </Button>
                 </CardContent>
               </Card>
+              </Link>
             ))}
           </div>
         </div>
