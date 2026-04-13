@@ -55,6 +55,13 @@ export interface DbSandboxApp {
   created_at: string;
 }
 
+export interface DbAgentSnapshot {
+  id: number;
+  sessions: number;
+  agents: number;
+  created_at: string;
+}
+
 export interface Database {
   init(): Promise<void>;
   findUserByEmail(email: string): Promise<DbUser | null>;
@@ -84,6 +91,8 @@ export interface Database {
   createSandboxApp(name: string, template: string, url: string): Promise<DbSandboxApp>;
   getAllSandboxApps(): Promise<DbSandboxApp[]>;
   deleteSandboxApp(id: number): Promise<void>;
+  addAgentSnapshot(sessions: number, agents: number): Promise<void>;
+  getAgentSnapshots(hours: number): Promise<DbAgentSnapshot[]>;
 }
 
 // ---------------------------------------------------------------------------
@@ -143,6 +152,12 @@ function createSqliteDb(): Database {
           template TEXT NOT NULL,
           url TEXT NOT NULL,
           status TEXT NOT NULL DEFAULT 'running',
+          created_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE TABLE IF NOT EXISTS agent_snapshots (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          sessions INTEGER NOT NULL DEFAULT 0,
+          agents INTEGER NOT NULL DEFAULT 0,
           created_at TEXT DEFAULT (datetime('now'))
         );
       `);
@@ -268,6 +283,18 @@ function createSqliteDb(): Database {
     async deleteSandboxApp(id) {
       db.prepare("DELETE FROM sandbox_apps WHERE id = ?").run(id);
     },
+
+    async addAgentSnapshot(sessions, agents) {
+      db.prepare("INSERT INTO agent_snapshots (sessions, agents) VALUES (?, ?)").run(sessions, agents);
+      // Clean up snapshots older than 7 days
+      db.prepare("DELETE FROM agent_snapshots WHERE created_at < datetime('now', '-7 days')").run();
+    },
+
+    async getAgentSnapshots(hours) {
+      return db.prepare(
+        "SELECT * FROM agent_snapshots WHERE created_at >= datetime('now', '-' || ? || ' hours') ORDER BY created_at ASC"
+      ).all(hours) as DbAgentSnapshot[];
+    },
   };
 }
 
@@ -333,6 +360,12 @@ function createPostgresDb(): Database {
           template TEXT NOT NULL,
           url TEXT NOT NULL,
           status TEXT NOT NULL DEFAULT 'running',
+          created_at TIMESTAMPTZ DEFAULT NOW()
+        );
+        CREATE TABLE IF NOT EXISTS agent_snapshots (
+          id SERIAL PRIMARY KEY,
+          sessions INTEGER NOT NULL DEFAULT 0,
+          agents INTEGER NOT NULL DEFAULT 0,
           created_at TIMESTAMPTZ DEFAULT NOW()
         );
       `);
@@ -470,6 +503,19 @@ function createPostgresDb(): Database {
 
     async deleteSandboxApp(id) {
       await pool.query("DELETE FROM sandbox_apps WHERE id = $1", [id]);
+    },
+
+    async addAgentSnapshot(sessions, agents) {
+      await pool.query("INSERT INTO agent_snapshots (sessions, agents) VALUES ($1, $2)", [sessions, agents]);
+      await pool.query("DELETE FROM agent_snapshots WHERE created_at < NOW() - INTERVAL '7 days'");
+    },
+
+    async getAgentSnapshots(hours) {
+      const { rows } = await pool.query(
+        "SELECT * FROM agent_snapshots WHERE created_at >= NOW() - make_interval(hours => $1) ORDER BY created_at ASC",
+        [hours]
+      );
+      return rows;
     },
   };
 }

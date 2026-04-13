@@ -25,7 +25,7 @@ export function LineChart({
 }: LineChartProps) {
   if (data.length === 0) return null;
 
-  const padding = { top: 10, right: 10, bottom: 30, left: 50 };
+  const padding = { top: 10, right: 10, bottom: 20, left: 12 };
   const width = 600;
   const chartWidth = width - padding.left - padding.right;
   const chartHeight = height - padding.top - padding.bottom;
@@ -50,7 +50,7 @@ export function LineChart({
 
   return (
     <div className={cn("w-full", className)}>
-      <svg viewBox={`0 0 ${width} ${height}`} className="w-full" preserveAspectRatio="none">
+      <svg viewBox={`0 0 ${width} ${height}`} className="w-full" preserveAspectRatio="xMidYMid meet">
         {yTickValues.map((tick, i) => {
           const y = padding.top + chartHeight - ((tick - min) / range) * chartHeight;
           return (
@@ -64,11 +64,11 @@ export function LineChart({
                 strokeWidth="0.5"
               />
               <text
-                x={padding.left - 8}
+                x={5}
                 y={y + 3}
                 textAnchor="end"
                 className="fill-muted-foreground"
-                fontSize="8"
+                fontSize="5"
                 fontFamily="var(--font-sans)"
               >
                 {tick >= 1000000 ? `${(tick / 1000000).toFixed(0)}M` : tick >= 1000 ? `${(tick / 1000).toFixed(0)}k` : tick.toFixed(0)}
@@ -105,7 +105,7 @@ export function LineChart({
                 y={height - 5}
                 textAnchor="middle"
                 className="fill-muted-foreground"
-                fontSize="8"
+                fontSize="5"
                 fontFamily="var(--font-sans)"
               >
                 {label}
@@ -127,7 +127,7 @@ interface MultiLineChartProps {
 export function MultiLineChart({ series, labels, height = 120, className }: MultiLineChartProps) {
   if (series.length === 0) return null;
 
-  const padding = { top: 10, right: 10, bottom: 30, left: 50 };
+  const padding = { top: 10, right: 10, bottom: 20, left: 12 };
   const width = 600;
   const chartWidth = width - padding.left - padding.right;
   const chartHeight = height - padding.top - padding.bottom;
@@ -151,7 +151,7 @@ export function MultiLineChart({ series, labels, height = 120, className }: Mult
         ))}
       </div>
 
-      <svg viewBox={`0 0 ${width} ${height}`} className="w-full" preserveAspectRatio="none">
+      <svg viewBox={`0 0 ${width} ${height}`} className="w-full" preserveAspectRatio="xMidYMid meet">
         {yTickValues.map((tick, i) => {
           const y = padding.top + chartHeight - ((tick - min) / range) * chartHeight;
           return (
@@ -165,11 +165,11 @@ export function MultiLineChart({ series, labels, height = 120, className }: Mult
                 strokeWidth="0.5"
               />
               <text
-                x={padding.left - 8}
+                x={5}
                 y={y + 3}
                 textAnchor="end"
                 className="fill-muted-foreground"
-                fontSize="8"
+                fontSize="5"
                 fontFamily="var(--font-sans)"
               >
                 {tick.toFixed(0)}
@@ -206,7 +206,7 @@ export function MultiLineChart({ series, labels, height = 120, className }: Mult
                 y={height - 5}
                 textAnchor="middle"
                 className="fill-muted-foreground"
-                fontSize="8"
+                fontSize="5"
                 fontFamily="var(--font-sans)"
               >
                 {label}

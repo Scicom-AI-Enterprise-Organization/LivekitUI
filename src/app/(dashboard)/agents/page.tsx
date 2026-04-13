@@ -1,38 +1,83 @@
 "use client";
 
+import { useState, useEffect, useCallback } from "react";
 import { TopBar } from "@/components/livekit/top-bar";
 import { StatCard } from "@/components/livekit/stat-card";
 import { MultiLineChart } from "@/components/livekit/line-chart";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { cn } from "@/lib/utils";
 import Link from "next/link";
 import {
-  ChevronDown,
   Search,
-  SlidersHorizontal,
-  MoreHorizontal,
   Rocket,
+  Loader2,
+  RefreshCw,
+  Bot,
 } from "lucide-react";
 
-const chartLabels = ["Apr 6", "Apr 7", "Apr 8", "Apr 9", "Apr 10", "Apr 11", "Apr 12"];
+interface AgentWorker {
+  agentName: string;
+  concurrentSessions: number;
+  rooms: string[];
+}
 
-const chartSeries = [
-  {
-    data: [0, 0, 1, 0, 0, 0, 0],
-    color: "var(--primary)",
-    label: "Total number of active sessions",
-  },
-  {
-    data: [0, 0, 1, 0, 0, 0, 0],
-    color: "var(--secondary)",
-    label: "Agents dispatch'd service",
-    dashed: true,
-  },
-];
+interface AgentSession {
+  agentName: string;
+  roomName: string;
+  roomSid: string;
+  participantIdentity: string;
+  participantSid: string;
+  joinedAt: number;
+}
+
+interface AgentStats {
+  totalAgents: number;
+  totalSessions: number;
+}
 
 export default function AgentsPage() {
+  const [agents, setAgents] = useState<AgentWorker[]>([]);
+  const [sessions, setSessions] = useState<AgentSession[]>([]);
+  const [stats, setStats] = useState<AgentStats>({ totalAgents: 0, totalSessions: 0 });
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [search, setSearch] = useState("");
+  const [history, setHistory] = useState<{ time: string; sessions: number; agents: number }[]>([]);
+
+  const fetchAgents = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await fetch("/api/agents");
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Failed to fetch");
+      setAgents(data.agents || []);
+      setSessions(data.sessions || []);
+      setStats(data.stats || { totalAgents: 0, totalSessions: 0 });
+
+      // Use persisted history from the server
+      const h = (data.history || []).map((entry: { time: string; sessions: number; agents: number }) => ({
+        time: new Date(entry.time).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" }),
+        sessions: entry.sessions,
+        agents: entry.agents,
+      }));
+      setHistory(h);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchAgents();
+  }, [fetchAgents]);
+
+  const filtered = agents.filter((a) =>
+    search ? a.agentName.toLowerCase().includes(search.toLowerCase()) : true
+  );
+
   return (
     <div className="flex flex-col h-full">
       <TopBar
@@ -41,105 +86,194 @@ export default function AgentsPage() {
         showRefresh
         showTimeRange
         actions={
-          <Button variant="default" size="sm" asChild>
-            <Link href="/agents/builder">
-              <Rocket className="size-3" />
-              <span>Deploy new agent</span>
-            </Link>
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button variant="outline" size="sm" onClick={fetchAgents} disabled={loading} className="gap-1.5">
+              {loading ? <Loader2 className="size-3 animate-spin" /> : <RefreshCw className="size-3" />}
+              Refresh
+            </Button>
+            <Button variant="default" size="sm" asChild>
+              <Link href="/agents/builder">
+                <Rocket className="size-3" />
+                <span>Deploy new agent</span>
+              </Link>
+            </Button>
+          </div>
         }
       />
 
-      {/* Stats Row */}
       <div className="p-6 space-y-6">
+        {/* Stats Row */}
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          <StatCard label="Agents Deployed" value={1} />
-          <StatCard label="Concurrent Agent Sessions" value={0} />
-          <StatCard label="Agent Session Minutes This Billing Period" value="0 (000)" unit="min" />
+          <StatCard label="Agents Deployed" value={stats.totalAgents} />
+          <StatCard label="Concurrent Agent Sessions" value={stats.totalSessions} />
+          <StatCard label="Active Rooms with Agents" value={new Set(sessions.map(s => s.roomName)).size} />
         </div>
 
-        {/* Overview Section */}
+        {/* Overview Chart */}
         <div className="space-y-4">
-          <div className="flex items-center justify-between">
-            <h2 className="text-sm font-semibold text-foreground">Overview</h2>
-            <Button variant="outline" size="sm">
-              <span>Past 7 days</span>
-              <ChevronDown className="size-3" />
-            </Button>
-          </div>
-
+          <h2 className="text-sm font-semibold text-foreground">Overview</h2>
           <Card className="py-0">
             <CardContent className="p-5">
               <h3 className="text-sm text-muted-foreground mb-4">
                 Agent Sessions Served
               </h3>
-              <MultiLineChart
-                series={chartSeries}
-                labels={chartLabels}
-                height={180}
-              />
+              {history.length > 1 ? (
+                <MultiLineChart
+                  series={[
+                    {
+                      data: history.map((h) => h.sessions),
+                      color: "var(--primary)",
+                      label: "Active sessions",
+                    },
+                    {
+                      data: history.map((h) => h.agents),
+                      color: "var(--secondary)",
+                      label: "Agents connected",
+                      dashed: true,
+                    },
+                  ]}
+                  labels={history.map((h) => h.time)}
+                  height={180}
+                />
+              ) : (
+                <div className="flex items-center justify-center h-[180px] text-sm text-muted-foreground">
+                  Chart will populate as data is collected. Hit Refresh to add data points.
+                </div>
+              )}
             </CardContent>
           </Card>
         </div>
+
+        {/* Error */}
+        {error && (
+          <div className="rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
+            {error}
+          </div>
+        )}
 
         {/* Your Agents Section */}
         <div className="space-y-4">
           <div className="flex items-center justify-between">
             <h2 className="text-sm font-semibold text-foreground">Your agents</h2>
             <div className="flex items-center gap-2">
-              <Button variant="outline" size="icon-xs">
-                <Search className="size-3.5" />
-              </Button>
-              <Button variant="outline" size="icon-xs">
-                <SlidersHorizontal className="size-3.5" />
-              </Button>
+              <div className="relative">
+                <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 size-3.5 text-muted-foreground" />
+                <input
+                  type="text"
+                  placeholder="Search agents..."
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  className="h-8 w-48 rounded-md border bg-transparent pl-8 pr-3 text-sm outline-none focus:border-primary"
+                />
+              </div>
             </div>
           </div>
 
-          {/* Agent Card */}
-          <Card className="py-0">
-            <CardContent className="p-4">
-              <div className="flex items-center justify-between">
-                <div className="flex flex-col gap-1.5">
-                  <div className="flex items-center gap-2">
-                    <span className="text-sm font-medium text-foreground">
-                      CA_JTNVABxhUliveE
-                    </span>
-                  </div>
-                  <span className="text-xs text-muted-foreground">
-                    ak_5iND5qNxce
-                  </span>
-                </div>
-
-                <div className="flex items-center gap-3">
-                  {/* Concurrent sessions */}
-                  <div className="flex flex-col items-end gap-0.5">
-                    <span className="text-xs text-muted-foreground">
-                      Concurrent sessions
-                    </span>
-                    <span className="text-sm font-semibold text-foreground">0</span>
-                  </div>
-
-                  {/* Dispatch config */}
-                  <Badge variant="outline" className="text-secondary">
-                    pipeline
-                  </Badge>
-
-                  {/* Status badge */}
-                  <Badge variant="default" className="bg-emerald-500/10 text-emerald-400 gap-1.5">
-                    <span className="size-1.5 rounded-full bg-emerald-400" />
-                    Deployed
-                  </Badge>
-
-                  {/* More button */}
-                  <Button variant="ghost" size="icon-xs">
-                    <MoreHorizontal className="size-4" />
+          {loading ? (
+            <div className="flex items-center justify-center py-12">
+              <Loader2 className="size-5 animate-spin text-muted-foreground" />
+            </div>
+          ) : filtered.length === 0 ? (
+            <Card className="py-0">
+              <CardContent className="flex flex-col items-center justify-center py-12 gap-3">
+                <Bot className="size-8 text-muted-foreground" />
+                <p className="text-sm text-muted-foreground">
+                  {agents.length === 0
+                    ? "No agents connected. Start an agent to see it here."
+                    : "No agents match your search."}
+                </p>
+                {agents.length === 0 && (
+                  <Button variant="outline" size="sm" asChild>
+                    <Link href="/agents/builder">Deploy an agent</Link>
                   </Button>
-                </div>
-              </div>
-            </CardContent>
-          </Card>
+                )}
+              </CardContent>
+            </Card>
+          ) : (
+            <div className="space-y-2">
+              {filtered.map((agent) => (
+                <Card key={agent.agentName} className="py-0">
+                  <CardContent className="p-4">
+                    <div className="flex items-center justify-between">
+                      <div className="flex flex-col gap-1">
+                        <span className="text-sm font-medium text-foreground">
+                          {agent.agentName}
+                        </span>
+                        {agent.rooms.length > 0 && (
+                          <span className="text-xs text-muted-foreground">
+                            in: {agent.rooms.join(", ")}
+                          </span>
+                        )}
+                      </div>
+
+                      <div className="flex items-center gap-3">
+                        <div className="flex flex-col items-end gap-0.5">
+                          <span className="text-xs text-muted-foreground">
+                            Concurrent sessions
+                          </span>
+                          <span className="text-sm font-semibold text-foreground">
+                            {agent.concurrentSessions}
+                          </span>
+                        </div>
+
+                        <Badge
+                          variant="default"
+                          className={
+                            agent.concurrentSessions > 0
+                              ? "bg-emerald-500/10 text-emerald-500 gap-1.5"
+                              : "bg-muted text-muted-foreground gap-1.5"
+                          }
+                        >
+                          <span
+                            className={`size-1.5 rounded-full ${
+                              agent.concurrentSessions > 0 ? "bg-emerald-500 animate-pulse" : "bg-muted-foreground"
+                            }`}
+                          />
+                          {agent.concurrentSessions > 0 ? "Active" : "Idle"}
+                        </Badge>
+                      </div>
+                    </div>
+                  </CardContent>
+                </Card>
+              ))}
+            </div>
+          )}
         </div>
+
+        {/* Active Sessions */}
+        {sessions.length > 0 && (
+          <div className="space-y-4">
+            <h2 className="text-sm font-semibold text-foreground">Active sessions</h2>
+            <Card className="py-0 overflow-hidden">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b text-left text-muted-foreground">
+                    <th className="px-4 py-2.5 font-medium">Agent</th>
+                    <th className="px-4 py-2.5 font-medium">Room</th>
+                    <th className="px-4 py-2.5 font-medium">Participant ID</th>
+                    <th className="px-4 py-2.5 font-medium">Joined At</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {sessions.map((s) => (
+                    <tr key={s.participantSid} className="border-b last:border-0">
+                      <td className="px-4 py-2.5 font-medium">{s.agentName}</td>
+                      <td className="px-4 py-2.5 text-muted-foreground">{s.roomName}</td>
+                      <td className="px-4 py-2.5 text-xs text-muted-foreground">
+                        {s.participantSid.slice(0, 20)}...
+                      </td>
+                      <td className="px-4 py-2.5 text-muted-foreground">
+                        {s.joinedAt
+                          ? new Date(s.joinedAt * 1000).toLocaleString()
+                          : "—"}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </Card>
+          </div>
+        )}
       </div>
     </div>
   );

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSession } from "@/lib/auth";
 import { ensureDb } from "@/lib/db";
+import { deploySandbox, stopSandbox, isRunning } from "@/lib/sandbox";
 
 export async function GET() {
   const session = await getSession();
@@ -11,16 +12,16 @@ export async function GET() {
   const db = await ensureDb();
   const apps = await db.getAllSandboxApps();
 
-  return NextResponse.json({
-    apps: apps.map((a) => ({
-      id: a.id,
-      name: a.name,
-      template: a.template,
-      url: a.url,
-      status: a.status,
-      createdAt: a.created_at,
-    })),
-  });
+  const result = apps.map((a) => ({
+    id: a.id,
+    name: a.name,
+    template: a.template,
+    url: a.url,
+    status: isRunning(a.name) ? "running" : "stopped",
+    createdAt: a.created_at,
+  }));
+
+  return NextResponse.json({ apps: result });
 }
 
 export async function POST(request: NextRequest) {
@@ -39,25 +40,34 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Name and template are required" }, { status: 400 });
   }
 
-  const domain = process.env.NEXT_PUBLIC_SANDBOX_DOMAIN || "sandbox.example.com";
-  const url = `https://${name}.${domain}`;
-
-  const db = await ensureDb();
-
   try {
+    const { url, port } = await deploySandbox(
+      name,
+      template,
+      process.env.LIVEKIT_API_KEY || "",
+      process.env.LIVEKIT_API_SECRET || ""
+    );
+
+    const db = await ensureDb();
     const app = await db.createSandboxApp(name, template, url);
+
     return NextResponse.json({
       app: {
         id: app.id,
         name: app.name,
         template: app.template,
         url: app.url,
-        status: app.status,
+        status: "running",
         createdAt: app.created_at,
+        port,
       },
     });
-  } catch {
-    return NextResponse.json({ error: "An app with this name already exists" }, { status: 409 });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (message.includes("already exists")) {
+      return NextResponse.json({ error: "An app with this name already exists" }, { status: 409 });
+    }
+    return NextResponse.json({ error: message }, { status: 400 });
   }
 }
 
@@ -71,10 +81,12 @@ export async function DELETE(request: NextRequest) {
     return NextResponse.json({ error: "Insufficient permissions" }, { status: 403 });
   }
 
-  const { id } = await request.json();
+  const { id, name } = await request.json();
   if (!id) {
     return NextResponse.json({ error: "ID is required" }, { status: 400 });
   }
+
+  stopSandbox(name);
 
   const db = await ensureDb();
   await db.deleteSandboxApp(id);

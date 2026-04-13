@@ -1,6 +1,7 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
+import { useRouter } from "next/navigation";
 import { TopBar } from "@/components/livekit/top-bar";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -55,12 +56,21 @@ function CopyBlock({ command }: { command: string }) {
 }
 
 export default function MeetTemplatePage() {
+  const router = useRouter();
   const [dialogOpen, setDialogOpen] = useState(false);
   const [bootstrapOpen, setBootstrapOpen] = useState(false);
   const [sandboxName, setSandboxName] = useState("");
   const [creating, setCreating] = useState(false);
   const [createdName, setCreatedName] = useState("");
   const [createError, setCreateError] = useState("");
+  const [isLocal, setIsLocal] = useState(true);
+  const [domain, setDomain] = useState("");
+
+  useEffect(() => {
+    fetch("/api/sandbox-config")
+      .then((r) => r.json())
+      .then((d) => { setIsLocal(d.isLocal); setDomain(d.domain); });
+  }, []);
 
   return (
     <div className="flex h-full flex-col">
@@ -412,7 +422,7 @@ export default function MeetTemplatePage() {
 
               <div className="space-y-4 py-2">
                 <div className="space-y-2">
-                  <Label>Hosted URL</Label>
+                  <Label>Sandbox name</Label>
                   <div className="flex items-center gap-2">
                     <Input
                       placeholder="enter-generated-name"
@@ -420,10 +430,17 @@ export default function MeetTemplatePage() {
                       value={sandboxName}
                       onChange={(e) => setSandboxName(e.target.value)}
                     />
-                    <span className="shrink-0 text-sm text-muted-foreground">
-                      .{process.env.NEXT_PUBLIC_SANDBOX_DOMAIN || "sandbox.example.com"}
-                    </span>
+                    {!isLocal && domain && (
+                      <span className="shrink-0 text-sm text-muted-foreground">
+                        .{domain}
+                      </span>
+                    )}
                   </div>
+                  <p className="text-xs text-muted-foreground">
+                    {isLocal
+                      ? "A random port will be assigned automatically on localhost."
+                      : "If you do not provide a name we will generate one for you."}
+                  </p>
                 </div>
               </div>
 
@@ -445,7 +462,8 @@ export default function MeetTemplatePage() {
                         setCreateError(data.error || "Failed to create sandbox");
                         return;
                       }
-                      setCreatedName(name);
+                      setDialogOpen(false);
+                      router.push("/settings/sandbox");
                     } catch {
                       setCreateError("Something went wrong");
                     } finally {

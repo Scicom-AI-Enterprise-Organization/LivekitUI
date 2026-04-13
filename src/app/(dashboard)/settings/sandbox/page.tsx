@@ -16,6 +16,9 @@ import {
   ChevronRight,
   Copy,
   Check,
+  ScrollText,
+  RefreshCw,
+  X,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -32,6 +35,14 @@ import {
   DropdownMenuContent,
   DropdownMenuItem,
 } from "@/components/ui/dropdown-menu";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+  DialogFooter,
+} from "@/components/ui/dialog";
 
 const templates = [
   {
@@ -80,9 +91,85 @@ function CopyCommand({ command }: { command: string }) {
   );
 }
 
+function LogViewer({ name, onClose }: { name: string; onClose: () => void }) {
+  const [logs, setLogs] = useState("");
+  const [fetching, setFetching] = useState(false);
+  const [autoRefresh, setAutoRefresh] = useState(true);
+
+  const fetchLogs = () => {
+    setFetching(true);
+    fetch(`/api/sandbox-apps/logs?name=${encodeURIComponent(name)}&tail=300`)
+      .then((res) => res.json())
+      .then((data) => setLogs(data.logs || "No logs yet."))
+      .finally(() => setFetching(false));
+  };
+
+  useEffect(() => {
+    fetchLogs();
+    if (!autoRefresh) return;
+    const interval = setInterval(fetchLogs, 3000);
+    return () => clearInterval(interval);
+  }, [name, autoRefresh]);
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center">
+      <div className="absolute inset-0 bg-black/50" onClick={onClose} />
+      <div className="relative flex h-[80vh] w-[80vw] max-w-4xl flex-col rounded-lg border border-border bg-background shadow-xl">
+        {/* Header */}
+        <div className="flex items-center justify-between border-b px-4 py-3">
+          <div className="flex items-center gap-3">
+            <ScrollText className="size-4 text-muted-foreground" />
+            <h3 className="text-sm font-semibold text-foreground">
+              Logs: {name}
+            </h3>
+            {autoRefresh && (
+              <Badge variant="outline" className="text-xs gap-1">
+                <span className="size-1.5 rounded-full bg-green-500 animate-pulse" />
+                Live
+              </Badge>
+            )}
+          </div>
+          <div className="flex items-center gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-7 text-xs gap-1"
+              onClick={() => setAutoRefresh(!autoRefresh)}
+            >
+              {autoRefresh ? "Pause" : "Resume"}
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-7 text-xs gap-1"
+              onClick={fetchLogs}
+              disabled={fetching}
+            >
+              <RefreshCw className={`size-3 ${fetching ? "animate-spin" : ""}`} />
+              Refresh
+            </Button>
+            <button onClick={onClose} className="text-muted-foreground hover:text-foreground">
+              <X className="size-4" />
+            </button>
+          </div>
+        </div>
+        {/* Log content */}
+        <div className="flex-1 overflow-auto bg-[#0d1117] p-4">
+          <pre className="text-xs font-mono leading-5 text-[#e6edf3] whitespace-pre-wrap break-all">
+            {logs}
+          </pre>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function SandboxPage() {
   const [apps, setApps] = useState<SandboxApp[]>([]);
   const [loading, setLoading] = useState(true);
+  const [logsApp, setLogsApp] = useState<string | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<{ id: number; name: string } | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
   const fetchApps = () => {
     fetch("/api/sandbox-apps")
@@ -95,13 +182,16 @@ export default function SandboxPage() {
     fetchApps();
   }, []);
 
-  const handleDelete = async (id: number) => {
-    if (!confirm("Delete this sandbox app?")) return;
+  const confirmDelete = async () => {
+    if (!deleteTarget) return;
+    setDeleting(true);
     await fetch("/api/sandbox-apps", {
       method: "DELETE",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ id }),
+      body: JSON.stringify({ id: deleteTarget.id, name: deleteTarget.name }),
     });
+    setDeleteTarget(null);
+    setDeleting(false);
     fetchApps();
   };
 
@@ -219,6 +309,15 @@ export default function SandboxPage() {
                           Launch
                         </a>
                       </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="h-7 text-xs gap-1"
+                        onClick={() => setLogsApp(app.name)}
+                      >
+                        <ScrollText className="size-3" />
+                        Logs
+                      </Button>
                       <Button variant="outline" size="sm" className="h-7 text-xs" asChild>
                         <a
                           href={`https://github.com/livekit-examples/${app.template}`}
@@ -238,7 +337,7 @@ export default function SandboxPage() {
                         <DropdownMenuContent align="end">
                           <DropdownMenuItem
                             className="text-destructive focus:text-destructive"
-                            onClick={() => handleDelete(app.id)}
+                            onClick={() => setDeleteTarget({ id: app.id, name: app.name })}
                           >
                             <Trash2 className="size-3.5" />
                             Delete
@@ -253,6 +352,30 @@ export default function SandboxPage() {
           )}
         </div>
       </div>
+
+      {/* Log viewer overlay */}
+      {logsApp && <LogViewer name={logsApp} onClose={() => setLogsApp(null)} />}
+
+      {/* Delete confirmation dialog */}
+      <Dialog open={!!deleteTarget} onOpenChange={(open) => { if (!open) setDeleteTarget(null); }}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle>Delete sandbox app</DialogTitle>
+            <DialogDescription>
+              Are you sure you want to delete <span className="font-medium text-foreground">{deleteTarget?.name}</span>? This will stop the running process and remove it from the list.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter className="gap-3">
+            <Button variant="outline" size="sm" onClick={() => setDeleteTarget(null)} disabled={deleting}>
+              Cancel
+            </Button>
+            <Button variant="destructive" size="sm" onClick={confirmDelete} disabled={deleting}>
+              {deleting ? <Loader2 className="size-3 animate-spin mr-1" /> : <Trash2 className="size-3 mr-1" />}
+              Delete
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
