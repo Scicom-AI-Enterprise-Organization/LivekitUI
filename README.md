@@ -9,8 +9,8 @@ Self-hosted dashboard for managing [LiveKit](https://livekit.io) infrastructure.
 - **Agents** — monitor connected agents, active sessions, historical chart, and deploy new agents via the agent builder
 - **Telephony** — calls, dispatch rules, phone numbers (manual + Twilio/Vonage/Telnyx import), SIP trunks
 - **Egresses / Ingresses** — manage media export and import streams
-- **Sandbox** — create and manage sandbox apps from templates (Web Voice Agent, Video Conference), auto-assigned ports on localhost
-- **Settings** — project config, team members, webhooks
+- **Sandbox** — create and manage sandbox apps from templates, proxied through the dashboard at `/sandbox/{name}`
+- **Settings** — project config, team members, API keys, webhooks with live event log
 - **Auth** — login, register, invite-based onboarding with role assignment
 - **RBAC** — Admin (full access), Member (view-only)
 
@@ -61,13 +61,13 @@ Run each in a separate terminal:
 ```
 Browser (3002) ──> LiveKit Server (7880) ──> Python Agent
                          |
-Dashboard (3000) ────────┘ (monitors rooms, agents, sessions)
+Dashboard (3000) ────────┘ (monitors rooms, agents, sessions, webhooks)
 ```
 
 1. The **LiveKit server** manages rooms and media routing
 2. The **Python agent** registers with the server and waits for jobs
 3. The **React frontend** creates a room — the server auto-dispatches an available agent
-4. The **Dashboard** monitors everything via the LiveKit server API
+4. The **Dashboard** monitors everything via the LiveKit server API and receives webhook events
 
 ### Agent Dispatch
 
@@ -77,6 +77,52 @@ Agents can register in two modes:
 - **Explicit dispatch** — `@server.rtc_session(agent_name="my-bot")` — only dispatched when requested by name
 
 Sandbox apps use auto-dispatch. For production, use explicit dispatch with [dispatch rules](https://docs.livekit.io/agents/server/agent-dispatch/).
+
+## Webhooks
+
+The dashboard includes a built-in webhook receiver with a live event log. To enable:
+
+1. Add to your `livekit.yaml`:
+
+```yaml
+webhook:
+  urls:
+    - http://localhost:3000/api/webhooks/livekit
+  api_key: your_api_key
+```
+
+2. Restart the LiveKit server
+
+3. Go to **Settings > Webhooks** to see incoming events (room_started, participant_joined, etc.) in real-time
+
+Events are color-coded, stored in the database, and you can click any event to view the full JSON payload.
+
+## Sandbox
+
+Sandbox apps let you quickly spin up frontend templates for testing agents. Created from **Settings > Sandbox**.
+
+- Apps are proxied through the dashboard at `http://localhost:3000/sandbox/{name}`
+- No direct port access needed — the dashboard handles routing
+- Each sandbox gets a random available port internally
+- Supports the Web Voice Agent and Video Conference templates
+
+To configure a custom domain for production:
+
+```env
+NEXT_PUBLIC_SANDBOX_DOMAIN=https://your-domain.com
+```
+
+## API Keys
+
+The **Settings > API Keys** page shows your LiveKit server credentials (from `.env`). Use these to connect agents and sandbox apps:
+
+```env
+LIVEKIT_URL=ws://localhost:7880
+LIVEKIT_API_KEY=your_key
+LIVEKIT_API_SECRET=your_secret
+```
+
+The API secret is hidden by default and can be revealed by admins only.
 
 ## Setting Up Examples
 
@@ -131,10 +177,9 @@ Phone numbers can always be added manually. To import from a provider, add crede
 |---|---|---|
 | View all pages | Yes | Yes |
 | Manage agents, telephony, egress/ingress | Yes | No |
-| Manage settings, webhooks, team members | Yes | No |
+| Manage settings, API keys, webhooks | Yes | No |
 | Invite and remove members | Yes | No |
 | Create and delete sandbox apps | Yes | No |
-| Delete project (danger zone) | Yes | No |
 
 ## Project Structure
 
@@ -148,8 +193,9 @@ src/
       telephony/         Calls, dispatch rules, phone numbers, SIP trunks
       egresses/          Media export
       ingresses/         Media import
-      settings/          Project, sandbox, team members, webhooks
+      settings/          Project, sandbox, team members, API keys, webhooks
     api/                 REST endpoints
+    sandbox/             Sandbox proxy routes
   components/
     ui/                  shadcn/ui (Button, Card, Badge, Dialog, Select, etc.)
     livekit/             Dashboard components (sidebar, stat-card, charts, data-table, top-bar)
@@ -159,6 +205,7 @@ src/
     livekit.ts           LiveKit server SDK clients
     sandbox.ts           Sandbox process management
     utils.ts             Tailwind class merge utility
+  middleware.ts          Auth guard + sandbox proxy routing
 example/
   agent-starter-react/   Web Voice Agent frontend (Next.js)
   agent-starter-python/  Python voice agent (OpenAI STT/LLM/TTS)

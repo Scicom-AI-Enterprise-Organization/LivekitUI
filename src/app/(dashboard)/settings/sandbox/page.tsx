@@ -239,7 +239,7 @@ export default function SandboxPage() {
           <Info className="size-4" />
           <AlertTitle>Sandbox</AlertTitle>
           <AlertDescription>
-            A new home for sandbox: find your existing agent deployment links below and access your token server URL in Project settings. To test your agent, you can also access deployment preview links directly from your agents in the dashboard.
+            Create sandbox apps from templates to quickly prototype and test your agents. Each sandbox runs locally and is accessible through the dashboard proxy.
           </AlertDescription>
         </Alert>
 
@@ -267,15 +267,6 @@ export default function SandboxPage() {
             </CollapsibleContent>
           </Collapsible>
 
-          {/* Column headers */}
-          <div className="grid grid-cols-[1fr_1fr_1fr_1fr_auto] gap-4 px-4 text-xs text-muted-foreground">
-            <span>Name</span>
-            <span>Template</span>
-            <span>URL</span>
-            <span>Created</span>
-            <span className="w-28"></span>
-          </div>
-
           {/* App list */}
           {loading ? (
             <div className="flex items-center justify-center py-8">
@@ -286,69 +277,80 @@ export default function SandboxPage() {
               No sandbox apps yet. Create one from a template above.
             </div>
           ) : (
-            <div className="space-y-2">
-              {apps.map((app) => (
-                <Card key={app.id} className="py-0">
-                  <CardContent className="grid grid-cols-[1fr_1fr_1fr_1fr_auto] items-center gap-4 px-4 py-3">
-                    <span className="text-sm font-medium text-foreground truncate">
-                      {app.name}
-                    </span>
-                    <Badge variant="outline" className="w-fit text-xs">
-                      {app.template}
-                    </Badge>
-                    <span className="text-xs text-muted-foreground truncate">
-                      {app.url}
-                    </span>
-                    <span className="text-xs text-muted-foreground">
-                      {new Date(app.createdAt).toLocaleDateString()}
-                    </span>
-                    <div className="flex items-center gap-1.5">
-                      <Button size="sm" className="h-7 text-xs" asChild>
-                        <a href={app.url} target="_blank" rel="noopener noreferrer">
-                          <ExternalLink className="size-3" />
-                          Launch
-                        </a>
-                      </Button>
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        className="h-7 text-xs gap-1"
-                        onClick={() => setLogsApp(app.name)}
-                      >
-                        <ScrollText className="size-3" />
-                        Logs
-                      </Button>
-                      <Button variant="outline" size="sm" className="h-7 text-xs" asChild>
-                        <a
-                          href={`https://github.com/livekit-examples/${app.template}`}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                        >
-                          <Code className="size-3" />
-                          Code
-                        </a>
-                      </Button>
-                      <DropdownMenu>
-                        <DropdownMenuTrigger asChild>
-                          <Button variant="ghost" size="icon-xs">
-                            <MoreHorizontal className="size-4" />
+            <Card className="py-0 overflow-hidden">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b text-left text-muted-foreground">
+                    <th className="px-4 py-2.5 font-medium">Name</th>
+                    <th className="px-4 py-2.5 font-medium">Template</th>
+                    <th className="px-4 py-2.5 font-medium">URL</th>
+                    <th className="px-4 py-2.5 font-medium">Created</th>
+                    <th className="px-4 py-2.5 font-medium w-auto"></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {apps.map((app) => (
+                    <tr key={app.id} className="border-b last:border-0">
+                      <td className="px-4 py-2.5 font-medium">{app.name}</td>
+                      <td className="px-4 py-2.5">
+                        <Badge variant="outline" className="text-xs">{app.template}</Badge>
+                      </td>
+                      <td className="px-4 py-2.5 text-xs">
+                        <a href={app.url} target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">{app.url}</a>
+                      </td>
+                      <td className="px-4 py-2.5 text-xs text-muted-foreground">
+                        {new Date(app.createdAt).toLocaleDateString()}
+                      </td>
+                      <td className="px-4 py-2.5">
+                        <div className="flex items-center justify-end gap-1.5">
+                          <Button size="sm" className="h-7 text-xs" asChild>
+                            <a href={app.url} target="_blank" rel="noopener noreferrer">
+                              <ExternalLink className="size-3" />
+                              Launch
+                            </a>
                           </Button>
-                        </DropdownMenuTrigger>
-                        <DropdownMenuContent align="end">
-                          <DropdownMenuItem
-                            className="text-destructive focus:text-destructive"
-                            onClick={() => setDeleteTarget({ id: app.id, name: app.name })}
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="h-7 text-xs gap-1"
+                            onClick={() => setLogsApp(app.name)}
                           >
-                            <Trash2 className="size-3.5" />
-                            Delete
-                          </DropdownMenuItem>
-                        </DropdownMenuContent>
-                      </DropdownMenu>
-                    </div>
-                  </CardContent>
-                </Card>
-              ))}
-            </div>
+                            <ScrollText className="size-3" />
+                            Logs
+                          </Button>
+                          <Button variant="outline" size="sm" className="h-7 text-xs" asChild>
+                            <a
+                              href={`https://github.com/livekit-examples/${app.template}`}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                            >
+                              <Code className="size-3" />
+                              Code
+                            </a>
+                          </Button>
+                          <DropdownMenu>
+                            <DropdownMenuTrigger asChild>
+                              <Button variant="ghost" size="icon-xs">
+                                <MoreHorizontal className="size-4" />
+                              </Button>
+                            </DropdownMenuTrigger>
+                            <DropdownMenuContent align="end">
+                              <DropdownMenuItem
+                                className="text-destructive focus:text-destructive"
+                                onClick={() => setDeleteTarget({ id: app.id, name: app.name })}
+                              >
+                                <Trash2 className="size-3.5" />
+                                Delete
+                              </DropdownMenuItem>
+                            </DropdownMenuContent>
+                          </DropdownMenu>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </Card>
           )}
         </div>
       </div>

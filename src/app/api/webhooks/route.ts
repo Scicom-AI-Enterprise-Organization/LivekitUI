@@ -1,72 +1,41 @@
 import { NextRequest, NextResponse } from "next/server";
-import crypto from "crypto";
+import { getSession } from "@/lib/auth";
+import { ensureDb } from "@/lib/db";
 
-// TODO: Replace in-memory storage with database persistence
-interface StoredWebhook {
-  id: string;
-  url: string;
-  events: string[];
-  secret: string;
-  status: string;
-  createdAt: string;
-}
-
-const webhooks = new Map<string, StoredWebhook>();
-
-function generateId() {
-  return crypto.randomBytes(8).toString("hex");
-}
-
-function generateWebhookSecret() {
-  return "whsec_" + crypto.randomBytes(24).toString("hex");
-}
-
-export async function GET() {
-  const endpoints = Array.from(webhooks.values());
-  return NextResponse.json({ endpoints });
-}
-
-export async function POST(request: NextRequest) {
-  const body = await request.json();
-  const { url, events } = body;
-
-  if (!url || typeof url !== "string") {
-    return NextResponse.json({ error: "URL is required" }, { status: 400 });
+export async function GET(request: NextRequest) {
+  const session = await getSession();
+  if (!session) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  if (!events || !Array.isArray(events) || events.length === 0) {
-    return NextResponse.json(
-      { error: "At least one event is required" },
-      { status: 400 }
-    );
-  }
+  const limit = parseInt(request.nextUrl.searchParams.get("limit") || "100", 10);
+  const db = await ensureDb();
+  const events = await db.getWebhookEvents(limit);
 
-  const id = generateId();
-  const secret = generateWebhookSecret();
-
-  const webhook: StoredWebhook = {
-    id,
-    url,
-    events,
-    secret,
-    status: "Active",
-    createdAt: new Date().toISOString(),
-  };
-
-  webhooks.set(id, webhook);
-
-  return NextResponse.json({ endpoint: webhook });
+  return NextResponse.json({
+    events: events.map((e) => ({
+      id: e.id,
+      event: e.event,
+      room: e.room,
+      participant: e.participant,
+      payload: e.payload,
+      createdAt: e.created_at,
+    })),
+  });
 }
 
-export async function DELETE(request: NextRequest) {
-  const body = await request.json();
-  const { id } = body;
-
-  if (!id || typeof id !== "string") {
-    return NextResponse.json({ error: "ID is required" }, { status: 400 });
+export async function DELETE() {
+  const session = await getSession();
+  if (!session) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  webhooks.delete(id);
+  if (session.role === "member") {
+    return NextResponse.json({ error: "Insufficient permissions" }, { status: 403 });
+  }
+
+  const db = await ensureDb();
+  await db.clearWebhookEvents();
 
   return NextResponse.json({ success: true });
 }

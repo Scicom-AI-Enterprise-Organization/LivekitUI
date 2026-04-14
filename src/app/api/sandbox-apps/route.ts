@@ -45,11 +45,12 @@ export async function POST(request: NextRequest) {
       name,
       template,
       process.env.LIVEKIT_API_KEY || "",
-      process.env.LIVEKIT_API_SECRET || ""
+      process.env.LIVEKIT_API_SECRET || "",
+      process.env.NEXT_PUBLIC_SANDBOX_DOMAIN
     );
 
     const db = await ensureDb();
-    const app = await db.createSandboxApp(name, template, url);
+    const app = await db.createSandboxApp(name, template, url, port);
 
     return NextResponse.json({
       app: {

@@ -142,10 +142,44 @@ function SlideOver({
 /* ────────────────────────────────────
    Add HTTP Tool Panel
    ──────────────────────────────────── */
-function AddHttpToolPanel({ open, onClose }: { open: boolean; onClose: () => void }) {
+function AddHttpToolPanel({
+  open,
+  onClose,
+  onSave,
+  editTool,
+}: {
+  open: boolean;
+  onClose: () => void;
+  onSave: (tool: HttpTool) => void;
+  editTool?: HttpTool | null;
+}) {
+  const [toolName, setToolName] = useState("");
+  const [description, setDescription] = useState("");
+  const [method, setMethod] = useState("GET");
+  const [url, setUrl] = useState("");
   const [silentMode, setSilentMode] = useState(false);
   const [params, setParams] = useState<{ name: string; type: string; description: string; required: boolean }[]>([]);
   const [headers, setHeaders] = useState<{ name: string; value: string }[]>([]);
+
+  // Populate fields when editing
+  useEffect(() => {
+    if (editTool) {
+      setToolName(editTool.name);
+      setDescription(editTool.description);
+      setMethod(editTool.method);
+      setUrl(editTool.url);
+      setParams(editTool.params.map((p) => ({ ...p })));
+      setHeaders(editTool.headers.map((h) => ({ ...h })));
+    } else {
+      setToolName("");
+      setDescription("");
+      setMethod("GET");
+      setUrl("");
+      setParams([]);
+      setHeaders([]);
+      setSilentMode(false);
+    }
+  }, [editTool, open]);
 
   const addParam = () => setParams([...params, { name: "", type: "string", description: "", required: false }]);
   const removeParam = (i: number) => setParams(params.filter((_, idx) => idx !== i));
@@ -163,20 +197,40 @@ function AddHttpToolPanel({ open, onClose }: { open: boolean; onClose: () => voi
     setHeaders(copy);
   };
 
+  const handleSubmit = () => {
+    onSave({
+      name: toolName,
+      description,
+      method,
+      url,
+      params: params.filter((p) => p.name.trim() !== ""),
+      headers: headers.filter((h) => h.name.trim() !== ""),
+    });
+    onClose();
+  };
+
+  const isEditing = !!editTool;
+
   return (
-    <SlideOver open={open} onClose={onClose} title="Add HTTP tool" submitLabel="Add tool">
+    <SlideOver
+      open={open}
+      onClose={onClose}
+      title={isEditing ? "Edit HTTP tool" : "Add HTTP tool"}
+      submitLabel={isEditing ? "Update tool" : "Add tool"}
+      onSubmit={handleSubmit}
+    >
       {/* Tool name */}
       <div className="space-y-1.5">
         <label className="text-sm font-medium text-foreground">Tool name</label>
         <p className="text-xs text-muted-foreground">Unique name used by the LLM to identify and use this tool.</p>
-        <input placeholder="get_weather" className="w-full rounded-md border border-border bg-card px-3 py-2 text-sm outline-none focus:border-primary focus:ring-1 focus:ring-primary/30" />
+        <input value={toolName} onChange={(e) => setToolName(e.target.value)} placeholder="get_weather" className="w-full rounded-md border border-border bg-card px-3 py-2 text-sm outline-none focus:border-primary focus:ring-1 focus:ring-primary/30" />
       </div>
 
       {/* Description */}
       <div className="space-y-1.5">
         <label className="text-sm font-medium text-foreground">Description</label>
         <p className="text-xs text-muted-foreground">The tool&apos;s overview, outcomes, usage instructions, and examples.</p>
-        <textarea rows={3} placeholder="Use this tool to get the weather for a given location, if the user asks..." className="w-full rounded-md border border-border bg-card px-3 py-2 text-sm outline-none focus:border-primary focus:ring-1 focus:ring-primary/30 resize-none" />
+        <textarea rows={3} value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Use this tool to get the weather for a given location, if the user asks..." className="w-full rounded-md border border-border bg-card px-3 py-2 text-sm outline-none focus:border-primary focus:ring-1 focus:ring-primary/30 resize-none" />
       </div>
 
       {/* HTTP method + URL */}
@@ -189,7 +243,7 @@ function AddHttpToolPanel({ open, onClose }: { open: boolean; onClose: () => voi
           </div>
         </div>
         <div className="flex gap-2">
-          <Select defaultValue="GET">
+          <Select value={method} onValueChange={setMethod}>
             <SelectTrigger className="w-24">
               <SelectValue />
             </SelectTrigger>
@@ -201,7 +255,7 @@ function AddHttpToolPanel({ open, onClose }: { open: boolean; onClose: () => voi
               <SelectItem value="PATCH">PATCH</SelectItem>
             </SelectContent>
           </Select>
-          <input placeholder="https://api.example.com/some/endpoint" className="flex-1 rounded-md border border-border bg-card px-3 py-2 text-sm outline-none focus:border-primary focus:ring-1 focus:ring-primary/30" />
+          <input value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://api.example.com/some/endpoint" className="flex-1 rounded-md border border-border bg-card px-3 py-2 text-sm outline-none focus:border-primary focus:ring-1 focus:ring-primary/30" />
         </div>
       </div>
 
@@ -421,6 +475,18 @@ function AddMcpServerPanel({ open, onClose }: { open: boolean; onClose: () => vo
       </div>
     </SlideOver>
   );
+}
+
+/* ────────────────────────────────────
+   HTTP Tool Type
+   ──────────────────────────────────── */
+interface HttpTool {
+  name: string;
+  description: string;
+  method: string;
+  url: string;
+  params: { name: string; type: string; description: string; required: boolean }[];
+  headers: { name: string; value: string }[];
 }
 
 /* ────────────────────────────────────
@@ -803,12 +869,46 @@ function ModelsVoiceTab({
 /* ────────────────────────────────────
    Tab: Actions
    ──────────────────────────────────── */
-function ActionsTab() {
+function ActionsTab({
+  httpTools,
+  setHttpTools,
+}: {
+  httpTools: HttpTool[];
+  setHttpTools: React.Dispatch<React.SetStateAction<HttpTool[]>>;
+}) {
   const [endCallEnabled, setEndCallEnabled] = useState(true);
   const [callSummaryEnabled, setCallSummaryEnabled] = useState(true);
   const [httpToolOpen, setHttpToolOpen] = useState(false);
   const [clientToolOpen, setClientToolOpen] = useState(false);
   const [mcpServerOpen, setMcpServerOpen] = useState(false);
+  const [editingHttpTool, setEditingHttpTool] = useState<HttpTool | null>(null);
+  const [editingHttpToolIndex, setEditingHttpToolIndex] = useState<number | null>(null);
+
+  const handleSaveHttpTool = (tool: HttpTool) => {
+    if (editingHttpToolIndex !== null) {
+      setHttpTools((prev) => prev.map((t, i) => (i === editingHttpToolIndex ? tool : t)));
+      setEditingHttpToolIndex(null);
+      setEditingHttpTool(null);
+    } else {
+      setHttpTools((prev) => [...prev, tool]);
+    }
+  };
+
+  const handleEditHttpTool = (index: number) => {
+    setEditingHttpTool(httpTools[index]);
+    setEditingHttpToolIndex(index);
+    setHttpToolOpen(true);
+  };
+
+  const handleDeleteHttpTool = (index: number) => {
+    setHttpTools((prev) => prev.filter((_, i) => i !== index));
+  };
+
+  const handleCloseHttpPanel = () => {
+    setHttpToolOpen(false);
+    setEditingHttpTool(null);
+    setEditingHttpToolIndex(null);
+  };
 
   return (
     <div className="space-y-5">
@@ -818,6 +918,42 @@ function ActionsTab() {
           Send web requests to enable your agent to interact with web-based APIs and services.{" "}
           <span className="text-primary cursor-pointer">Learn more</span>
         </p>
+
+        {httpTools.length > 0 && (
+          <div className="space-y-2 mb-3">
+            {httpTools.map((tool, i) => (
+              <div
+                key={i}
+                className="flex items-center justify-between rounded-lg border border-border px-4 py-3"
+              >
+                <div className="flex items-center gap-3 min-w-0">
+                  <Badge variant="outline" className="shrink-0 text-xs font-mono">
+                    {tool.method}
+                  </Badge>
+                  <div className="min-w-0">
+                    <p className="text-sm font-medium text-foreground truncate">{tool.name}</p>
+                    <p className="text-xs text-muted-foreground truncate">{tool.url}</p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-1 shrink-0">
+                  <button
+                    onClick={() => handleEditHttpTool(i)}
+                    className="rounded-md p-1.5 text-muted-foreground hover:bg-muted hover:text-foreground"
+                  >
+                    <Pencil className="size-3.5" />
+                  </button>
+                  <button
+                    onClick={() => handleDeleteHttpTool(i)}
+                    className="rounded-md p-1.5 text-muted-foreground hover:bg-muted hover:text-destructive"
+                  >
+                    <Trash2 className="size-3.5" />
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
         <Button variant="outline" size="sm" className="gap-1 text-xs" onClick={() => setHttpToolOpen(true)}>
           <Plus className="size-3" />
           Add HTTP tool
@@ -871,7 +1007,7 @@ function ActionsTab() {
       </CollapsibleSection>
 
       {/* Slide-over panels */}
-      <AddHttpToolPanel open={httpToolOpen} onClose={() => setHttpToolOpen(false)} />
+      <AddHttpToolPanel open={httpToolOpen} onClose={handleCloseHttpPanel} onSave={handleSaveHttpTool} editTool={editingHttpTool} />
       <AddClientToolPanel open={clientToolOpen} onClose={() => setClientToolOpen(false)} />
       <AddMcpServerPanel open={mcpServerOpen} onClose={() => setMcpServerOpen(false)} />
     </div>
@@ -1234,124 +1370,192 @@ const languageMap: Record<string, string> = {
   multi: "multi",
 };
 
-function generateAgentCode(config: AgentConfig): string {
-  const instructionLines = config.instructions
-    .split("\n")
-    .filter((l) => !l.startsWith("#") && l.trim())
-    .slice(0, 4)
-    .map((l) => l.trim())
-    .join(" ");
-  const truncatedInstructions =
-    instructionLines.length > 200
-      ? instructionLines.slice(0, 200) + "..."
-      : instructionLines;
+function generateAgentCode(config: AgentConfig, httpTools: HttpTool[] = []): string {
+  const agentSlug = config.name.toLowerCase().replace(/\s+/g, "-");
+  const sttModel = sttModelMap[config.sttModel] || config.sttModel;
+  const llmModel = llmModelMap[config.llmModel] || config.llmModel;
+  const ttsModel = ttsModelMap[config.ttsModel] || config.ttsModel;
+  const lang = languageMap[config.sttLanguage] || config.sttLanguage;
+
+  // Escape instructions for Python triple-quoted string
+  const escapedInstructions = config.instructions
+    .replace(/\\/g, "\\\\")
+    .replace(/"""/g, '\\"\\"\\"');
+
+  const isRealtime = config.pipelineMode === "realtime";
+  const hasHttpTools = httpTools.length > 0;
+
+  const typeMap: Record<string, string> = {
+    string: "str",
+    number: "float",
+    boolean: "bool",
+    object: "dict",
+    array: "list",
+  };
+
+  // Generate HTTP tool methods
+  const httpToolMethods = httpTools.map((tool) => {
+    const snakeName = tool.name.replace(/[^a-zA-Z0-9]/g, "_").toLowerCase();
+    const methodLower = tool.method.toLowerCase();
+
+    // Build function arguments
+    const argParts: string[] = [];
+    const docArgParts: string[] = [];
+    tool.params.forEach((p) => {
+      const pyType = typeMap[p.type] || "str";
+      if (p.required) {
+        argParts.push(`${p.name}: ${pyType}`);
+      } else {
+        argParts.push(`${p.name}: Optional[${pyType}] = None`);
+      }
+      docArgParts.push(`            ${p.name}: ${p.description || p.name}`);
+    });
+
+    const allArgs = ["self", "context: RunContext", ...argParts].join(",\n        ");
+
+    // Build docstring
+    let docstring = `        \"\"\"\n        ${tool.description || tool.name}`;
+    if (docArgParts.length > 0) {
+      docstring += `\n\n        Args:\n${docArgParts.join("\n")}`;
+    }
+    docstring += `\n        \"\"\"`;
+
+    // Build headers dict
+    let headersCode = "";
+    if (tool.headers.length > 0) {
+      const headerEntries = tool.headers.map((h) => `            "${h.name}": "${h.value}",`).join("\n");
+      headersCode = `\n        headers = {\n${headerEntries}\n        }`;
+    } else {
+      headersCode = `\n        headers = {}`;
+    }
+
+    // Build payload dict
+    let payloadCode = "";
+    if (tool.params.length > 0) {
+      const payloadEntries = tool.params.map((p) => `                "${p.name}": ${p.name},`).join("\n");
+      payloadCode = `\n        payload = {\n            k: v for k, v in {\n${payloadEntries}\n            }.items() if v is not None\n        }`;
+    } else {
+      payloadCode = `\n        payload = {}`;
+    }
+
+    // Determine params vs json based on method
+    const payloadArg = methodLower === "get" || methodLower === "delete" ? "params=payload" : "json=payload";
+    const headersArg = "headers=headers";
+
+    return `
+    @function_tool(name="${tool.name}")
+    async def _http_tool_${snakeName}(
+        ${allArgs}
+    ) -> str | None:
+${docstring}
+
+        url = "${tool.url}"${headersCode}${payloadCode}
+
+        try:
+            session = utils.http_context.http_session()
+            timeout = aiohttp.ClientTimeout(total=10)
+            async with session.${methodLower}(url, timeout=timeout, ${headersArg}, ${payloadArg}) as resp:
+                if resp.status >= 400:
+                    raise ToolError(f"error: HTTP {resp.status}")
+                return await resp.text()
+        except ToolError:
+            raise
+        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            raise ToolError(f"error: {e!s}") from e`;
+  });
+
+  let sessionBlock: string;
+  if (isRealtime) {
+    sessionBlock = `    session = AgentSession(
+        llm=inference.LLM(model="${llmModel}"),
+        vad=ctx.proc.userdata["vad"],
+    )`;
+  } else {
+    sessionBlock = `    session = AgentSession(
+        stt=inference.STT(model="${sttModel}", language="${lang}"),
+        llm=inference.LLM(model="${llmModel}"),
+        tts=inference.TTS(
+            model="${ttsModel}",
+            voice="${config.ttsVoice}",
+            language="${lang}"
+        ),
+        turn_handling=TurnHandlingOptions(turn_detection=MultilingualModel()),
+        vad=ctx.proc.userdata["vad"],
+        preemptive_generation=True,
+    )`;
+  }
+
+  // Build imports
+  const extraTopImports = hasHttpTools ? `from typing import Optional\nimport aiohttp\nimport asyncio\n` : "";
+
+  const agentImports = [
+    "Agent",
+    "AgentServer",
+    "AgentSession",
+    "JobContext",
+    "JobProcess",
+    "TurnHandlingOptions",
+    "cli",
+    "inference",
+    "room_io",
+  ];
+  if (hasHttpTools) {
+    agentImports.push("RunContext", "ToolError", "function_tool", "utils");
+    agentImports.sort();
+  }
+  const agentImportsStr = agentImports.map((imp) => `    ${imp},`).join("\n");
+
+  const httpToolMethodsStr = httpToolMethods.join("\n");
 
   return `import logging
 
-from dotenv import load_dotenv
-
+${extraTopImports}from dotenv import load_dotenv
+from livekit import rtc
 from livekit.agents import (
-    Agent,
-    AgentServer,
-    AgentSession,
-    JobContext,
-    JobProcess,
-    MetricsCollectedEvent,
-    RunContext,
-    TurnHandlingOptions,
-    cli,
-    inference,
-    metrics,
-    room_io,
-    text_transforms,
+${agentImportsStr}
 )
-from livekit.agents.beta import EndCallTool
-from livekit.agents.llm import function_tool
-from livekit.plugins import silero
+from livekit.plugins import (
+    noise_cancellation,
+    silero,
+)
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
-logger = logging.getLogger("${config.name.toLowerCase().replace(/\s+/g, "-")}")
+logger = logging.getLogger("agent-${agentSlug}")
 
-load_dotenv()
+load_dotenv(".env.local")
 
 
-class MyAgent(Agent):
+class DefaultAgent(Agent):
     def __init__(self) -> None:
         super().__init__(
-            instructions="${truncatedInstructions}",
-            tools=[EndCallTool()],
+            instructions="""${escapedInstructions}""",
         )
 
-    async def on_enter(self) -> None:
-        self.session.generate_reply(
-            instructions="${config.welcomeMessage}"
-        )
-
-    @function_tool
-    async def lookup_weather(
-        self, context: RunContext, location: str,
-        latitude: str, longitude: str
-    ) -> str:
-        """Called when the user asks for weather related information.
-
-        Args:
-            location: The location they are asking for
-            latitude: The latitude of the location
-            longitude: The longitude of the location
-        """
-        logger.info(f"Looking up weather for {location}")
-        return "sunny with a temperature of 70 degrees."
+    async def on_enter(self):
+        await self.session.generate_reply(
+            instructions="""${config.welcomeMessage}""",
+            allow_interruptions=True,
+        )${httpToolMethodsStr}
 
 
 server = AgentServer()
 
-
-def prewarm(proc: JobProcess) -> None:
+def prewarm(proc: JobProcess):
     proc.userdata["vad"] = silero.VAD.load()
-
 
 server.setup_fnc = prewarm
 
-
-@server.rtc_session()
-async def entrypoint(ctx: JobContext) -> None:
-    ctx.log_context_fields = {
-        "room": ctx.room.name,
-    }
-    session: AgentSession = AgentSession(
-        stt=inference.STT("${sttModelMap[config.sttModel] || config.sttModel}", language="${languageMap[config.sttLanguage] || config.sttLanguage}"),
-        llm=inference.LLM("${llmModelMap[config.llmModel] || config.llmModel}"),
-        tts=inference.TTS("${ttsModelMap[config.ttsModel] || config.ttsModel}"),
-        vad=ctx.proc.userdata["vad"],
-        turn_handling=TurnHandlingOptions(
-            turn_detection=MultilingualModel(),
-            interruption={
-                "resume_false_interruption": True,
-                "false_interruption_timeout": 1.0,
-            },
-        ),
-        preemptive_generation=True,
-        aec_warmup_duration=3.0,
-        tts_text_transforms=[
-            "filter_emoji",
-            "filter_markdown",
-        ],
-    )
-
-    @session.on("metrics_collected")
-    def _on_metrics_collected(ev: MetricsCollectedEvent) -> None:
-        metrics.log_metrics(ev.metrics)
-
-    async def log_usage():
-        logger.info(f"Usage: {session.usage}")
-
-    ctx.add_shutdown_callback(log_usage)
+@server.rtc_session(agent_name="${agentSlug}")
+async def entrypoint(ctx: JobContext):
+${sessionBlock}
 
     await session.start(
-        agent=MyAgent(),
+        agent=DefaultAgent(),
         room=ctx.room,
         room_options=room_io.RoomOptions(
-            audio_input=room_io.AudioInputOptions(),
+            audio_input=room_io.AudioInputOptions(
+                noise_cancellation=lambda params: noise_cancellation.BVCTelephony() if params.participant.kind == rtc.ParticipantKind.PARTICIPANT_KIND_SIP else noise_cancellation.BVC(),
+            ),
         ),
     )
 
@@ -1363,32 +1567,51 @@ if __name__ == "__main__":
 /* Simple keyword-based syntax highlighting for Python */
 function highlightPython(code: string) {
   const lines = code.split("\n");
+  let inTripleQuote = false;
+
   return lines.map((line, i) => {
     let html = line
       .replace(/&/g, "&amp;")
       .replace(/</g, "&lt;")
       .replace(/>/g, "&gt;");
 
-    // Comments
-    html = html.replace(/(#.*)$/, '<span style="color:#8b949e;font-style:italic">$1</span>');
+    // Track triple-quoted strings
+    const tripleCount = (html.match(/"""/g) || []).length;
+    if (inTripleQuote) {
+      // We're inside a triple-quoted string — color entire line as string
+      html = `<span style="color:#a5d6ff">${html}</span>`;
+      if (tripleCount % 2 === 1) inTripleQuote = false;
+    } else if (tripleCount >= 1) {
+      // Line opens a triple quote
+      html = `<span style="color:#a5d6ff">${html}</span>`;
+      if (tripleCount % 2 === 1) inTripleQuote = true;
+    } else {
+      // Normal code line — apply highlighting
 
-    // Strings (double-quoted)
-    html = html.replace(/("(?:[^"\\]|\\.)*")/g, '<span style="color:#a5d6ff">$1</span>');
-    // Strings (single-quoted)
-    html = html.replace(/('(?:[^'\\]|\\.)*')/g, '<span style="color:#a5d6ff">$1</span>');
+      // Comments (only outside strings)
+      html = html.replace(/(#.*)$/, '<span style="color:#8b949e;font-style:italic">$1</span>');
 
-    // Keywords
-    const keywords = /\b(import|from|async|await|def|if|else|return|class|as|with|for|in|not|and|or|True|False|None)\b/g;
-    html = html.replace(keywords, '<span style="color:#ff7b72;font-weight:500">$1</span>');
+      // Strings (double-quoted)
+      html = html.replace(/("(?:[^"\\]|\\.)*")/g, '<span style="color:#a5d6ff">$1</span>');
+      // Strings (single-quoted)
+      html = html.replace(/('(?:[^'\\]|\\.)*')/g, '<span style="color:#a5d6ff">$1</span>');
 
-    // Decorators
-    html = html.replace(/(@\w+[\w.]*(?:\(\))?)/g, '<span style="color:#d2a8ff">$1</span>');
+      // Keywords
+      const keywords = /\b(import|from|async|await|def|if|else|return|class|as|with|for|in|not|and|or|True|False|None)\b/g;
+      html = html.replace(keywords, '<span style="color:#ff7b72;font-weight:500">$1</span>');
 
-    // Built-in functions
-    html = html.replace(/\b(load_dotenv|logging|getLogger|setLevel|append|connect|start|say|run_app|load|print|super|info)\b/g, '<span style="color:#d2a8ff">$1</span>');
+      // Decorators
+      html = html.replace(/(@\w+[\w.]*(?:\(\))?)/g, '<span style="color:#d2a8ff">$1</span>');
 
-    // Class names / types
-    html = html.replace(/\b(Agent|AgentServer|AgentSession|JobContext|JobProcess|MetricsCollectedEvent|RunContext|TurnHandlingOptions|EndCallTool|MultilingualModel|VAD|STT|LLM|TTS|RoomOptions|AudioInputOptions)\b/g, '<span style="color:#79c0ff">$1</span>');
+      // Built-in functions
+      html = html.replace(/\b(load_dotenv|logging|getLogger|setLevel|append|connect|start|say|run_app|load|print|super|info)\b/g, '<span style="color:#d2a8ff">$1</span>');
+
+      // Class names / types
+      html = html.replace(/\b(Agent|AgentServer|AgentSession|JobContext|JobProcess|MetricsCollectedEvent|RunContext|ToolError|TurnHandlingOptions|EndCallTool|MultilingualModel|VAD|STT|LLM|TTS|RoomOptions|AudioInputOptions)\b/g, '<span style="color:#79c0ff">$1</span>');
+
+      // function_tool decorator (special case since it has parentheses with args)
+      html = html.replace(/\b(function_tool)\b/g, '<span style="color:#79c0ff">$1</span>');
+    }
 
     return (
       <div key={i} className="flex">
@@ -1401,8 +1624,8 @@ function highlightPython(code: string) {
   });
 }
 
-function CodePanel({ config }: { config: AgentConfig }) {
-  const code = generateAgentCode(config);
+function CodePanel({ config, httpTools }: { config: AgentConfig; httpTools: HttpTool[] }) {
+  const code = generateAgentCode(config, httpTools);
   return (
     <div className="flex h-full w-full flex-col overflow-hidden">
       <div className="flex-1 overflow-auto bg-[#0d1117] p-5">
@@ -1424,6 +1647,7 @@ export default function AgentBuilderPage() {
   const [activeTab, setActiveTab] = useState<Tab>("Instructions");
   const [viewMode, setViewMode] = useState<"preview" | "code">("preview");
   const [config, setConfig] = useState<AgentConfig>(defaultConfig);
+  const [httpTools, setHttpTools] = useState<HttpTool[]>([]);
 
   const updateConfig = (partial: Partial<AgentConfig>) =>
     setConfig((prev) => ({ ...prev, ...partial }));
@@ -1503,7 +1727,7 @@ export default function AgentBuilderPage() {
           <div className="p-6 max-w-2xl">
             {activeTab === "Instructions" && <InstructionsTab config={config} onChange={updateConfig} />}
             {activeTab === "Models & Voice" && <ModelsVoiceTab config={config} onChange={updateConfig} />}
-            {activeTab === "Actions" && <ActionsTab />}
+            {activeTab === "Actions" && <ActionsTab httpTools={httpTools} setHttpTools={setHttpTools} />}
             {activeTab === "Advanced" && <AdvancedTab />}
           </div>
         </div>
@@ -1513,7 +1737,7 @@ export default function AgentBuilderPage() {
           {viewMode === "preview" ? (
             <PreviewPanel config={config} />
           ) : (
-            <CodePanel config={config} />
+            <CodePanel config={config} httpTools={httpTools} />
           )}
         </div>
       </div>

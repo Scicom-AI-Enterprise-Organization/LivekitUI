@@ -68,13 +68,12 @@ export default function AgentStarterReactPage() {
   const [creating, setCreating] = useState(false);
   const [createdName, setCreatedName] = useState("");
   const [createError, setCreateError] = useState("");
-  const [isLocal, setIsLocal] = useState(true);
-  const [domain, setDomain] = useState("");
+  const [sandboxPrefix, setSandboxPrefix] = useState("");
 
   useEffect(() => {
     fetch("/api/sandbox-config")
       .then((r) => r.json())
-      .then((d) => { setIsLocal(d.isLocal); setDomain(d.domain); });
+      .then((d) => setSandboxPrefix(d.prefix || ""));
   }, []);
 
   return (
@@ -95,7 +94,7 @@ export default function AgentStarterReactPage() {
                   <div className="h-2.5 w-2.5 rounded-full bg-green-500/60" />
                 </div>
                 <div className="ml-3 flex-1 rounded bg-muted px-3 py-1 text-xs text-muted-foreground">
-                  https://agent-starter-react.{process.env.NEXT_PUBLIC_SANDBOX_DOMAIN || "sandbox.example.com"}
+                  {sandboxPrefix}agent-starter-react
                 </div>
               </div>
 
@@ -355,23 +354,19 @@ export default function AgentStarterReactPage() {
             <div className="space-y-2">
               <Label>Sandbox name</Label>
               <div className="flex items-center gap-2">
+                <span className="shrink-0 text-sm text-muted-foreground">{sandboxPrefix}</span>
                 <Input
-                  placeholder="enter-generated-name"
+                  placeholder="my-app"
                   className="flex-1"
                   value={sandboxName}
                   onChange={(e) => setSandboxName(e.target.value)}
                 />
-                {!isLocal && domain && (
-                  <span className="shrink-0 text-sm text-muted-foreground">
-                    .{domain}
-                  </span>
-                )}
               </div>
-              <p className="text-xs text-muted-foreground">
-                {isLocal
-                  ? "A random port will be assigned automatically on localhost."
-                  : "If you do not provide a name we will generate one for you."}
-              </p>
+              {sandboxName && (
+                <p className="text-xs text-muted-foreground">
+                  URL: {sandboxPrefix}{sandboxName}
+                </p>
+              )}
             </div>
 
             {/* Enable capabilities */}

@@ -51,7 +51,26 @@ export interface DbSandboxApp {
   name: string;
   template: string;
   url: string;
+  port: number;
   status: string;
+  created_at: string;
+}
+
+export interface DbWebhookEvent {
+  id: number;
+  event: string;
+  room: string | null;
+  participant: string | null;
+  payload: string;
+  created_at: string;
+}
+
+export interface DbApiKey {
+  id: number;
+  description: string;
+  api_key: string;
+  api_secret_hash: string;
+  owner: string;
   created_at: string;
 }
 
@@ -88,11 +107,17 @@ export interface Database {
   getAllPhoneNumbers(): Promise<DbPhoneNumber[]>;
   deletePhoneNumber(id: number): Promise<void>;
   findPhoneNumberByNumber(number: string): Promise<DbPhoneNumber | null>;
-  createSandboxApp(name: string, template: string, url: string): Promise<DbSandboxApp>;
+  createSandboxApp(name: string, template: string, url: string, port: number): Promise<DbSandboxApp>;
   getAllSandboxApps(): Promise<DbSandboxApp[]>;
   deleteSandboxApp(id: number): Promise<void>;
   addAgentSnapshot(sessions: number, agents: number): Promise<void>;
   getAgentSnapshots(hours: number): Promise<DbAgentSnapshot[]>;
+  createApiKey(description: string, apiKey: string, apiSecretHash: string, owner: string): Promise<DbApiKey>;
+  getAllApiKeys(): Promise<DbApiKey[]>;
+  deleteApiKey(id: number): Promise<void>;
+  addWebhookEvent(event: string, room: string | null, participant: string | null, payload: string): Promise<void>;
+  getWebhookEvents(limit: number): Promise<DbWebhookEvent[]>;
+  clearWebhookEvents(): Promise<void>;
 }
 
 // ---------------------------------------------------------------------------
@@ -151,6 +176,7 @@ function createSqliteDb(): Database {
           name TEXT UNIQUE NOT NULL,
           template TEXT NOT NULL,
           url TEXT NOT NULL,
+          port INTEGER NOT NULL DEFAULT 0,
           status TEXT NOT NULL DEFAULT 'running',
           created_at TEXT DEFAULT (datetime('now'))
         );
@@ -158,6 +184,22 @@ function createSqliteDb(): Database {
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           sessions INTEGER NOT NULL DEFAULT 0,
           agents INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE TABLE IF NOT EXISTS api_keys (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          description TEXT NOT NULL,
+          api_key TEXT UNIQUE NOT NULL,
+          api_secret_hash TEXT NOT NULL,
+          owner TEXT NOT NULL,
+          created_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE TABLE IF NOT EXISTS webhook_events (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          event TEXT NOT NULL,
+          room TEXT,
+          participant TEXT,
+          payload TEXT NOT NULL,
           created_at TEXT DEFAULT (datetime('now'))
         );
       `);
@@ -269,10 +311,10 @@ function createSqliteDb(): Database {
       return db.prepare("SELECT * FROM phone_numbers WHERE number = ?").get(number) as DbPhoneNumber | null;
     },
 
-    async createSandboxApp(name, template, url) {
+    async createSandboxApp(name, template, url, port) {
       const result = db.prepare(
-        "INSERT INTO sandbox_apps (name, template, url) VALUES (?, ?, ?)"
-      ).run(name, template, url);
+        "INSERT INTO sandbox_apps (name, template, url, port) VALUES (?, ?, ?, ?)"
+      ).run(name, template, url, port);
       return db.prepare("SELECT * FROM sandbox_apps WHERE id = ?").get(result.lastInsertRowid) as DbSandboxApp;
     },
 
@@ -294,6 +336,36 @@ function createSqliteDb(): Database {
       return db.prepare(
         "SELECT * FROM agent_snapshots WHERE created_at >= datetime('now', '-' || ? || ' hours') ORDER BY created_at ASC"
       ).all(hours) as DbAgentSnapshot[];
+    },
+
+    async createApiKey(description, apiKey, apiSecretHash, owner) {
+      const result = db.prepare(
+        "INSERT INTO api_keys (description, api_key, api_secret_hash, owner) VALUES (?, ?, ?, ?)"
+      ).run(description, apiKey, apiSecretHash, owner);
+      return db.prepare("SELECT * FROM api_keys WHERE id = ?").get(result.lastInsertRowid) as DbApiKey;
+    },
+
+    async getAllApiKeys() {
+      return db.prepare("SELECT * FROM api_keys ORDER BY created_at DESC").all() as DbApiKey[];
+    },
+
+    async deleteApiKey(id) {
+      db.prepare("DELETE FROM api_keys WHERE id = ?").run(id);
+    },
+
+    async addWebhookEvent(event, room, participant, payload) {
+      db.prepare(
+        "INSERT INTO webhook_events (event, room, participant, payload) VALUES (?, ?, ?, ?)"
+      ).run(event, room, participant, payload);
+      db.prepare("DELETE FROM webhook_events WHERE id NOT IN (SELECT id FROM webhook_events ORDER BY created_at DESC LIMIT 500)").run();
+    },
+
+    async getWebhookEvents(limit) {
+      return db.prepare("SELECT * FROM webhook_events ORDER BY created_at DESC LIMIT ?").all(limit) as DbWebhookEvent[];
+    },
+
+    async clearWebhookEvents() {
+      db.prepare("DELETE FROM webhook_events").run();
     },
   };
 }
@@ -359,6 +431,7 @@ function createPostgresDb(): Database {
           name TEXT UNIQUE NOT NULL,
           template TEXT NOT NULL,
           url TEXT NOT NULL,
+          port INTEGER NOT NULL DEFAULT 0,
           status TEXT NOT NULL DEFAULT 'running',
           created_at TIMESTAMPTZ DEFAULT NOW()
         );
@@ -366,6 +439,22 @@ function createPostgresDb(): Database {
           id SERIAL PRIMARY KEY,
           sessions INTEGER NOT NULL DEFAULT 0,
           agents INTEGER NOT NULL DEFAULT 0,
+          created_at TIMESTAMPTZ DEFAULT NOW()
+        );
+        CREATE TABLE IF NOT EXISTS api_keys (
+          id SERIAL PRIMARY KEY,
+          description TEXT NOT NULL,
+          api_key TEXT UNIQUE NOT NULL,
+          api_secret_hash TEXT NOT NULL,
+          owner TEXT NOT NULL,
+          created_at TIMESTAMPTZ DEFAULT NOW()
+        );
+        CREATE TABLE IF NOT EXISTS webhook_events (
+          id SERIAL PRIMARY KEY,
+          event TEXT NOT NULL,
+          room TEXT,
+          participant TEXT,
+          payload TEXT NOT NULL,
           created_at TIMESTAMPTZ DEFAULT NOW()
         );
       `);
@@ -488,10 +577,10 @@ function createPostgresDb(): Database {
       return rows[0] || null;
     },
 
-    async createSandboxApp(name, template, url) {
+    async createSandboxApp(name, template, url, port) {
       const { rows } = await pool.query(
-        "INSERT INTO sandbox_apps (name, template, url) VALUES ($1, $2, $3) RETURNING *",
-        [name, template, url]
+        "INSERT INTO sandbox_apps (name, template, url, port) VALUES ($1, $2, $3, $4) RETURNING *",
+        [name, template, url, port]
       );
       return rows[0];
     },
@@ -516,6 +605,40 @@ function createPostgresDb(): Database {
         [hours]
       );
       return rows;
+    },
+
+    async createApiKey(description, apiKey, apiSecretHash, owner) {
+      const { rows } = await pool.query(
+        "INSERT INTO api_keys (description, api_key, api_secret_hash, owner) VALUES ($1, $2, $3, $4) RETURNING *",
+        [description, apiKey, apiSecretHash, owner]
+      );
+      return rows[0];
+    },
+
+    async getAllApiKeys() {
+      const { rows } = await pool.query("SELECT * FROM api_keys ORDER BY created_at DESC");
+      return rows;
+    },
+
+    async deleteApiKey(id) {
+      await pool.query("DELETE FROM api_keys WHERE id = $1", [id]);
+    },
+
+    async addWebhookEvent(event, room, participant, payload) {
+      await pool.query(
+        "INSERT INTO webhook_events (event, room, participant, payload) VALUES ($1, $2, $3, $4)",
+        [event, room, participant, payload]
+      );
+      await pool.query("DELETE FROM webhook_events WHERE id NOT IN (SELECT id FROM webhook_events ORDER BY created_at DESC LIMIT 500)");
+    },
+
+    async getWebhookEvents(limit) {
+      const { rows } = await pool.query("SELECT * FROM webhook_events ORDER BY created_at DESC LIMIT $1", [limit]);
+      return rows;
+    },
+
+    async clearWebhookEvents() {
+      await pool.query("DELETE FROM webhook_events");
     },
   };
 }

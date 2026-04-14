@@ -56,7 +56,8 @@ export async function deploySandbox(
   name: string,
   template: string,
   livekitApiKey: string,
-  livekitApiSecret: string
+  livekitApiSecret: string,
+  sandboxDomain?: string
 ): Promise<{ port: number; url: string }> {
   const templateDir = path.join(process.cwd(), "example", template);
 
@@ -65,7 +66,8 @@ export async function deploySandbox(
   }
 
   const port = await findFreePort();
-  const url = `http://localhost:${port}`;
+  const base = sandboxDomain || "http://localhost:3000";
+  const url = `${base.replace(/\/$/, "")}/sandbox/${name}`;
 
   // Write .env.local
   const envContent = [
@@ -77,6 +79,14 @@ export async function deploySandbox(
   ].join("\n");
 
   fs.writeFileSync(path.join(templateDir, ".env.local"), envContent);
+
+  // Reset next.config to no basePath — the sandbox runs on its own port at /
+  const configContent = `
+import type { NextConfig } from 'next';
+const nextConfig: NextConfig = {};
+export default nextConfig;
+`;
+  fs.writeFileSync(path.join(templateDir, "next.config.ts"), configContent);
 
   // Log file for this sandbox
   const logFile = path.join(getLogsDir(), `${name}.log`);

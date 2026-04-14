@@ -83,6 +83,7 @@ const navItems: NavItem[] = [
       { label: "Project", href: "/settings/project" },
       { label: "Sandbox", href: "/settings/sandbox" },
       { label: "Team members", href: "/settings/team-members" },
+      { label: "API keys", href: "/settings/api-keys" },
       { label: "Webhooks", href: "/settings/webhooks" },
     ],
   },
@@ -211,22 +212,6 @@ export function LiveKitSidebar() {
           );
         })}
       </nav>
-
-      {/* Bottom section */}
-      <div className="border-t px-3 py-2 space-y-0.5">
-        <button className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-sm text-sidebar-foreground/70 hover:bg-sidebar-accent/50 hover:text-sidebar-foreground transition-colors">
-          <Search className="size-4" />
-          <span>Search</span>
-          <kbd className="ml-auto rounded-md border bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground font-mono">
-            ⌘K
-          </kbd>
-        </button>
-        <button className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-sm text-sidebar-foreground/70 hover:bg-sidebar-accent/50 hover:text-sidebar-foreground transition-colors">
-          <HelpCircle className="size-4" />
-          <span>Support</span>
-          <ChevronRight className="ml-auto size-3.5 opacity-50" />
-        </button>
-      </div>
 
       {/* User */}
       <div className="border-t px-3 py-2">

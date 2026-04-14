@@ -96,22 +96,30 @@ export function LineChart({
           ))}
 
         {labels &&
-          labels.map((label, i) => {
-            const x = padding.left + (i / Math.max(labels.length - 1, 1)) * chartWidth;
-            return (
-              <text
-                key={i}
-                x={x}
-                y={height - 5}
-                textAnchor="middle"
-                className="fill-muted-foreground"
-                fontSize="5"
-                fontFamily="var(--font-sans)"
-              >
-                {label}
-              </text>
-            );
-          })}
+          (() => {
+            const maxTicks = 7;
+            const step = labels.length <= maxTicks ? 1 : Math.ceil(labels.length / maxTicks);
+            const last = labels.length - 1;
+            return labels.map((label, i) => {
+              if (i === 0 || i === last) { /* always show first and last */ }
+              else if (i % step !== 0) return null;
+              else if (last - i < step * 0.6) return null; /* too close to last label */
+              const x = padding.left + (i / Math.max(labels.length - 1, 1)) * chartWidth;
+              return (
+                <text
+                  key={i}
+                  x={x}
+                  y={height - 5}
+                  textAnchor="middle"
+                  className="fill-muted-foreground"
+                  fontSize="5"
+                  fontFamily="var(--font-sans)"
+                >
+                  {label}
+                </text>
+              );
+            });
+          })()}
       </svg>
     </div>
   );
@@ -197,22 +205,30 @@ export function MultiLineChart({ series, labels, height = 120, className }: Mult
         })}
 
         {labels &&
-          labels.map((label, i) => {
-            const x = padding.left + (i / Math.max(labels.length - 1, 1)) * chartWidth;
-            return (
-              <text
-                key={i}
-                x={x}
-                y={height - 5}
-                textAnchor="middle"
-                className="fill-muted-foreground"
-                fontSize="5"
-                fontFamily="var(--font-sans)"
-              >
-                {label}
-              </text>
-            );
-          })}
+          (() => {
+            const maxTicks = 7;
+            const step = labels.length <= maxTicks ? 1 : Math.ceil(labels.length / maxTicks);
+            const last = labels.length - 1;
+            return labels.map((label, i) => {
+              if (i === 0 || i === last) { /* always show first and last */ }
+              else if (i % step !== 0) return null;
+              else if (last - i < step * 0.6) return null; /* too close to last label */
+              const x = padding.left + (i / Math.max(labels.length - 1, 1)) * chartWidth;
+              return (
+                <text
+                  key={i}
+                  x={x}
+                  y={height - 5}
+                  textAnchor="middle"
+                  className="fill-muted-foreground"
+                  fontSize="5"
+                  fontFamily="var(--font-sans)"
+                >
+                  {label}
+                </text>
+              );
+            });
+          })()}
       </svg>
     </div>
   );
