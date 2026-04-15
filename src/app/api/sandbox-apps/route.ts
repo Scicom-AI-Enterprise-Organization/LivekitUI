@@ -34,7 +34,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Insufficient permissions" }, { status: 403 });
   }
 
-  const { name, template } = await request.json();
+  const { name, template, agentName } = await request.json();
 
   if (!name || !template) {
     return NextResponse.json({ error: "Name and template are required" }, { status: 400 });
@@ -46,7 +46,8 @@ export async function POST(request: NextRequest) {
       template,
       process.env.LIVEKIT_API_KEY || "",
       process.env.LIVEKIT_API_SECRET || "",
-      process.env.NEXT_PUBLIC_SANDBOX_DOMAIN
+      process.env.NEXT_PUBLIC_SANDBOX_DOMAIN,
+      agentName || ""
     );
 
     const db = await ensureDb();

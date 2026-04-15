@@ -6,6 +6,13 @@ import { TopBar } from "@/components/livekit/top-bar";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Label } from "@/components/ui/label";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Card, CardContent } from "@/components/ui/card";
@@ -69,11 +76,16 @@ export default function AgentStarterReactPage() {
   const [createdName, setCreatedName] = useState("");
   const [createError, setCreateError] = useState("");
   const [sandboxPrefix, setSandboxPrefix] = useState("");
+  const [agents, setAgents] = useState<{ agentName: string }[]>([]);
+  const [selectedAgent, setSelectedAgent] = useState("__auto__");
 
   useEffect(() => {
     fetch("/api/sandbox-config")
       .then((r) => r.json())
       .then((d) => setSandboxPrefix(d.prefix || ""));
+    fetch("/api/agents")
+      .then((r) => r.json())
+      .then((d) => setAgents(d.agents || []));
   }, []);
 
   return (
@@ -369,6 +381,27 @@ export default function AgentStarterReactPage() {
               )}
             </div>
 
+            {/* Dispatch to agent */}
+            <div className="space-y-2">
+              <Label>Dispatch to agent</Label>
+              <Select value={selectedAgent} onValueChange={setSelectedAgent}>
+                <SelectTrigger className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="__auto__">Auto-dispatch (any available agent)</SelectItem>
+                  {agents.map((a) => (
+                    <SelectItem key={a.agentName} value={a.agentName}>
+                      {a.agentName}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-muted-foreground">
+                Choose a specific agent or leave as auto-dispatch.
+              </p>
+            </div>
+
             {/* Enable capabilities */}
             <div className="space-y-3">
               <Label>Enable capabilities</Label>
@@ -526,7 +559,11 @@ export default function AgentStarterReactPage() {
                   const res = await fetch("/api/sandbox-apps", {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ name, template: "agent-starter-react" }),
+                    body: JSON.stringify({
+                      name,
+                      template: "agent-starter-react",
+                      agentName: selectedAgent === "__auto__" ? "" : selectedAgent,
+                    }),
                   });
                   const data = await res.json();
                   if (!res.ok) {

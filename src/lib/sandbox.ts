@@ -57,7 +57,8 @@ export async function deploySandbox(
   template: string,
   livekitApiKey: string,
   livekitApiSecret: string,
-  sandboxDomain?: string
+  sandboxDomain?: string,
+  agentName?: string
 ): Promise<{ port: number; url: string }> {
   const templateDir = path.join(process.cwd(), "example", template);
 
@@ -74,7 +75,8 @@ export async function deploySandbox(
     `LIVEKIT_API_KEY=${livekitApiKey}`,
     `LIVEKIT_API_SECRET=${livekitApiSecret}`,
     `LIVEKIT_URL=ws://localhost:7880`,
-    `AGENT_NAME=`,
+    `AGENT_NAME=${agentName || ""}`,
+    `NEXT_PUBLIC_AGENT_NAME=${agentName || ""}`,
     "",
   ].join("\n");
 

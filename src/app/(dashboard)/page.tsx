@@ -82,7 +82,7 @@ export default function OverviewPage() {
     <div className="flex flex-col h-full">
       {/* Top bar */}
       <TopBar title="Overview" showRefresh showTimeRange>
-        <span className="text-sm text-muted-foreground">
+        <span className="text-sm text-muted-foreground whitespace-nowrap">
           Last updated 3 min ago
         </span>
       </TopBar>

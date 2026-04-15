@@ -14,12 +14,22 @@ import {
   Loader2,
   RefreshCw,
   Bot,
+  Trash2,
 } from "lucide-react";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+  DialogFooter,
+} from "@/components/ui/dialog";
 
 interface AgentWorker {
   agentName: string;
   concurrentSessions: number;
   rooms: string[];
+  status: string;
 }
 
 interface AgentSession {
@@ -43,6 +53,7 @@ export default function AgentsPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
+  const [deleteAgent, setDeleteAgent] = useState<string | null>(null);
   const [history, setHistory] = useState<{ time: string; sessions: number; agents: number }[]>([]);
 
   const fetchAgents = useCallback(async () => {
@@ -73,6 +84,17 @@ export default function AgentsPage() {
   useEffect(() => {
     fetchAgents();
   }, [fetchAgents]);
+
+  const confirmDelete = async () => {
+    if (!deleteAgent) return;
+    await fetch("/api/agents", {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: deleteAgent }),
+    });
+    setDeleteAgent(null);
+    fetchAgents();
+  };
 
   const filtered = agents.filter((a) =>
     search ? a.agentName.toLowerCase().includes(search.toLowerCase()) : true
@@ -192,46 +214,69 @@ export default function AgentsPage() {
           ) : (
             <div className="space-y-2">
               {filtered.map((agent) => (
-                <Card key={agent.agentName} className="py-0">
-                  <CardContent className="p-4">
+                <Card key={agent.agentName} className="py-0 hover:border-primary/40 transition-colors">
+                  <CardContent className="p-0">
                     <div className="flex items-center justify-between">
-                      <div className="flex flex-col gap-1">
-                        <span className="text-sm font-medium text-foreground">
-                          {agent.agentName}
-                        </span>
-                        {agent.rooms.length > 0 && (
-                          <span className="text-xs text-muted-foreground">
-                            in: {agent.rooms.join(", ")}
+                      <Link
+                        href={`/agents/${encodeURIComponent(agent.agentName)}`}
+                        className="flex-1 flex items-center justify-between p-4"
+                      >
+                        <div className="flex flex-col gap-1">
+                          <span className="text-sm font-medium text-foreground">
+                            {agent.agentName}
                           </span>
-                        )}
-                      </div>
-
-                      <div className="flex items-center gap-3">
-                        <div className="flex flex-col items-end gap-0.5">
-                          <span className="text-xs text-muted-foreground">
-                            Concurrent sessions
-                          </span>
-                          <span className="text-sm font-semibold text-foreground">
-                            {agent.concurrentSessions}
-                          </span>
+                          {agent.rooms.length > 0 && (
+                            <span className="text-xs text-muted-foreground">
+                              in: {agent.rooms.join(", ")}
+                            </span>
+                          )}
                         </div>
 
-                        <Badge
-                          variant="default"
-                          className={
-                            agent.concurrentSessions > 0
-                              ? "bg-emerald-500/10 text-emerald-500 gap-1.5"
-                              : "bg-muted text-muted-foreground gap-1.5"
-                          }
-                        >
-                          <span
-                            className={`size-1.5 rounded-full ${
-                              agent.concurrentSessions > 0 ? "bg-emerald-500 animate-pulse" : "bg-muted-foreground"
-                            }`}
-                          />
-                          {agent.concurrentSessions > 0 ? "Active" : "Idle"}
-                        </Badge>
-                      </div>
+                        <div className="flex items-center gap-3">
+                          <div className="flex flex-col items-end gap-0.5">
+                            <span className="text-xs text-muted-foreground">
+                              Concurrent sessions
+                            </span>
+                            <span className="text-sm font-semibold text-foreground">
+                              {agent.concurrentSessions}
+                            </span>
+                          </div>
+
+                          {agent.concurrentSessions > 0 ? (
+                            <Badge variant="default" className="bg-emerald-500/10 text-emerald-500 gap-1.5">
+                              <span className="size-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                              Active
+                            </Badge>
+                          ) : agent.status === "draft" ? (
+                            <Badge variant="outline" className="gap-1.5">
+                              <span className="size-1.5 rounded-full bg-yellow-500" />
+                              Draft
+                            </Badge>
+                          ) : agent.status === "connected" ? (
+                            <Badge variant="default" className="bg-emerald-500/10 text-emerald-500 gap-1.5">
+                              <span className="size-1.5 rounded-full bg-emerald-500" />
+                              Connected
+                            </Badge>
+                          ) : (
+                            <Badge variant="outline" className="text-muted-foreground gap-1.5">
+                              <span className="size-1.5 rounded-full bg-muted-foreground" />
+                              Idle
+                            </Badge>
+                          )}
+                        </div>
+                      </Link>
+                      <Button
+                        variant="ghost"
+                        size="icon-sm"
+                        className="mr-3 text-muted-foreground hover:text-destructive"
+                        onClick={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          setDeleteAgent(agent.agentName);
+                        }}
+                      >
+                        <Trash2 className="size-4" />
+                      </Button>
                     </div>
                   </CardContent>
                 </Card>
@@ -275,6 +320,22 @@ export default function AgentsPage() {
           </div>
         )}
       </div>
+
+      {/* Delete agent confirmation */}
+      <Dialog open={!!deleteAgent} onOpenChange={(open) => !open && setDeleteAgent(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Delete agent</DialogTitle>
+            <DialogDescription>
+              Are you sure you want to delete <span className="font-mono text-foreground">{deleteAgent}</span>? This can not be undone.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setDeleteAgent(null)}>Cancel</Button>
+            <Button variant="destructive" onClick={confirmDelete}>Delete</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

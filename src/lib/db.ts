@@ -56,6 +56,24 @@ export interface DbSandboxApp {
   created_at: string;
 }
 
+export interface DbAgent {
+  id: number;
+  name: string;
+  config: string;  // JSON blob
+  status: string;  // 'draft' | 'deployed'
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DbAgentSecret {
+  id: number;
+  agent_name: string;
+  key: string;
+  value: string;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface DbWebhookEvent {
   id: number;
   event: string;
@@ -118,6 +136,14 @@ export interface Database {
   addWebhookEvent(event: string, room: string | null, participant: string | null, payload: string): Promise<void>;
   getWebhookEvents(limit: number): Promise<DbWebhookEvent[]>;
   clearWebhookEvents(): Promise<void>;
+  createAgent(name: string, config: string, status: string): Promise<DbAgent>;
+  updateAgent(id: number, name: string, config: string, status: string): Promise<void>;
+  getAllAgents(): Promise<DbAgent[]>;
+  findAgentByName(name: string): Promise<DbAgent | null>;
+  deleteAgent(id: number): Promise<void>;
+  upsertAgentSecret(agentName: string, key: string, value: string): Promise<void>;
+  getAgentSecrets(agentName: string): Promise<DbAgentSecret[]>;
+  deleteAgentSecret(agentName: string, key: string): Promise<void>;
 }
 
 // ---------------------------------------------------------------------------
@@ -201,6 +227,23 @@ function createSqliteDb(): Database {
           participant TEXT,
           payload TEXT NOT NULL,
           created_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE TABLE IF NOT EXISTS agents (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          name TEXT UNIQUE NOT NULL,
+          config TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'draft',
+          created_at TEXT DEFAULT (datetime('now')),
+          updated_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE TABLE IF NOT EXISTS agent_secrets (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          agent_name TEXT NOT NULL,
+          key TEXT NOT NULL,
+          value TEXT NOT NULL,
+          created_at TEXT DEFAULT (datetime('now')),
+          updated_at TEXT DEFAULT (datetime('now')),
+          UNIQUE(agent_name, key)
         );
       `);
     },
@@ -367,6 +410,46 @@ function createSqliteDb(): Database {
     async clearWebhookEvents() {
       db.prepare("DELETE FROM webhook_events").run();
     },
+
+    async createAgent(name, config, status) {
+      const result = db.prepare(
+        "INSERT INTO agents (name, config, status) VALUES (?, ?, ?)"
+      ).run(name, config, status);
+      return db.prepare("SELECT * FROM agents WHERE id = ?").get(result.lastInsertRowid) as DbAgent;
+    },
+
+    async updateAgent(id, name, config, status) {
+      db.prepare(
+        "UPDATE agents SET name = ?, config = ?, status = ?, updated_at = datetime('now') WHERE id = ?"
+      ).run(name, config, status, id);
+    },
+
+    async getAllAgents() {
+      return db.prepare("SELECT * FROM agents ORDER BY created_at DESC").all() as DbAgent[];
+    },
+
+    async findAgentByName(name) {
+      return db.prepare("SELECT * FROM agents WHERE name = ?").get(name) as DbAgent | null;
+    },
+
+    async deleteAgent(id) {
+      db.prepare("DELETE FROM agents WHERE id = ?").run(id);
+    },
+
+    async upsertAgentSecret(agentName, key, value) {
+      db.prepare(
+        `INSERT INTO agent_secrets (agent_name, key, value) VALUES (?, ?, ?)
+         ON CONFLICT(agent_name, key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')`
+      ).run(agentName, key, value);
+    },
+
+    async getAgentSecrets(agentName) {
+      return db.prepare("SELECT * FROM agent_secrets WHERE agent_name = ? ORDER BY created_at ASC").all(agentName) as DbAgentSecret[];
+    },
+
+    async deleteAgentSecret(agentName, key) {
+      db.prepare("DELETE FROM agent_secrets WHERE agent_name = ? AND key = ?").run(agentName, key);
+    },
   };
 }
 
@@ -456,6 +539,23 @@ function createPostgresDb(): Database {
           participant TEXT,
           payload TEXT NOT NULL,
           created_at TIMESTAMPTZ DEFAULT NOW()
+        );
+        CREATE TABLE IF NOT EXISTS agents (
+          id SERIAL PRIMARY KEY,
+          name TEXT UNIQUE NOT NULL,
+          config TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'draft',
+          created_at TIMESTAMPTZ DEFAULT NOW(),
+          updated_at TIMESTAMPTZ DEFAULT NOW()
+        );
+        CREATE TABLE IF NOT EXISTS agent_secrets (
+          id SERIAL PRIMARY KEY,
+          agent_name TEXT NOT NULL,
+          key TEXT NOT NULL,
+          value TEXT NOT NULL,
+          created_at TIMESTAMPTZ DEFAULT NOW(),
+          updated_at TIMESTAMPTZ DEFAULT NOW(),
+          UNIQUE(agent_name, key)
         );
       `);
     },
@@ -639,6 +739,55 @@ function createPostgresDb(): Database {
 
     async clearWebhookEvents() {
       await pool.query("DELETE FROM webhook_events");
+    },
+
+    async createAgent(name, config, status) {
+      const { rows } = await pool.query(
+        "INSERT INTO agents (name, config, status) VALUES ($1, $2, $3) RETURNING *",
+        [name, config, status]
+      );
+      return rows[0];
+    },
+
+    async updateAgent(id, name, config, status) {
+      await pool.query(
+        "UPDATE agents SET name = $1, config = $2, status = $3, updated_at = NOW() WHERE id = $4",
+        [name, config, status, id]
+      );
+    },
+
+    async getAllAgents() {
+      const { rows } = await pool.query("SELECT * FROM agents ORDER BY created_at DESC");
+      return rows;
+    },
+
+    async findAgentByName(name) {
+      const { rows } = await pool.query("SELECT * FROM agents WHERE name = $1", [name]);
+      return rows[0] || null;
+    },
+
+    async deleteAgent(id) {
+      await pool.query("DELETE FROM agents WHERE id = $1", [id]);
+    },
+
+    async upsertAgentSecret(agentName, key, value) {
+      await pool.query(
+        `INSERT INTO agent_secrets (agent_name, key, value) VALUES ($1, $2, $3)
+         ON CONFLICT (agent_name, key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
+        [agentName, key, value]
+      );
+    },
+
+    async getAgentSecrets(agentName) {
+      const { rows } = await pool.query(
+        "SELECT * FROM agent_secrets WHERE agent_name = $1 ORDER BY created_at ASC",
+        [agentName]
+      );
+      return rows;
+    },
+
+    async deleteAgentSecret(agentName, key) {
+      await pool.query("DELETE FROM agent_secrets WHERE agent_name = $1 AND key = $2", [agentName, key]);
     },
   };
 }
