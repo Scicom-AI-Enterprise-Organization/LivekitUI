@@ -57,7 +57,7 @@ export default function ApiKeysPage() {
 
   return (
     <div className="flex flex-col h-full">
-      <TopBar title="Keys" breadcrumb={["husein", "Settings"]} />
+      <TopBar title="Keys" breadcrumb={[{ label: "Settings", href: "/settings/project" }]} />
 
       <div className="flex-1 overflow-y-auto p-6 space-y-6">
         <div>

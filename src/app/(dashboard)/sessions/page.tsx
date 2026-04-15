@@ -132,7 +132,6 @@ export default function SessionsPage() {
     <div className="flex flex-col h-full">
       <TopBar
         title="Sessions"
-        breadcrumb={["husein"]}
         showRefresh
         showTimeRange
         actions={

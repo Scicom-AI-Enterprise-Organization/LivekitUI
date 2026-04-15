@@ -54,7 +54,7 @@ export default function ProjectSettingsPage() {
     <div className="flex flex-col h-full">
       <TopBar
         title="Project"
-        breadcrumb={["husein", "Settings"]}
+        breadcrumb={[{ label: "Settings", href: "/settings/project" }]}
         actions={
           <Button size="sm">
             Save changes

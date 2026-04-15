@@ -10,10 +10,13 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { RefreshCw } from "lucide-react";
+import Link from "next/link";
+
+type BreadcrumbItem = string | { label: string; href: string };
 
 interface TopBarProps {
   title: string;
-  breadcrumb?: string[];
+  breadcrumb?: BreadcrumbItem[];
   children?: React.ReactNode;
   showRefresh?: boolean;
   showTimeRange?: boolean;
@@ -35,12 +38,23 @@ export function TopBar({
       <div className="flex items-center gap-2">
         {breadcrumb && breadcrumb.length > 0 && (
           <div className="flex items-center gap-1.5 text-sm text-muted-foreground">
-            {breadcrumb.map((crumb, i) => (
-              <span key={i} className="flex items-center gap-1.5">
-                {i > 0 && <span>/</span>}
-                <span className="hover:text-foreground cursor-pointer">{crumb}</span>
-              </span>
-            ))}
+            {breadcrumb.map((crumb, i) => {
+              const isObj = typeof crumb === "object";
+              const label = isObj ? crumb.label : crumb;
+              const href = isObj ? crumb.href : null;
+              return (
+                <span key={i} className="flex items-center gap-1.5">
+                  {i > 0 && <span>/</span>}
+                  {href ? (
+                    <Link href={href} className="hover:text-foreground transition-colors">
+                      {label}
+                    </Link>
+                  ) : (
+                    <span>{label}</span>
+                  )}
+                </span>
+              );
+            })}
             <span>/</span>
           </div>
         )}

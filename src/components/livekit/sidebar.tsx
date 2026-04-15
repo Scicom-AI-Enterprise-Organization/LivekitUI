@@ -55,6 +55,11 @@ const navItems: NavItem[] = [
     action: "add",
   },
   {
+    label: "Sandbox",
+    href: "/sandbox",
+    icon: <Box className="size-4" />,
+  },
+  {
     label: "Telephony",
     href: "/telephony",
     icon: <Phone className="size-4" />,
@@ -81,7 +86,6 @@ const navItems: NavItem[] = [
     icon: <Settings className="size-4" />,
     children: [
       { label: "Project", href: "/settings/project" },
-      { label: "Sandbox", href: "/settings/sandbox" },
       { label: "Team members", href: "/settings/team-members" },
       { label: "API keys", href: "/settings/api-keys" },
       { label: "Webhooks", href: "/settings/webhooks" },

@@ -35,7 +35,7 @@ export default function NewTrunkPage() {
 
   return (
     <div className="flex h-full flex-col">
-      <TopBar title="SIP trunks" breadcrumb={["husein", "Telephony"]} />
+      <TopBar title="SIP trunks" breadcrumb={[{ label: "Telephony", href: "/telephony/calls" }]} />
 
       <div className="flex-1 overflow-y-auto">
         <div className="mx-auto max-w-2xl p-6 space-y-6">

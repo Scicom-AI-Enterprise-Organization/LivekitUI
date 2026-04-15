@@ -53,6 +53,7 @@ export interface DbSandboxApp {
   url: string;
   port: number;
   status: string;
+  settings: string; // JSON blob
   created_at: string;
 }
 
@@ -127,6 +128,8 @@ export interface Database {
   findPhoneNumberByNumber(number: string): Promise<DbPhoneNumber | null>;
   createSandboxApp(name: string, template: string, url: string, port: number): Promise<DbSandboxApp>;
   getAllSandboxApps(): Promise<DbSandboxApp[]>;
+  getSandboxApp(id: number): Promise<DbSandboxApp | null>;
+  updateSandboxAppSettings(id: number, settings: string): Promise<void>;
   deleteSandboxApp(id: number): Promise<void>;
   addAgentSnapshot(sessions: number, agents: number): Promise<void>;
   getAgentSnapshots(hours: number): Promise<DbAgentSnapshot[]>;
@@ -204,6 +207,7 @@ function createSqliteDb(): Database {
           url TEXT NOT NULL,
           port INTEGER NOT NULL DEFAULT 0,
           status TEXT NOT NULL DEFAULT 'running',
+          settings TEXT NOT NULL DEFAULT '{}',
           created_at TEXT DEFAULT (datetime('now'))
         );
         CREATE TABLE IF NOT EXISTS agent_snapshots (
@@ -365,6 +369,15 @@ function createSqliteDb(): Database {
       return db.prepare("SELECT * FROM sandbox_apps ORDER BY created_at DESC").all() as DbSandboxApp[];
     },
 
+    async getSandboxApp(id) {
+      const row = db.prepare("SELECT * FROM sandbox_apps WHERE id = ?").get(id) as DbSandboxApp | undefined;
+      return row || null;
+    },
+
+    async updateSandboxAppSettings(id, settings) {
+      db.prepare("UPDATE sandbox_apps SET settings = ? WHERE id = ?").run(settings, id);
+    },
+
     async deleteSandboxApp(id) {
       db.prepare("DELETE FROM sandbox_apps WHERE id = ?").run(id);
     },
@@ -516,8 +529,10 @@ function createPostgresDb(): Database {
           url TEXT NOT NULL,
           port INTEGER NOT NULL DEFAULT 0,
           status TEXT NOT NULL DEFAULT 'running',
+          settings TEXT NOT NULL DEFAULT '{}',
           created_at TIMESTAMPTZ DEFAULT NOW()
         );
+        ALTER TABLE sandbox_apps ADD COLUMN IF NOT EXISTS settings TEXT NOT NULL DEFAULT '{}';
         CREATE TABLE IF NOT EXISTS agent_snapshots (
           id SERIAL PRIMARY KEY,
           sessions INTEGER NOT NULL DEFAULT 0,
@@ -688,6 +703,15 @@ function createPostgresDb(): Database {
     async getAllSandboxApps() {
       const { rows } = await pool.query("SELECT * FROM sandbox_apps ORDER BY created_at DESC");
       return rows;
+    },
+
+    async getSandboxApp(id) {
+      const { rows } = await pool.query("SELECT * FROM sandbox_apps WHERE id = $1", [id]);
+      return rows[0] || null;
+    },
+
+    async updateSandboxAppSettings(id, settings) {
+      await pool.query("UPDATE sandbox_apps SET settings = $1 WHERE id = $2", [settings, id]);
     },
 
     async deleteSandboxApp(id) {

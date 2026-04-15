@@ -37,7 +37,6 @@ import {
   AudioLines,
   Trash2,
   MoreVertical,
-  History,
   Download,
   BarChart3,
   Loader2,
@@ -720,6 +719,7 @@ interface AgentConfig {
   llmModel: string;
   sttModel: string;
   sttLanguage: string;
+  backgroundAudio: string;
 }
 
 const AGENT_NAME_POOL = [
@@ -755,6 +755,7 @@ You are interacting with the user via voice, and must apply the following rules 
   llmModel: "gpt-5.4-mini",
   sttModel: "deepgram",
   sttLanguage: "en",
+  backgroundAudio: "none",
 };
 
 /* ────────────────────────────────────
@@ -1079,7 +1080,7 @@ function ModelsVoiceTab({
           Select background audio to play during conversations.{" "}
           <a href="https://docs.livekit.io/agents/multimodality/audio/#background-audio" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">Learn more</a>
         </p>
-        <Select defaultValue="none">
+        <Select value={config.backgroundAudio} onValueChange={(v) => onChange({ backgroundAudio: v })}>
           <SelectTrigger>
             <SelectValue />
           </SelectTrigger>
@@ -1569,9 +1570,31 @@ function ActionsTab({
 /* ────────────────────────────────────
    Tab: Advanced
    ──────────────────────────────────── */
-function AdvancedTab() {
-  const [variables, setVariables] = useState<{ type: string; name: string; preview: string }[]>([]);
-  const [secrets, setSecrets] = useState<{ key: string; value: string }[]>([]);
+function AdvancedTab({
+  variables,
+  setVariables,
+  secrets,
+  setSecrets,
+  agentName,
+}: {
+  variables: { type: string; name: string; preview: string }[];
+  setVariables: React.Dispatch<React.SetStateAction<{ type: string; name: string; preview: string }[]>>;
+  secrets: { key: string; value: string }[];
+  setSecrets: React.Dispatch<React.SetStateAction<{ key: string; value: string }[]>>;
+  agentName: string;
+}) {
+  // Load secrets from the backend API so it matches the agent detail page
+  useEffect(() => {
+    if (!agentName) return;
+    fetch(`/api/agents/${encodeURIComponent(agentName)}/secrets`)
+      .then((r) => r.json())
+      .then((data) => {
+        if (Array.isArray(data.secrets)) {
+          setSecrets(data.secrets.map((s: { key: string; value: string }) => ({ key: s.key, value: s.value })));
+        }
+      })
+      .catch(() => {});
+  }, [agentName, setSecrets]);
 
   const addVariable = () => setVariables([...variables, { type: "String", name: "", preview: "" }]);
   const removeVariable = (i: number) => setVariables(variables.filter((_, idx) => idx !== i));
@@ -1582,7 +1605,30 @@ function AdvancedTab() {
   };
 
   const addSecret = () => setSecrets([...secrets, { key: "", value: "" }]);
-  const removeSecret = (i: number) => setSecrets(secrets.filter((_, idx) => idx !== i));
+
+  const removeSecret = async (i: number) => {
+    const key = secrets[i]?.key;
+    if (key && agentName) {
+      await fetch(`/api/agents/${encodeURIComponent(agentName)}/secrets`, {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ key }),
+      }).catch(() => {});
+    }
+    setSecrets(secrets.filter((_, idx) => idx !== i));
+  };
+
+  // Persist on blur — when the user finishes editing a secret row, upsert to backend
+  const persistSecret = async (i: number) => {
+    const s = secrets[i];
+    if (!s || !s.key || !s.value || !agentName) return;
+    await fetch(`/api/agents/${encodeURIComponent(agentName)}/secrets`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ key: s.key, value: s.value }),
+    }).catch(() => {});
+  };
+
   const updateSecret = (i: number, field: string, value: string) => {
     const copy = [...secrets];
     (copy[i] as Record<string, string>)[field] = value;
@@ -1667,6 +1713,7 @@ function AdvancedTab() {
                 <input
                   value={s.key}
                   onChange={(e) => updateSecret(i, "key", e.target.value)}
+                  onBlur={() => persistSecret(i)}
                   placeholder="MY_API_KEY"
                   className="h-8 rounded-md border border-border bg-card px-2 text-xs outline-none focus:border-primary"
                 />
@@ -1674,6 +1721,7 @@ function AdvancedTab() {
                   type="password"
                   value={s.value}
                   onChange={(e) => updateSecret(i, "value", e.target.value)}
+                  onBlur={() => persistSecret(i)}
                   placeholder="••••••••••••••"
                   className="h-8 rounded-md border border-border bg-card px-2 text-xs outline-none focus:border-primary"
                 />
@@ -2468,22 +2516,50 @@ export default function AgentBuilderPage() {
   );
 }
 
+// Slug <-> Tab label mapping
+const tabSlugs: Record<string, Tab> = {
+  "instructions": "Instructions",
+  "models": "Models & Voice",
+  "actions": "Actions",
+  "advanced": "Advanced",
+};
+const tabToSlug: Record<Tab, string> = {
+  "Instructions": "instructions",
+  "Models & Voice": "models",
+  "Actions": "actions",
+  "Advanced": "advanced",
+};
+
 function AgentBuilderContent() {
-  const [activeTab, setActiveTab] = useState<Tab>("Instructions");
-  const [viewMode, setViewMode] = useState<"preview" | "code">("preview");
   const router = useRouter();
   const searchParams = useSearchParams();
   const editingAgentName = searchParams.get("agent");
+  const settingParam = searchParams.get("setting");
+  const [activeTab, setActiveTab] = useState<Tab>(
+    () => tabSlugs[settingParam || ""] || "Instructions"
+  );
+  const [viewMode, setViewMode] = useState<"preview" | "code">("preview");
   const [config, setConfig] = useState<AgentConfig>(defaultConfig);
   const [editingName, setEditingName] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
+  const [deploying, setDeploying] = useState(false);
 
   const originalNameRef = useRef<string>("");
+
+  // Update tab state AND URL when user clicks a tab
+  const handleTabChange = useCallback((tab: Tab) => {
+    setActiveTab(tab);
+    const params = new URLSearchParams(window.location.search);
+    params.set("setting", tabToSlug[tab]);
+    router.replace(`/agents/builder?${params.toString()}`, { scroll: false });
+  }, [router]);
 
   // On mount: if ?agent=... is provided, load that agent's config.
   // Otherwise, generate a new random name and create a draft agent.
   useEffect(() => {
     if (editingAgentName) {
+      // Suppress auto-save until the load completes
+      hasLoadedRef.current = false;
       // Load existing agent
       fetch(`/api/agents/by-name?name=${encodeURIComponent(editingAgentName)}`)
         .then((r) => r.json())
@@ -2492,9 +2568,40 @@ function AgentBuilderContent() {
             const loaded = { ...defaultConfig, ...data.agent.config, name: data.agent.name };
             originalNameRef.current = data.agent.name;
             setConfig(loaded);
+            setHttpTools(data.agent.config.httpTools ?? []);
+            setClientTools(data.agent.config.clientTools ?? []);
+            setMcpServers(data.agent.config.mcpServers ?? []);
+            setEndCall(
+              data.agent.config.endCall ?? {
+                enabled: false,
+                conditions: "",
+                instructions: "Thank the user for their time and say goodbye.",
+                deleteRoom: false,
+              }
+            );
+            setCallSummary(
+              data.agent.config.callSummary ?? {
+                enabled: false,
+                llmModel: "gpt-5.3-chat",
+                reasoningEffort: "low",
+                instructions: "",
+                endpointUrl: "",
+                headers: [],
+              }
+            );
+            setVariables(data.agent.config.variables ?? []);
+            // Secrets are loaded separately by AdvancedTab from /api/agents/{name}/secrets
           }
+          // Re-enable auto-save after state updates from the load are queued.
+          // Defer to the next microtask so React flushes the state updates
+          // (and the auto-save effect) with the ref still false.
+          setTimeout(() => {
+            hasLoadedRef.current = true;
+          }, 0);
         })
-        .catch(() => {});
+        .catch(() => {
+          hasLoadedRef.current = true;
+        });
     } else {
       // Create new draft
       const name = randomAgentName();
@@ -2530,6 +2637,8 @@ function AgentBuilderContent() {
     endpointUrl: "",
     headers: [],
   });
+  const [variables, setVariables] = useState<{ type: string; name: string; preview: string }[]>([]);
+  const [secrets, setSecrets] = useState<{ key: string; value: string }[]>([]);
 
   const updateConfig = (partial: Partial<AgentConfig>) =>
     setConfig((prev) => ({ ...prev, ...partial }));
@@ -2552,6 +2661,7 @@ function AgentBuilderContent() {
             mcpServers,
             endCall,
             callSummary,
+            variables,
           },
           status: "draft",
         }),
@@ -2561,7 +2671,7 @@ function AgentBuilderContent() {
     } catch {
       setSaveState("error");
     }
-  }, [config, httpTools, clientTools, mcpServers, endCall, callSummary]);
+  }, [config, httpTools, clientTools, mcpServers, endCall, callSummary, variables]);
 
   // Auto-save on any change (debounced 1s). Skip the first render.
   useEffect(() => {
@@ -2578,7 +2688,7 @@ function AgentBuilderContent() {
       if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [config, httpTools, clientTools, mcpServers, endCall, callSummary]);
+  }, [config, httpTools, clientTools, mcpServers, endCall, callSummary, variables]);
 
   return (
     <div className="flex h-full flex-col">
@@ -2632,10 +2742,6 @@ function AgentBuilderContent() {
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="w-56">
               <DropdownMenuItem>
-                <History className="size-4" />
-                Show edit history
-              </DropdownMenuItem>
-              <DropdownMenuItem>
                 <Download className="size-4" />
                 Download code
               </DropdownMenuItem>
@@ -2679,8 +2785,47 @@ function AgentBuilderContent() {
               <>Save</>
             )}
           </Button>
-          <Button variant="destructive" size="sm">
-            Deploy agent
+          <Button
+            variant="destructive"
+            size="sm"
+            disabled={deploying}
+            onClick={async () => {
+              setDeploying(true);
+              try {
+                // Save first so the DB has the latest config
+                await saveAgent();
+                const pythonCode = generateAgentCode(
+                  config,
+                  httpTools,
+                  clientTools,
+                  mcpServers,
+                  endCall,
+                  callSummary
+                );
+                const res = await fetch(`/api/agents/${encodeURIComponent(config.name)}/deploy`, {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ pythonCode }),
+                });
+                const data = await res.json();
+                if (!res.ok) {
+                  alert(`Deploy failed: ${data.error || "unknown error"}`);
+                } else {
+                  alert(`Agent "${config.name}" deployed. PID: ${data.pid}`);
+                }
+              } finally {
+                setDeploying(false);
+              }
+            }}
+          >
+            {deploying ? (
+              <>
+                <Loader2 className="size-3 animate-spin" />
+                Deploying...
+              </>
+            ) : (
+              "Deploy agent"
+            )}
           </Button>
         </div>
       </div>
@@ -2691,7 +2836,7 @@ function AgentBuilderContent() {
           {tabs.map((tab) => (
             <button
               key={tab}
-              onClick={() => setActiveTab(tab)}
+              onClick={() => handleTabChange(tab)}
               className={`-mb-px border-b-2 px-1 pb-3 pt-3 text-sm font-medium transition-colors ${
                 activeTab === tab
                   ? "border-primary text-foreground"
@@ -2736,7 +2881,7 @@ function AgentBuilderContent() {
             {activeTab === "Instructions" && <InstructionsTab config={config} onChange={updateConfig} />}
             {activeTab === "Models & Voice" && <ModelsVoiceTab config={config} onChange={updateConfig} />}
             {activeTab === "Actions" && <ActionsTab httpTools={httpTools} setHttpTools={setHttpTools} clientTools={clientTools} setClientTools={setClientTools} mcpServers={mcpServers} setMcpServers={setMcpServers} endCall={endCall} setEndCall={setEndCall} callSummary={callSummary} setCallSummary={setCallSummary} />}
-            {activeTab === "Advanced" && <AdvancedTab />}
+            {activeTab === "Advanced" && <AdvancedTab variables={variables} setVariables={setVariables} secrets={secrets} setSecrets={setSecrets} agentName={config.name} />}
           </div>
         </div>
 

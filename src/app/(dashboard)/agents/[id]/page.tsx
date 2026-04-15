@@ -36,7 +36,69 @@ import {
   Trash2,
   Eye,
   Loader2,
+  ScrollText,
+  RotateCw,
+  RefreshCw,
+  X,
 } from "lucide-react";
+
+function AgentLogViewer({ name, onClose }: { name: string; onClose: () => void }) {
+  const [logs, setLogs] = useState("");
+  const [fetching, setFetching] = useState(false);
+  const [autoRefresh, setAutoRefresh] = useState(true);
+
+  const fetchLogs = useCallback(() => {
+    setFetching(true);
+    fetch(`/api/agents/${encodeURIComponent(name)}/logs`)
+      .then((res) => res.json())
+      .then((data) => setLogs(data.logs || "No logs yet."))
+      .finally(() => setFetching(false));
+  }, [name]);
+
+  useEffect(() => {
+    fetchLogs();
+    if (!autoRefresh) return;
+    const interval = setInterval(fetchLogs, 3000);
+    return () => clearInterval(interval);
+  }, [fetchLogs, autoRefresh]);
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center">
+      <div className="absolute inset-0 bg-black/50" onClick={onClose} />
+      <div className="relative flex h-[80vh] w-[80vw] max-w-4xl flex-col rounded-lg border border-border bg-background shadow-xl">
+        <div className="flex items-center justify-between border-b px-4 py-3">
+          <div className="flex items-center gap-3">
+            <ScrollText className="size-4 text-muted-foreground" />
+            <h3 className="text-sm font-semibold text-foreground">Logs: {name}</h3>
+            {autoRefresh && (
+              <Badge variant="outline" className="text-xs gap-1">
+                <span className="size-1.5 rounded-full bg-green-500 animate-pulse" />
+                Live
+              </Badge>
+            )}
+          </div>
+          <div className="flex items-center gap-2">
+            <Button variant="outline" size="sm" className="h-7 text-xs gap-1" onClick={() => setAutoRefresh(!autoRefresh)}>
+              {autoRefresh ? "Pause" : "Resume"}
+            </Button>
+            <Button variant="outline" size="sm" className="h-7 text-xs gap-1" onClick={fetchLogs} disabled={fetching}>
+              <RefreshCw className={`size-3 ${fetching ? "animate-spin" : ""}`} />
+              Refresh
+            </Button>
+            <button onClick={onClose} className="text-muted-foreground hover:text-foreground">
+              <X className="size-4" />
+            </button>
+          </div>
+        </div>
+        <div className="flex-1 overflow-auto bg-[#0d1117] p-4">
+          <pre className="text-xs font-mono leading-5 text-[#e6edf3] whitespace-pre-wrap break-all">
+            {logs}
+          </pre>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 const chartLabels = ["Apr 8", "Apr 9", "Apr 10", "Apr 11", "Apr 12", "Apr 13", "Apr 14"];
 const emptyData = [0, 0, 0, 0, 0, 0, 0];
@@ -59,6 +121,25 @@ export default function AgentDetailPage() {
   const [secretValue, setSecretValue] = useState("");
   const [deleteAgentOpen, setDeleteAgentOpen] = useState(false);
   const [deleteSecretKey, setDeleteSecretKey] = useState<string | null>(null);
+  const [logsOpen, setLogsOpen] = useState(false);
+  const [restarting, setRestarting] = useState(false);
+
+  const handleRestart = async () => {
+    setRestarting(true);
+    try {
+      // Stop, then re-deploy via the agent's saved code
+      await fetch(`/api/agents/${encodeURIComponent(id)}/stop`, { method: "POST" });
+      // Fetch the saved config and regenerate code is server-side concern;
+      // here we just re-trigger by calling a restart endpoint or re-deploy with empty body
+      const res = await fetch(`/api/agents/${encodeURIComponent(id)}/restart`, { method: "POST" });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        alert(`Restart failed: ${data.error || "unknown error"}`);
+      }
+    } finally {
+      setRestarting(false);
+    }
+  };
 
   const fetchSecrets = useCallback(async () => {
     try {
@@ -138,7 +219,7 @@ export default function AgentDetailPage() {
     <div className="flex flex-col h-full">
       <TopBar
         title={id}
-        breadcrumb={["husein", "Agents"]}
+        breadcrumb={[{ label: "Agents", href: "/agents" }]}
         showRefresh
         actions={
           <div className="flex items-center gap-2">
@@ -163,6 +244,18 @@ export default function AgentDetailPage() {
                 </Button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end" className="w-56">
+                <DropdownMenuItem onClick={() => setLogsOpen(true)}>
+                  <ScrollText className="size-4" />
+                  View logs
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={handleRestart} disabled={restarting}>
+                  {restarting ? (
+                    <Loader2 className="size-4 animate-spin" />
+                  ) : (
+                    <RotateCw className="size-4" />
+                  )}
+                  Restart
+                </DropdownMenuItem>
                 <DropdownMenuItem
                   className="text-destructive focus:text-destructive"
                   onClick={() => setDeleteAgentOpen(true)}
@@ -287,26 +380,26 @@ export default function AgentDetailPage() {
                         <td className="px-4 py-2.5 text-muted-foreground">{formatDate(s.createdAt)}</td>
                         <td className="px-4 py-2.5 text-muted-foreground">{formatDate(s.updatedAt)}</td>
                         <td className="px-4 py-2.5">
-                          <DropdownMenu>
-                            <DropdownMenuTrigger asChild>
-                              <Button variant="ghost" size="icon-xs">
-                                <MoreVertical className="size-4" />
-                              </Button>
-                            </DropdownMenuTrigger>
-                            <DropdownMenuContent align="end">
-                              <DropdownMenuItem onClick={() => openEditSecret(s)}>
-                                <Pencil className="size-3.5" />
-                                Update secret
-                              </DropdownMenuItem>
-                              <DropdownMenuItem
-                                className="text-destructive focus:text-destructive"
-                                onClick={() => setDeleteSecretKey(s.key)}
-                              >
-                                <Trash2 className="size-3.5" />
-                                Delete secret
-                              </DropdownMenuItem>
-                            </DropdownMenuContent>
-                          </DropdownMenu>
+                          <div className="flex items-center justify-end gap-1">
+                            <Button
+                              variant="ghost"
+                              size="icon-xs"
+                              className="text-muted-foreground hover:text-foreground"
+                              onClick={() => openEditSecret(s)}
+                              title="Update secret"
+                            >
+                              <Pencil className="size-3.5" />
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              size="icon-xs"
+                              className="text-muted-foreground hover:text-destructive"
+                              onClick={() => setDeleteSecretKey(s.key)}
+                              title="Delete secret"
+                            >
+                              <Trash2 className="size-3.5" />
+                            </Button>
+                          </div>
                         </td>
                       </tr>
                     ))
@@ -380,6 +473,9 @@ export default function AgentDetailPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* Logs viewer */}
+      {logsOpen && <AgentLogViewer name={id} onClose={() => setLogsOpen(false)} />}
 
       {/* Delete secret dialog */}
       <Dialog open={!!deleteSecretKey} onOpenChange={(open) => !open && setDeleteSecretKey(null)}>

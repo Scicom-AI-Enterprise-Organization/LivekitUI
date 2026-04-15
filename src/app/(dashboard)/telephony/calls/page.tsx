@@ -10,7 +10,7 @@ import { Info, Filter, Search } from "lucide-react";
 export default function TelephonyCallsPage() {
   return (
     <div className="flex flex-col h-full">
-      <TopBar title="Telephony" breadcrumb={["husein"]} showRefresh showTimeRange />
+      <TopBar title="Telephony" showRefresh showTimeRange />
 
       <div className="flex-1 overflow-auto p-6 space-y-6">
         {/* Top 3 stat cards */}

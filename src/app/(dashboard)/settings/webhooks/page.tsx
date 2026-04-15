@@ -102,7 +102,7 @@ export default function WebhooksPage() {
     <div className="flex flex-col h-full">
       <TopBar
         title="Webhooks"
-        breadcrumb={["husein", "Settings"]}
+        breadcrumb={[{ label: "Settings", href: "/settings/project" }]}
         actions={
           <div className="flex items-center gap-2">
             <Button variant="outline" size="sm" onClick={fetchEvents}>

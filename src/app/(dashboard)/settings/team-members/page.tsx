@@ -153,7 +153,7 @@ export default function TeamMembersPage() {
     <div className="flex flex-col h-full">
       <TopBar
         title="Team members"
-        breadcrumb={["husein", "Settings"]}
+        breadcrumb={[{ label: "Settings", href: "/settings/project" }]}
         actions={
           isOwner ? (
             <Button size="sm" onClick={() => { resetDialog(); setDialogOpen(true); }}>

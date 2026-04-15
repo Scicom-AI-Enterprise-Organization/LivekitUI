@@ -14,7 +14,7 @@ const columns = [
 export default function DispatchRulesPage() {
   return (
     <div className="flex flex-col h-full">
-      <TopBar title="Dispatch rules" breadcrumb={["husein", "Telephony"]} />
+      <TopBar title="Dispatch rules" breadcrumb={[{ label: "Telephony", href: "/telephony/calls" }]} />
 
       <div className="flex-1 overflow-auto p-6">
         <DataTable columns={columns} data={[]} />

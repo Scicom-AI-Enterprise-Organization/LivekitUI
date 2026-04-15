@@ -23,8 +23,8 @@ export default function EgressesPage() {
 
   return (
     <div className="flex flex-col h-full">
-      <TopBar title="Egresses" breadcrumb={["husein"]} showRefresh showTimeRange>
-        <span className="text-xs text-muted-foreground">Last updated 4 min ago</span>
+      <TopBar title="Egresses" showRefresh showTimeRange>
+        <span className="text-xs text-muted-foreground whitespace-nowrap">Last updated 4 min ago</span>
       </TopBar>
 
       <div className="flex-1 overflow-auto p-6 space-y-4">

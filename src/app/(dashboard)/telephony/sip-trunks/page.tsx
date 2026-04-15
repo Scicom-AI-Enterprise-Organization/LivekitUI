@@ -19,7 +19,7 @@ export default function SipTrunksPage() {
     <div className="flex flex-col h-full">
       <TopBar
         title="SIP trunks"
-        breadcrumb={["husein", "Telephony"]}
+        breadcrumb={[{ label: "Telephony", href: "/telephony/calls" }]}
         actions={
           <Button size="sm" asChild>
             <Link href="/telephony/sip-trunks/new">Create new trunk</Link>

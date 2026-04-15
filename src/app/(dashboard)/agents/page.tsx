@@ -15,6 +15,8 @@ import {
   RefreshCw,
   Bot,
   Trash2,
+  ScrollText,
+  X,
 } from "lucide-react";
 import {
   Dialog,
@@ -24,6 +26,75 @@ import {
   DialogDescription,
   DialogFooter,
 } from "@/components/ui/dialog";
+
+function AgentLogViewer({ name, onClose }: { name: string; onClose: () => void }) {
+  const [logs, setLogs] = useState("");
+  const [fetching, setFetching] = useState(false);
+  const [autoRefresh, setAutoRefresh] = useState(true);
+
+  const fetchLogs = useCallback(() => {
+    setFetching(true);
+    fetch(`/api/agents/${encodeURIComponent(name)}/logs`)
+      .then((res) => res.json())
+      .then((data) => setLogs(data.logs || "No logs yet."))
+      .finally(() => setFetching(false));
+  }, [name]);
+
+  useEffect(() => {
+    fetchLogs();
+    if (!autoRefresh) return;
+    const interval = setInterval(fetchLogs, 3000);
+    return () => clearInterval(interval);
+  }, [fetchLogs, autoRefresh]);
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center">
+      <div className="absolute inset-0 bg-black/50" onClick={onClose} />
+      <div className="relative flex h-[80vh] w-[80vw] max-w-4xl flex-col rounded-lg border border-border bg-background shadow-xl">
+        <div className="flex items-center justify-between border-b px-4 py-3">
+          <div className="flex items-center gap-3">
+            <ScrollText className="size-4 text-muted-foreground" />
+            <h3 className="text-sm font-semibold text-foreground">Logs: {name}</h3>
+            {autoRefresh && (
+              <Badge variant="outline" className="text-xs gap-1">
+                <span className="size-1.5 rounded-full bg-green-500 animate-pulse" />
+                Live
+              </Badge>
+            )}
+          </div>
+          <div className="flex items-center gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-7 text-xs gap-1"
+              onClick={() => setAutoRefresh(!autoRefresh)}
+            >
+              {autoRefresh ? "Pause" : "Resume"}
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-7 text-xs gap-1"
+              onClick={fetchLogs}
+              disabled={fetching}
+            >
+              <RefreshCw className={`size-3 ${fetching ? "animate-spin" : ""}`} />
+              Refresh
+            </Button>
+            <button onClick={onClose} className="text-muted-foreground hover:text-foreground">
+              <X className="size-4" />
+            </button>
+          </div>
+        </div>
+        <div className="flex-1 overflow-auto bg-[#0d1117] p-4">
+          <pre className="text-xs font-mono leading-5 text-[#e6edf3] whitespace-pre-wrap break-all">
+            {logs}
+          </pre>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 interface AgentWorker {
   agentName: string;
@@ -54,6 +125,7 @@ export default function AgentsPage() {
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [deleteAgent, setDeleteAgent] = useState<string | null>(null);
+  const [logsAgent, setLogsAgent] = useState<string | null>(null);
   const [history, setHistory] = useState<{ time: string; sessions: number; agents: number }[]>([]);
 
   const fetchAgents = useCallback(async () => {
@@ -104,7 +176,6 @@ export default function AgentsPage() {
     <div className="flex flex-col h-full">
       <TopBar
         title="Agents"
-        breadcrumb={["husein"]}
         showRefresh
         showTimeRange
         actions={
@@ -268,6 +339,18 @@ export default function AgentsPage() {
                       <Button
                         variant="ghost"
                         size="icon-sm"
+                        className="text-muted-foreground hover:text-foreground"
+                        onClick={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          setLogsAgent(agent.agentName);
+                        }}
+                      >
+                        <ScrollText className="size-4" />
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="icon-sm"
                         className="mr-3 text-muted-foreground hover:text-destructive"
                         onClick={(e) => {
                           e.preventDefault();
@@ -320,6 +403,9 @@ export default function AgentsPage() {
           </div>
         )}
       </div>
+
+      {/* Logs viewer */}
+      {logsAgent && <AgentLogViewer name={logsAgent} onClose={() => setLogsAgent(null)} />}
 
       {/* Delete agent confirmation */}
       <Dialog open={!!deleteAgent} onOpenChange={(open) => !open && setDeleteAgent(null)}>

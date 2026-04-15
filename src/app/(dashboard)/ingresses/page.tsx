@@ -22,8 +22,8 @@ export default function IngressesPage() {
 
   return (
     <div className="flex flex-col h-full">
-      <TopBar title="Ingresses" breadcrumb={["husein"]} showRefresh showTimeRange>
-        <span className="text-xs text-muted-foreground">Last updated 4 min ago</span>
+      <TopBar title="Ingresses" showRefresh showTimeRange>
+        <span className="text-xs text-muted-foreground whitespace-nowrap">Last updated 4 min ago</span>
       </TopBar>
 
       <div className="flex-1 overflow-auto p-6 space-y-4">

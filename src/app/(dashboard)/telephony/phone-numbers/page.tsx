@@ -193,7 +193,7 @@ export default function PhoneNumbersPage() {
   if (loading) {
     return (
       <div className="flex flex-col h-full">
-        <TopBar title="Phone numbers" breadcrumb={["husein", "Telephony"]} />
+        <TopBar title="Phone numbers" breadcrumb={[{ label: "Telephony", href: "/telephony/calls" }]} />
         <div className="flex-1 flex items-center justify-center">
           <Loader2 className="size-5 animate-spin text-muted-foreground" />
         </div>
@@ -205,7 +205,7 @@ export default function PhoneNumbersPage() {
     <div className="flex flex-col h-full">
       <TopBar
         title="Phone numbers"
-        breadcrumb={["husein", "Telephony"]}
+        breadcrumb={[{ label: "Telephony", href: "/telephony/calls" }]}
         actions={
           canManage ? (
             <Button size="sm" onClick={() => { resetForm(); setDialogOpen(true); }}>
