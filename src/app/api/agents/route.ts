@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getRoomServiceClient, getAgentDispatchClient } from "@/lib/livekit";
 import { ensureDb } from "@/lib/db";
 import { getSession } from "@/lib/auth";
+import { stopAgent, deleteAgentFiles } from "@/lib/agent-runner";
 
 export async function GET(request: NextRequest) {
   try {
@@ -160,6 +161,10 @@ export async function DELETE(request: NextRequest) {
   if (!name) {
     return NextResponse.json({ error: "Name is required" }, { status: 400 });
   }
+
+  // Stop running process and remove generated files
+  stopAgent(name);
+  deleteAgentFiles(name);
 
   const db = await ensureDb();
   const agent = await db.findAgentByName(name);

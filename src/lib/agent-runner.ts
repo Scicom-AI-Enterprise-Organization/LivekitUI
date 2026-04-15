@@ -12,8 +12,14 @@ interface AgentProcess {
 
 const runningAgents: Map<string, AgentProcess> = new Map();
 
-function getAgentsDir(): string {
+function getAgentsRoot(): string {
   const dir = path.join(process.cwd(), "data", "agents");
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+function getAgentDir(name: string): string {
+  const dir = path.join(getAgentsRoot(), name);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   return dir;
 }
@@ -42,17 +48,47 @@ function getPythonBin(): string {
   return venvPython;
 }
 
-export function isAgentRunning(name: string): boolean {
-  const proc = runningAgents.get(name);
-  if (!proc) return false;
-  // Check if the PID is actually alive
+function pidFilePath(name: string): string {
+  return path.join(getAgentsRoot(), name, "agent.pid");
+}
+
+function writePidFile(name: string, pid: number) {
   try {
-    process.kill(proc.pid, 0);
+    fs.writeFileSync(pidFilePath(name), String(pid));
+  } catch {}
+}
+
+function readPidFile(name: string): number | null {
+  try {
+    const p = pidFilePath(name);
+    if (!fs.existsSync(p)) return null;
+    const pid = parseInt(fs.readFileSync(p, "utf-8").trim(), 10);
+    return Number.isFinite(pid) ? pid : null;
+  } catch {
+    return null;
+  }
+}
+
+function isPidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
     return true;
   } catch {
-    runningAgents.delete(name);
     return false;
   }
+}
+
+export function isAgentRunning(name: string): boolean {
+  // In-memory first
+  const proc = runningAgents.get(name);
+  if (proc && isPidAlive(proc.pid)) return true;
+  if (proc) runningAgents.delete(name);
+
+  // Fallback: PID file on disk (survives dev server reloads)
+  const filePid = readPidFile(name);
+  if (filePid && isPidAlive(filePid)) return true;
+
+  return false;
 }
 
 export function getAgentProcess(name: string): AgentProcess | null {
@@ -70,14 +106,31 @@ export function getAgentLogs(name: string, tail = 200): string {
 }
 
 export function stopAgent(name: string): void {
+  // In-memory process (current dev server session)
   const proc = runningAgents.get(name);
   if (proc) {
-    try {
-      process.kill(-proc.pid, "SIGTERM");
-    } catch {
-      try { process.kill(proc.pid, "SIGTERM"); } catch {}
-    }
+    try { process.kill(-proc.pid, "SIGTERM"); }
+    catch { try { process.kill(proc.pid, "SIGTERM"); } catch {} }
     runningAgents.delete(name);
+  }
+
+  // Also kill via PID file (survives dev server restarts)
+  const filePid = readPidFile(name);
+  if (filePid && isPidAlive(filePid)) {
+    try { process.kill(-filePid, "SIGTERM"); }
+    catch { try { process.kill(filePid, "SIGTERM"); } catch {} }
+  }
+  try { fs.unlinkSync(pidFilePath(name)); } catch {}
+}
+
+export function deleteAgentFiles(name: string): void {
+  const agentDir = path.join(getAgentsRoot(), name);
+  const logFile = path.join(getLogsDir(), `${name}.log`);
+  if (fs.existsSync(agentDir)) {
+    try { fs.rmSync(agentDir, { recursive: true, force: true }); } catch {}
+  }
+  if (fs.existsSync(logFile)) {
+    try { fs.unlinkSync(logFile); } catch {}
   }
 }
 
@@ -92,14 +145,14 @@ export async function deployAgent(
   }
 
   const pythonBin = getPythonBin();
-  const agentsDir = getAgentsDir();
-  const agentFile = path.join(agentsDir, `${name}.py`);
+  const agentDir = getAgentDir(name);
+  const agentFile = path.join(agentDir, "agent.py");
 
-  // Write the generated agent code
+  // Write the generated agent code (one per agent dir)
   fs.writeFileSync(agentFile, pythonCode);
 
-  // Write an .env.local next to the agent file so dotenv picks it up
-  const envPath = path.join(agentsDir, ".env.local");
+  // Write per-agent .env.local
+  const envPath = path.join(agentDir, ".env.local");
   const envContent = Object.entries({
     LIVEKIT_URL: process.env.LIVEKIT_URL || "ws://localhost:7880",
     LIVEKIT_API_KEY: process.env.LIVEKIT_API_KEY || "",
@@ -118,7 +171,7 @@ export async function deployAgent(
     pythonBin,
     [agentFile, "dev"],
     {
-      cwd: agentsDir,
+      cwd: agentDir,
       env: { ...process.env, ...secrets },
       stdio: ["ignore", logStream, logStream],
       detached: true,
@@ -131,6 +184,7 @@ export async function deployAgent(
     logFile,
     startedAt: Date.now(),
   });
+  writePidFile(name, child.pid!);
 
   return { pid: child.pid!, logFile };
 }

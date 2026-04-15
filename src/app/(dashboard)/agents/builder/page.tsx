@@ -40,6 +40,9 @@ import {
   Download,
   BarChart3,
   Loader2,
+  ScrollText,
+  RotateCw,
+  RefreshCw,
 } from "lucide-react";
 import {
   DropdownMenu,
@@ -2530,6 +2533,62 @@ const tabToSlug: Record<Tab, string> = {
   "Advanced": "advanced",
 };
 
+function AgentLogViewer({ name, onClose }: { name: string; onClose: () => void }) {
+  const [logs, setLogs] = useState("");
+  const [fetching, setFetching] = useState(false);
+  const [autoRefresh, setAutoRefresh] = useState(true);
+
+  const fetchLogs = useCallback(() => {
+    setFetching(true);
+    fetch(`/api/agents/${encodeURIComponent(name)}/logs`)
+      .then((res) => res.json())
+      .then((data) => setLogs(data.logs || "No logs yet."))
+      .finally(() => setFetching(false));
+  }, [name]);
+
+  useEffect(() => {
+    fetchLogs();
+    if (!autoRefresh) return;
+    const interval = setInterval(fetchLogs, 3000);
+    return () => clearInterval(interval);
+  }, [fetchLogs, autoRefresh]);
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center">
+      <div className="absolute inset-0 bg-black/50" onClick={onClose} />
+      <div className="relative flex h-[80vh] w-[80vw] max-w-4xl flex-col rounded-lg border border-border bg-background shadow-xl">
+        <div className="flex items-center justify-between border-b px-4 py-3">
+          <div className="flex items-center gap-3">
+            <ScrollText className="size-4 text-muted-foreground" />
+            <h3 className="text-sm font-semibold text-foreground">Logs: {name}</h3>
+            {autoRefresh && (
+              <Badge variant="outline" className="text-xs gap-1">
+                <span className="size-1.5 rounded-full bg-green-500 animate-pulse" />
+                Live
+              </Badge>
+            )}
+          </div>
+          <div className="flex items-center gap-2">
+            <Button variant="outline" size="sm" className="h-7 text-xs gap-1" onClick={() => setAutoRefresh(!autoRefresh)}>
+              {autoRefresh ? "Pause" : "Resume"}
+            </Button>
+            <Button variant="outline" size="sm" className="h-7 text-xs gap-1" onClick={fetchLogs} disabled={fetching}>
+              <RefreshCw className={`size-3 ${fetching ? "animate-spin" : ""}`} />
+              Refresh
+            </Button>
+            <button onClick={onClose} className="text-muted-foreground hover:text-foreground">
+              <X className="size-4" />
+            </button>
+          </div>
+        </div>
+        <div className="flex-1 overflow-auto bg-[#0d1117] p-4">
+          <pre className="text-xs font-mono leading-5 text-[#e6edf3] whitespace-pre-wrap break-all">{logs}</pre>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function AgentBuilderContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -2543,6 +2602,42 @@ function AgentBuilderContent() {
   const [editingName, setEditingName] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [deploying, setDeploying] = useState(false);
+  const [deployResult, setDeployResult] = useState<{ success: boolean; message: string; pid?: number } | null>(null);
+  const [running, setRunning] = useState<boolean | null>(null);
+  const [logsOpen, setLogsOpen] = useState(false);
+  const [restarting, setRestarting] = useState(false);
+
+  const handleRestart = async () => {
+    setRestarting(true);
+    try {
+      const res = await fetch(`/api/agents/${encodeURIComponent(config.name)}/restart`, {
+        method: "POST",
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setDeployResult({ success: false, message: data.error || "Restart failed" });
+      } else {
+        setDeployResult({ success: true, message: `Agent "${config.name}" restarted.`, pid: data.pid });
+      }
+    } finally {
+      setRestarting(false);
+    }
+  };
+
+  // Poll running status when config.name is known
+  useEffect(() => {
+    if (!config.name) return;
+    let cancelled = false;
+    const tick = () => {
+      fetch(`/api/agents/${encodeURIComponent(config.name)}/logs`)
+        .then((r) => r.json())
+        .then((d) => { if (!cancelled) setRunning(!!d.running); })
+        .catch(() => {});
+    };
+    tick();
+    const interval = setInterval(tick, 3000);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, [config.name]);
 
   const originalNameRef = useRef<string>("");
 
@@ -2734,31 +2829,17 @@ function AgentBuilderContent() {
           )}
         </div>
         <div className="flex items-center gap-2">
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <Button variant="ghost" size="icon-sm">
-                <MoreVertical className="size-4" />
-              </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end" className="w-56">
-              <DropdownMenuItem>
-                <Download className="size-4" />
-                Download code
-              </DropdownMenuItem>
-              <DropdownMenuItem onClick={() => router.push(`/agents/${encodeURIComponent(config.name)}`)}>
-                <BarChart3 className="size-4" />
-                View agent analytics
-              </DropdownMenuItem>
-              <DropdownMenuSeparator />
-              <DropdownMenuItem
-                className="text-destructive focus:text-destructive"
-                onClick={() => setDeleteOpen(true)}
-              >
-                <Trash2 className="size-4" />
-                Delete agent
-              </DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
+          {running ? (
+            <Badge variant="outline" className="gap-1.5 border-emerald-500/30 text-emerald-500">
+              <span className="size-1.5 rounded-full bg-emerald-500 animate-pulse" />
+              ONLINE
+            </Badge>
+          ) : (
+            <Badge variant="outline" className="gap-1.5 text-muted-foreground">
+              <span className="size-1.5 rounded-full bg-muted-foreground" />
+              OFFLINE
+            </Badge>
+          )}
           <Button
             variant="outline"
             size="sm"
@@ -2809,9 +2890,9 @@ function AgentBuilderContent() {
                 });
                 const data = await res.json();
                 if (!res.ok) {
-                  alert(`Deploy failed: ${data.error || "unknown error"}`);
+                  setDeployResult({ success: false, message: data.error || "Unknown error" });
                 } else {
-                  alert(`Agent "${config.name}" deployed. PID: ${data.pid}`);
+                  setDeployResult({ success: true, message: `Agent "${config.name}" deployed successfully.`, pid: data.pid });
                 }
               } finally {
                 setDeploying(false);
@@ -2827,6 +2908,38 @@ function AgentBuilderContent() {
               "Deploy agent"
             )}
           </Button>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button variant="ghost" size="icon-sm">
+                <MoreVertical className="size-4" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-56">
+              <DropdownMenuItem onClick={() => setLogsOpen(true)}>
+                <ScrollText className="size-4" />
+                View logs
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={handleRestart} disabled={restarting}>
+                {restarting ? <Loader2 className="size-4 animate-spin" /> : <RotateCw className="size-4" />}
+                Restart
+              </DropdownMenuItem>
+              <DropdownMenuItem>
+                <Download className="size-4" />
+                Download code
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={() => router.push(`/agents/${encodeURIComponent(config.name)}`)}>
+                <BarChart3 className="size-4" />
+                View agent analytics
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                className="text-destructive focus:text-destructive"
+                onClick={() => setDeleteOpen(true)}
+              >
+                <Trash2 className="size-4" />
+                Delete agent
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
         </div>
       </div>
 
@@ -2894,6 +3007,29 @@ function AgentBuilderContent() {
           )}
         </div>
       </div>
+
+      {/* Logs viewer */}
+      {logsOpen && <AgentLogViewer name={config.name} onClose={() => setLogsOpen(false)} />}
+
+      {/* Deploy result dialog */}
+      <Dialog open={!!deployResult} onOpenChange={(open) => !open && setDeployResult(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle className={deployResult?.success ? "text-emerald-500" : "text-destructive"}>
+              {deployResult?.success ? "Deployment successful" : "Deployment failed"}
+            </DialogTitle>
+            <DialogDescription>
+              {deployResult?.message}
+              {deployResult?.success && deployResult.pid && (
+                <span className="block mt-2 text-xs font-mono">PID: {deployResult.pid}</span>
+              )}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button onClick={() => setDeployResult(null)}>Close</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* Delete agent confirmation dialog */}
       <Dialog open={deleteOpen} onOpenChange={setDeleteOpen}>

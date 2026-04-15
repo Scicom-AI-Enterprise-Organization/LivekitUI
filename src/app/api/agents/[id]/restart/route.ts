@@ -26,7 +26,7 @@ export async function POST(
   }
 
   // Read the previously generated python code from disk
-  const agentFile = path.join(process.cwd(), "data", "agents", `${id}.py`);
+  const agentFile = path.join(process.cwd(), "data", "agents", id, "agent.py");
   if (!fs.existsSync(agentFile)) {
     return NextResponse.json(
       { error: "No generated code found. Deploy the agent from the builder first." },

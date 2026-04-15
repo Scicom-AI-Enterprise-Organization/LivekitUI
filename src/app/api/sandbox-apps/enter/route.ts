@@ -28,7 +28,7 @@ export async function GET(request: NextRequest) {
       `<html><body style="font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;color:#888">
         <div style="text-align:center">
           <h2>Sandbox "${name}" not found or not running</h2>
-          <p><a href="/sandbox" style="color:#6366f1">Go to dashboard</a></p>
+          <p><a href="/sandboxes" style="color:#6366f1">Go to dashboard</a></p>
         </div>
       </body></html>`,
       { status: 404, headers: { "content-type": "text/html" } }

@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSession } from "@/lib/auth";
 import { ensureDb } from "@/lib/db";
-import { deploySandbox, stopSandbox, isRunning } from "@/lib/sandbox";
+import { deploySandbox, stopSandbox, isRunning, deleteSandboxDir } from "@/lib/sandbox";
 
 export async function GET() {
   const session = await getSession();
@@ -89,6 +89,7 @@ export async function DELETE(request: NextRequest) {
   }
 
   stopSandbox(name);
+  deleteSandboxDir(name);
 
   const db = await ensureDb();
   await db.deleteSandboxApp(id);

@@ -123,23 +123,39 @@ export default function AgentDetailPage() {
   const [deleteSecretKey, setDeleteSecretKey] = useState<string | null>(null);
   const [logsOpen, setLogsOpen] = useState(false);
   const [restarting, setRestarting] = useState(false);
+  const [running, setRunning] = useState<boolean | null>(null);
+
+  // Poll running status
+  useEffect(() => {
+    let cancelled = false;
+    const tick = () => {
+      fetch(`/api/agents/${encodeURIComponent(id)}/logs`)
+        .then((r) => r.json())
+        .then((d) => { if (!cancelled) setRunning(!!d.running); })
+        .catch(() => {});
+    };
+    tick();
+    const interval = setInterval(tick, 3000);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, [id]);
 
   const handleRestart = async () => {
     setRestarting(true);
     try {
-      // Stop, then re-deploy via the agent's saved code
       await fetch(`/api/agents/${encodeURIComponent(id)}/stop`, { method: "POST" });
-      // Fetch the saved config and regenerate code is server-side concern;
-      // here we just re-trigger by calling a restart endpoint or re-deploy with empty body
       const res = await fetch(`/api/agents/${encodeURIComponent(id)}/restart`, { method: "POST" });
+      const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        alert(`Restart failed: ${data.error || "unknown error"}`);
+        setRestartResult({ success: false, message: data.error || "Unknown error" });
+      } else {
+        setRestartResult({ success: true, message: `Agent "${id}" restarted successfully.`, pid: data.pid });
       }
     } finally {
       setRestarting(false);
     }
   };
+
+  const [restartResult, setRestartResult] = useState<{ success: boolean; message: string; pid?: number } | null>(null);
 
   const fetchSecrets = useCallback(async () => {
     try {
@@ -223,10 +239,17 @@ export default function AgentDetailPage() {
         showRefresh
         actions={
           <div className="flex items-center gap-2">
-            <Badge variant="outline" className="gap-1.5">
-              <span className="size-1.5 rounded-full bg-yellow-500 animate-pulse" />
-              PENDING
-            </Badge>
+            {running ? (
+              <Badge variant="outline" className="gap-1.5 border-emerald-500/30 text-emerald-500">
+                <span className="size-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                ONLINE
+              </Badge>
+            ) : (
+              <Badge variant="outline" className="gap-1.5 text-muted-foreground">
+                <span className="size-1.5 rounded-full bg-muted-foreground" />
+                OFFLINE
+              </Badge>
+            )}
             <Button variant="outline" size="sm">
               <ExternalLink className="size-3" />
               Open in Console
@@ -470,6 +493,26 @@ export default function AgentDetailPage() {
               <Button variant="outline">Cancel</Button>
             </DialogClose>
             <Button onClick={saveSecret}>Save changes</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Restart result dialog */}
+      <Dialog open={!!restartResult} onOpenChange={(open) => !open && setRestartResult(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle className={restartResult?.success ? "text-emerald-500" : "text-destructive"}>
+              {restartResult?.success ? "Restart successful" : "Restart failed"}
+            </DialogTitle>
+            <DialogDescription>
+              {restartResult?.message}
+              {restartResult?.success && restartResult.pid && (
+                <span className="block mt-2 text-xs font-mono">PID: {restartResult.pid}</span>
+              )}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button onClick={() => setRestartResult(null)}>Close</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

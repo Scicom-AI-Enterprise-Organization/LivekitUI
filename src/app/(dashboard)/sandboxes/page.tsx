@@ -44,7 +44,7 @@ const templates = [
     description:
       "A starter app for Next.js, featuring a flexible voice AI frontend",
     icon: AudioLines,
-    href: "/sandbox/agent-starter-react",
+    href: "/sandboxes/agent-starter-react",
     template: "agent-starter-react",
   },
   {
@@ -52,7 +52,7 @@ const templates = [
     description:
       "An open source video conferencing app built on LiveKit Components, LiveKit Cloud, and...",
     icon: Video,
-    href: "/sandbox/meet",
+    href: "/sandboxes/meet",
     template: "meet",
   },
 ];
@@ -528,7 +528,7 @@ export default function SandboxPage() {
 
   return (
     <div className="flex flex-col h-full">
-      <TopBar title="Sandbox" />
+      <TopBar title="Sandboxes" />
 
       <div className="flex-1 overflow-y-auto p-6 space-y-8">
         {/* Get started */}
@@ -579,22 +579,6 @@ export default function SandboxPage() {
               Sandbox apps
             </h2>
           </div>
-
-          {/* Complete your local setup */}
-          <Collapsible>
-            <CollapsibleTrigger className="flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground transition-colors group">
-              <ChevronRight className="size-3.5 transition-transform group-data-[state=open]:rotate-90" />
-              Complete your local setup
-            </CollapsibleTrigger>
-            <CollapsibleContent>
-              <div className="mt-3 space-y-2">
-                <CopyCommand command="lk app create --template <template-name>" />
-                <p className="text-xs text-muted-foreground">
-                  Once you&apos;ve set up the sandbox app locally, launch it to begin testing and interacting with the application.
-                </p>
-              </div>
-            </CollapsibleContent>
-          </Collapsible>
 
           {/* App list */}
           {loading ? (

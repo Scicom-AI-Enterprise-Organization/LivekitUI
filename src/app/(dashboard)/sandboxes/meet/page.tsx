@@ -491,7 +491,7 @@ export default function MeetTemplatePage() {
                         return;
                       }
                       setDialogOpen(false);
-                      router.push("/sandbox");
+                      router.push("/sandboxes");
                     } catch {
                       setCreateError("Something went wrong");
                     } finally {

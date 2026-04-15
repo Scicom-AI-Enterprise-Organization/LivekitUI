@@ -55,8 +55,8 @@ const navItems: NavItem[] = [
     action: "add",
   },
   {
-    label: "Sandbox",
-    href: "/sandbox",
+    label: "Sandboxes",
+    href: "/sandboxes",
     icon: <Box className="size-4" />,
   },
   {
