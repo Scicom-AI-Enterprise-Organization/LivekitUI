@@ -528,7 +528,7 @@ export default function SandboxPage() {
 
   return (
     <div className="flex flex-col h-full">
-      <TopBar title="Sandbox" breadcrumb={[{ label: "Settings", href: "/settings/project" }]} />
+      <TopBar title="Sandbox" />
 
       <div className="flex-1 overflow-y-auto p-6 space-y-8">
         {/* Get started */}
