@@ -1,8 +1,25 @@
-.dockerignore
-Dockerfile
-docker-compose.yml
+.git
 .next
 node_modules
+data/
+*.png
+*.log
+
+# Sandbox node_modules built in their own stage
+example/agent-starter-react/node_modules
+example/agent-starter-react/.next
+example/meet/node_modules
+example/meet/.next
+
+# Python venv built in its own stage
+example/agent-starter-python/venv
+example/agent-starter-python/.venv
+example/agent-starter-python/__pycache__
+
+# Dev files
+Dockerfile
+docker-compose.yml
 README.md
+CLAUDE.md
 .gitignore
-.git
+.dockerignore

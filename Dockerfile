@@ -1,43 +1,55 @@
-FROM node:20-alpine AS base
+# Single image — LivekitUI needs to spawn Python agents and
+# sandbox dev servers at runtime, so everything lives together.
 
-# Install dependencies only when needed
-FROM base AS deps
-RUN apk add --no-cache libc6-compat
+FROM node:20-bookworm-slim
+
+# ── System deps ──
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.11 python3.11-venv python3-pip \
+    curl ca-certificates git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Make python3.11 the default python3
+RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1
+
+# ── Python agent dependencies ──
+RUN python3 -m pip install --no-cache-dir --break-system-packages \
+    "livekit-agents[openai,silero,turn-detector]~=1.5" \
+    "livekit-plugins-noise-cancellation~=0.2" \
+    "livekit-plugins-cartesia~=1.5" \
+    "livekit-plugins-deepgram~=1.5" \
+    python-dotenv
+
 WORKDIR /app
 
+# ── Next.js app dependencies ──
 COPY package.json package-lock.json* ./
 RUN npm ci
 
-# Rebuild the source code only when needed
-FROM base AS builder
-WORKDIR /app
-COPY --from=deps /app/node_modules ./node_modules
-COPY . .
+# ── Sandbox: agent-starter-react ──
+COPY example/agent-starter-react/package.json example/agent-starter-react/package-lock.json* ./example/agent-starter-react/
+RUN cd example/agent-starter-react && (npm ci || npm install)
 
+# ── Sandbox: meet ──
+COPY example/meet/package.json example/meet/package-lock.json* ./example/meet/
+RUN cd example/meet && (npm ci || npm install)
+
+# ── Copy source and build ──
+COPY . .
 RUN npm run build
 
-# Production image, copy all the files and run next
-FROM base AS runner
-WORKDIR /app
+# ── Data directories ──
+RUN mkdir -p data/agents data/agent-logs data/sandbox-logs
 
+# ── Runtime config ──
 ENV NODE_ENV=production
-
-RUN addgroup --system --gid 1001 nodejs
-RUN adduser --system --uid 1001 nextjs
-
-COPY --from=builder /app/public ./public
-
-RUN mkdir .next
-RUN chown nextjs:nodejs .next
-
-COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
-COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
-
-USER nextjs
+ENV PORT=3000
+ENV HOSTNAME="0.0.0.0"
+ENV DB_TYPE=postgres
+ENV LIVEKIT_URL=http://localhost:7880
+ENV LIVEKIT_PROMETHEUS_URL=http://localhost:6789/metrics
+ENV NEXT_PUBLIC_LIVEKIT_URL=ws://localhost:7880
 
 EXPOSE 3000
 
-ENV PORT=3000
-ENV HOSTNAME="0.0.0.0"
-
-CMD ["node", "server.js"]
+CMD ["node", ".next/standalone/server.js"]

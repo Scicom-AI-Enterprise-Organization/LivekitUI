@@ -1,10 +1,48 @@
 services:
+  # ── LiveKit Server ──
+  livekit:
+    image: livekit/livekit-server:latest
+    command: --config /etc/livekit.yaml --dev
+    ports:
+      - "7880:7880"
+      - "7881:7881"
+      - "6789:6789"
+    volumes:
+      - ./livekit.yaml:/etc/livekit.yaml:ro
+    restart: unless-stopped
+
+  # ── PostgreSQL ──
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  # ── LivekitUI Dashboard ──
   app:
     build:
       context: .
       dockerfile: Dockerfile
     ports:
       - "3000:3000"
+    env_file:
+      - .env
     environment:
       - NODE_ENV=production
+      - POSTGRES_HOST=postgres
+      - LIVEKIT_URL=http://livekit:7880
+      - LIVEKIT_PROMETHEUS_URL=http://livekit:6789/metrics
+      - NEXT_PUBLIC_LIVEKIT_URL=ws://localhost:7880
+    depends_on:
+      - livekit
+      - postgres
     restart: unless-stopped
+
+volumes:
+  pgdata:
