@@ -9,48 +9,54 @@ const DASHBOARD_PREFIXES = [
   "/billing", "/hub",
 ];
 
-export function middleware(request: NextRequest) {
+async function resolveSandboxPort(origin: string, name: string): Promise<number | null> {
+  try {
+    const r = await fetch(`${origin}/api/sandbox-apps/resolve?name=${encodeURIComponent(name)}`, {
+      cache: "no-store",
+    });
+    if (!r.ok) return null;
+    const data = await r.json();
+    return typeof data.port === "number" ? data.port : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
+
+  const origin = request.nextUrl.origin;
 
   // --- Sandbox: /sandbox/{name}/* ---
   if (pathname.startsWith("/sandbox/")) {
-    const sandboxCookie = request.cookies.get("lk_sandbox");
-    if (sandboxCookie) {
-      try {
-        const { port } = JSON.parse(sandboxCookie.value);
-        if (port) {
-          // /sandbox/{name}/foo → localhost:{port}/foo
-          const parts = pathname.split("/");
-          const subPath = parts.slice(3).join("/");
-          const target = new URL(`http://localhost:${port}/${subPath}${request.nextUrl.search}`);
-          return NextResponse.rewrite(target);
-        }
-      } catch {}
-    }
-    // No cookie — redirect to enter endpoint to set it
     const parts = pathname.split("/");
-    const sandboxName = parts[2];
-    if (sandboxName) {
-      return NextResponse.redirect(
-        new URL(`/api/sandbox-apps/enter?name=${encodeURIComponent(sandboxName)}&redirect=${encodeURIComponent(pathname)}`, request.url)
+    const name = parts[2];
+    if (name) {
+      const port = await resolveSandboxPort(origin, name);
+      if (port) {
+        const subPath = parts.slice(3).join("/");
+        const target = new URL(`http://localhost:${port}/${subPath}${request.nextUrl.search}`);
+        return NextResponse.rewrite(target);
+      }
+      return new NextResponse(
+        `<html><body style="font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;color:#888"><div style="text-align:center"><h2>Sandbox "${name}" not found or not running</h2><p><a href="/sandboxes" style="color:#6366f1">Go to dashboard</a></p></div></body></html>`,
+        { status: 404, headers: { "content-type": "text/html" } }
       );
     }
     return NextResponse.next();
   }
 
   // --- Proxy non-prefixed requests from sandbox (referer-based) ---
+  // The sandbox template serves assets like /_next/... and /api/... at the
+  // root. Use the referer to tell which sandbox's port they belong to.
   const referer = request.headers.get("referer") || "";
-  if (referer.includes("/sandbox/")) {
+  const refererSandboxMatch = referer.match(/\/sandbox\/([^/?#]+)/);
+  if (refererSandboxMatch) {
     if (!DASHBOARD_PREFIXES.some((p) => pathname.startsWith(p)) && !PUBLIC_PATHS.some((p) => pathname.startsWith(p))) {
-      const sandboxCookie = request.cookies.get("lk_sandbox");
-      if (sandboxCookie) {
-        try {
-          const { port } = JSON.parse(sandboxCookie.value);
-          if (port) {
-            const target = new URL(`http://localhost:${port}${pathname}${request.nextUrl.search}`);
-            return NextResponse.rewrite(target);
-          }
-        } catch {}
+      const port = await resolveSandboxPort(origin, refererSandboxMatch[1]);
+      if (port) {
+        const target = new URL(`http://localhost:${port}${pathname}${request.nextUrl.search}`);
+        return NextResponse.rewrite(target);
       }
     }
   }

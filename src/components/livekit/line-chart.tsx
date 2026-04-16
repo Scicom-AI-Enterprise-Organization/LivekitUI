@@ -11,6 +11,8 @@ interface LineChartProps {
   className?: string;
   showDots?: boolean;
   dashed?: boolean;
+  viewBoxWidth?: number;
+  fontSize?: number;
 }
 
 export function LineChart({
@@ -22,11 +24,13 @@ export function LineChart({
   className,
   showDots = false,
   dashed = false,
+  viewBoxWidth = 600,
+  fontSize = 9,
 }: LineChartProps) {
   if (data.length === 0) return null;
 
-  const padding = { top: 10, right: 10, bottom: 20, left: 12 };
-  const width = 600;
+  const padding = { top: 10, right: 10, bottom: 25, left: 30 };
+  const width = viewBoxWidth;
   const chartWidth = width - padding.left - padding.right;
   const chartHeight = height - padding.top - padding.bottom;
 
@@ -64,11 +68,11 @@ export function LineChart({
                 strokeWidth="0.5"
               />
               <text
-                x={5}
+                x={padding.left - 4}
                 y={y + 3}
                 textAnchor="end"
                 className="fill-muted-foreground"
-                fontSize="5"
+                fontSize={fontSize}
                 fontFamily="var(--font-sans)"
               >
                 {tick >= 1000000 ? `${(tick / 1000000).toFixed(0)}M` : tick >= 1000 ? `${(tick / 1000).toFixed(0)}k` : tick.toFixed(0)}
@@ -109,10 +113,10 @@ export function LineChart({
                 <text
                   key={i}
                   x={x}
-                  y={height - 5}
+                  y={height - 4}
                   textAnchor="middle"
                   className="fill-muted-foreground"
-                  fontSize="5"
+                  fontSize={fontSize}
                   fontFamily="var(--font-sans)"
                 >
                   {label}
@@ -130,13 +134,15 @@ interface MultiLineChartProps {
   labels?: string[];
   height?: number;
   className?: string;
+  viewBoxWidth?: number;
+  fontSize?: number;
 }
 
-export function MultiLineChart({ series, labels, height = 120, className }: MultiLineChartProps) {
+export function MultiLineChart({ series, labels, height = 120, className, viewBoxWidth = 600, fontSize = 9 }: MultiLineChartProps) {
   if (series.length === 0) return null;
 
-  const padding = { top: 10, right: 10, bottom: 20, left: 12 };
-  const width = 600;
+  const padding = { top: 10, right: 10, bottom: 25, left: 30 };
+  const width = viewBoxWidth;
   const chartWidth = width - padding.left - padding.right;
   const chartHeight = height - padding.top - padding.bottom;
 
@@ -173,11 +179,11 @@ export function MultiLineChart({ series, labels, height = 120, className }: Mult
                 strokeWidth="0.5"
               />
               <text
-                x={5}
+                x={padding.left - 4}
                 y={y + 3}
                 textAnchor="end"
                 className="fill-muted-foreground"
-                fontSize="5"
+                fontSize={fontSize}
                 fontFamily="var(--font-sans)"
               >
                 {tick.toFixed(0)}
@@ -218,10 +224,10 @@ export function MultiLineChart({ series, labels, height = 120, className }: Mult
                 <text
                   key={i}
                   x={x}
-                  y={height - 5}
+                  y={height - 4}
                   textAnchor="middle"
                   className="fill-muted-foreground"
-                  fontSize="5"
+                  fontSize={fontSize}
                   fontFamily="var(--font-sans)"
                 >
                   {label}

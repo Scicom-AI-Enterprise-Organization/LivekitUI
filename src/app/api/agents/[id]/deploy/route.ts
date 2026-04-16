@@ -42,7 +42,11 @@ export async function POST(
     // Update agent status to 'deployed'
     await db.updateAgent(agent.id, agent.name, agent.config, "deployed");
 
-    return NextResponse.json({ pid, logFile, status: "deployed" });
+    // Record this deployment as a new version
+    const deployerName = `${session.firstName} ${session.lastName}`.trim() || session.email;
+    const version = await db.addAgentVersion(id, session.email, deployerName);
+
+    return NextResponse.json({ pid, logFile, status: "deployed", version });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     return NextResponse.json({ error: message }, { status: 500 });

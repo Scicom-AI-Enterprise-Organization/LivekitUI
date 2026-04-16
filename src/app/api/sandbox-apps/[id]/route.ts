@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSession } from "@/lib/auth";
 import { ensureDb } from "@/lib/db";
+import { deploySandbox, stopSandbox } from "@/lib/sandbox";
 
 export async function GET(
   _req: NextRequest,
@@ -57,7 +58,30 @@ export async function PATCH(
   }
 
   const db = await ensureDb();
+  const app = await db.getSandboxApp(parseInt(id, 10));
+  if (!app) {
+    return NextResponse.json({ error: "Not found" }, { status: 404 });
+  }
+
   await db.updateSandboxAppSettings(parseInt(id, 10), JSON.stringify(settings));
 
-  return NextResponse.json({ success: true });
+  // Always redeploy so .env.local reflects the saved settings (agent name,
+  // etc.) and NEXT_PUBLIC_* env vars are re-inlined into the dev build.
+  const newDispatch = (settings as { agentDispatch?: string }).agentDispatch || "";
+  const agentName = newDispatch === "__auto__" ? "" : newDispatch;
+  try {
+    stopSandbox(app.name);
+    await deploySandbox(
+      app.name,
+      app.template,
+      process.env.LIVEKIT_API_KEY || "",
+      process.env.LIVEKIT_API_SECRET || "",
+      process.env.NEXT_PUBLIC_SANDBOX_DOMAIN,
+      agentName
+    );
+  } catch (err) {
+    return NextResponse.json({ success: true, warning: String(err) });
+  }
+
+  return NextResponse.json({ success: true, redeployed: true });
 }

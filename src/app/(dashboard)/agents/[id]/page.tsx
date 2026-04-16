@@ -4,11 +4,13 @@ import { useState, useEffect, useCallback } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import { TopBar } from "@/components/livekit/top-bar";
+import { DEFAULT_TIME_RANGE, TimeRangePicker, type TimeRangeValue } from "@/components/livekit/time-range-picker";
 import { StatCard } from "@/components/livekit/stat-card";
 import { MultiLineChart } from "@/components/livekit/line-chart";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
+import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -100,9 +102,6 @@ function AgentLogViewer({ name, onClose }: { name: string; onClose: () => void }
   );
 }
 
-const chartLabels = ["Apr 8", "Apr 9", "Apr 10", "Apr 11", "Apr 12", "Apr 13", "Apr 14"];
-const emptyData = [0, 0, 0, 0, 0, 0, 0];
-
 interface Secret {
   key: string;
   value: string;
@@ -124,6 +123,105 @@ export default function AgentDetailPage() {
   const [logsOpen, setLogsOpen] = useState(false);
   const [restarting, setRestarting] = useState(false);
   const [running, setRunning] = useState<boolean | null>(null);
+  const [workerInfo, setWorkerInfo] = useState<{
+    concurrentSessions: number;
+    participantIdentities: string[];
+    region: string;
+    pid: number | null;
+    workerId: string | null;
+  } | null>(null);
+  const [history, setHistory] = useState<{ time: string; sessions: number; agents: number }[]>([]);
+  const [timeRange, setTimeRange] = useState<TimeRangeValue>(DEFAULT_TIME_RANGE);
+  const [metrics, setMetrics] = useState<{
+    uptimeReadable: string;
+    cpuPercent: number;
+    memoryMb: number;
+    memoryPercent: number;
+    llmLatency: { p50: number; p90: number; p99: number; samples: number } | null;
+  } | null>(null);
+  const [versions, setVersions] = useState<{
+    id: number;
+    version: number;
+    deployerEmail: string;
+    deployerName: string;
+    createdAt: string;
+  }[]>([]);
+
+  // Fetch per-agent session history for the chart
+  useEffect(() => {
+    let cancelled = false;
+    const tick = () => {
+      fetch(`/api/agents/${encodeURIComponent(id)}/history?hours=${timeRange.hours}`)
+        .then((r) => r.json())
+        .then((d) => {
+          if (cancelled) return;
+          const h = (d.history || []).map((entry: { time: string; sessions: number; running: number }) => ({
+            time: new Date(entry.time).toLocaleString("en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }),
+            sessions: entry.sessions,
+            agents: entry.running,
+          }));
+          setHistory(h);
+        })
+        .catch(() => {});
+    };
+    tick();
+    const interval = setInterval(tick, 5000);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, [id, timeRange.hours]);
+
+  // Fetch deployment versions
+  useEffect(() => {
+    let cancelled = false;
+    const tick = () => {
+      fetch(`/api/agents/${encodeURIComponent(id)}/versions`)
+        .then((r) => r.json())
+        .then((d) => { if (!cancelled) setVersions(d.versions || []); })
+        .catch(() => {});
+    };
+    tick();
+    const interval = setInterval(tick, 5000);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, [id]);
+
+  // Poll real metrics
+  useEffect(() => {
+    let cancelled = false;
+    const tick = () => {
+      fetch(`/api/agents/${encodeURIComponent(id)}/metrics`)
+        .then((r) => r.json())
+        .then((d) => { if (!cancelled) setMetrics(d.metrics || null); })
+        .catch(() => {});
+    };
+    tick();
+    const interval = setInterval(tick, 3000);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, [id]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const tick = () => {
+      fetch(`/api/agents?hours=${timeRange.hours}`)
+        .then((r) => r.json())
+        .then((d) => {
+          if (cancelled) return;
+          const match = (d.agents || []).find((a: { agentName: string }) => a.agentName === id);
+          if (match) {
+            setWorkerInfo({
+              concurrentSessions: match.concurrentSessions || 0,
+              participantIdentities: match.participantIdentities || [],
+              region: match.region || "local",
+              pid: match.pid ?? null,
+              workerId: match.workerId ?? null,
+            });
+          }
+          // Note: per-agent history is fetched separately below; do not overwrite here.
+        })
+        .catch(() => {});
+    };
+    tick();
+    const interval = setInterval(tick, 3000);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, [id, timeRange.hours]);
 
   // Poll running status
   useEffect(() => {
@@ -295,67 +393,152 @@ export default function AgentDetailPage() {
       <div className="flex-1 overflow-y-auto p-6 space-y-6">
         {/* Top stats row */}
         <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-          <StatCard label="Agent Name" value="—" />
+          <StatCard
+            label="Agent Name"
+            value={id}
+            infoText="Human-readable name for this agent worker."
+          />
           <Card className="py-4">
             <CardContent className="px-5 py-0">
               <div className="flex items-center gap-1.5 mb-2">
                 <span className="text-sm text-muted-foreground">Agent ID</span>
-                <Info className="size-3 text-muted-foreground" />
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <button type="button" className="text-muted-foreground hover:text-foreground transition-colors">
+                      <Info className="size-3" />
+                    </button>
+                  </TooltipTrigger>
+                  <TooltipContent>
+                    Unique participant identity assigned to this agent in active sessions.
+                  </TooltipContent>
+                </Tooltip>
               </div>
-              <span className="text-sm font-mono text-foreground break-all">{id}</span>
+              <span className="text-sm font-mono text-foreground break-all">
+                {workerInfo?.workerId
+                  || workerInfo?.participantIdentities?.[0]
+                  || (workerInfo?.pid ? `pid:${workerInfo.pid}` : "—")}
+              </span>
             </CardContent>
           </Card>
-          <StatCard label="Concurrent Agent Sessions" value={0} />
-          <StatCard label="Agent Region" value="us-east" />
+          <StatCard
+            label="Concurrent Agent Sessions"
+            value={workerInfo?.concurrentSessions ?? 0}
+            infoText="Number of currently active sessions for this agent."
+          />
+          <StatCard
+            label="Agent Region"
+            value={workerInfo?.region || "local"}
+            infoText="Region where this agent worker is running."
+          />
         </div>
 
         {/* Overview */}
         <div className="space-y-4">
           <div className="flex items-center justify-between">
             <h2 className="text-sm font-semibold text-foreground">Overview</h2>
-            <Button variant="outline" size="sm">Past 7 days</Button>
+            <TimeRangePicker value={timeRange} onChange={setTimeRange} />
           </div>
 
           <Card className="py-0">
             <CardContent className="p-5">
               <h3 className="text-sm text-muted-foreground mb-4">Sessions served</h3>
-              <MultiLineChart
-                series={[
-                  { data: emptyData, color: "var(--primary)", label: "Total number of active sessions" },
-                  { data: emptyData, color: "var(--destructive)", label: "Agent dispatch errors" },
-                ]}
-                labels={chartLabels}
-                height={180}
-              />
+              {history.length > 1 ? (
+                <MultiLineChart
+                  series={[
+                    { data: history.map((h) => h.sessions), color: "var(--primary)", label: `${id} sessions` },
+                    { data: history.map((h) => h.agents), color: "var(--secondary)", label: `${id} online`, dashed: true },
+                  ]}
+                  labels={history.map((h) => h.time)}
+                  height={180}
+                  viewBoxWidth={900}
+                  fontSize={7}
+                />
+              ) : (
+                <div className="flex items-center justify-center h-[180px] text-sm text-muted-foreground">
+                  Chart will populate as data is collected.
+                </div>
+              )}
             </CardContent>
           </Card>
 
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            <StatCard label="Agent Uptime" value="0" unit="%" />
+            <StatCard
+              label="Agent Uptime"
+              value={metrics?.uptimeReadable || "—"}
+              infoText="How long the agent process has been running on this host."
+            />
             <Card className="py-4">
               <CardContent className="px-5 py-0">
                 <div className="flex items-center gap-1.5 mb-2">
                   <span className="text-sm text-muted-foreground">Agent LLM Latency</span>
-                  <Info className="size-3 text-muted-foreground" />
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <button type="button" className="text-muted-foreground hover:text-foreground transition-colors">
+                        <Info className="size-3" />
+                      </button>
+                    </TooltipTrigger>
+                    <TooltipContent>
+                      Time-to-first-token from the LLM, parsed from agent logs. Only populated when the agent has emitted llm_metrics events.
+                    </TooltipContent>
+                  </Tooltip>
                 </div>
-                <div className="flex flex-wrap gap-3 text-xs text-muted-foreground">
-                  <span className="flex items-center gap-1.5">
-                    <span className="size-2 rounded-full bg-primary" />
-                    p50
-                  </span>
-                  <span className="flex items-center gap-1.5">
-                    <span className="size-2 rounded-full" style={{ background: "var(--secondary)" }} />
-                    p90
-                  </span>
-                  <span className="flex items-center gap-1.5">
-                    <span className="size-2 rounded-full" style={{ background: "var(--chart-2)" }} />
-                    p99
-                  </span>
-                </div>
-                <div className="flex items-center justify-center h-16 text-muted-foreground">—</div>
+                {metrics?.llmLatency ? (
+                  <>
+                    <div className="flex flex-wrap gap-3 text-xs text-muted-foreground mb-1">
+                      <span className="flex items-center gap-1.5">
+                        <span className="size-2 rounded-full bg-primary" />
+                        p50 <span className="font-mono text-foreground">{metrics.llmLatency.p50}ms</span>
+                      </span>
+                      <span className="flex items-center gap-1.5">
+                        <span className="size-2 rounded-full" style={{ background: "var(--secondary)" }} />
+                        p90 <span className="font-mono text-foreground">{metrics.llmLatency.p90}ms</span>
+                      </span>
+                      <span className="flex items-center gap-1.5">
+                        <span className="size-2 rounded-full" style={{ background: "var(--chart-2)" }} />
+                        p99 <span className="font-mono text-foreground">{metrics.llmLatency.p99}ms</span>
+                      </span>
+                    </div>
+                    <p className="text-[10px] text-muted-foreground">
+                      based on {metrics.llmLatency.samples} samples
+                    </p>
+                  </>
+                ) : (
+                  <div className="flex items-center justify-center h-16 text-xs text-muted-foreground">
+                    No llm_metrics in logs yet
+                  </div>
+                )}
               </CardContent>
             </Card>
-            <StatCard label="Average Load" value="0" unit="%" />
+            <Card className="py-4">
+              <CardContent className="px-5 py-0">
+                <div className="flex items-center gap-1.5 mb-2">
+                  <span className="text-sm text-muted-foreground">Average Load</span>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <button type="button" className="text-muted-foreground hover:text-foreground transition-colors">
+                        <Info className="size-3" />
+                      </button>
+                    </TooltipTrigger>
+                    <TooltipContent>
+                      Live CPU and memory usage of the agent worker process, sampled every 3 seconds.
+                    </TooltipContent>
+                  </Tooltip>
+                </div>
+                {metrics ? (
+                  <div className="space-y-1">
+                    <div className="flex items-baseline gap-2">
+                      <span className="text-2xl font-semibold text-primary">{metrics.cpuPercent}</span>
+                      <span className="text-xs text-muted-foreground">% CPU</span>
+                    </div>
+                    <p className="text-xs text-muted-foreground">
+                      <span className="font-mono text-foreground">{metrics.memoryMb}</span> MB ({metrics.memoryPercent}% of system)
+                    </p>
+                  </div>
+                ) : (
+                  <span className="text-2xl font-semibold text-muted-foreground">—</span>
+                )}
+              </CardContent>
+            </Card>
           </div>
         </div>
 
@@ -445,11 +628,45 @@ export default function AgentDetailPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  <tr>
-                    <td colSpan={3} className="px-4 py-8 text-center text-muted-foreground">
-                      No results.
-                    </td>
-                  </tr>
+                  {versions.length === 0 ? (
+                    <tr>
+                      <td colSpan={3} className="px-4 py-8 text-center text-muted-foreground">
+                        No deployments yet. Click <span className="text-foreground font-medium">Deploy</span> in the agent builder to create the first version.
+                      </td>
+                    </tr>
+                  ) : (
+                    versions.map((v, i) => (
+                      <tr key={v.id} className="border-b last:border-0">
+                        <td className="px-4 py-2.5">
+                          <div className="flex items-center gap-2">
+                            <span className="font-mono font-medium text-foreground">v{v.version}</span>
+                            {i === 0 && (
+                              <Badge variant="outline" className="bg-emerald-500/10 text-emerald-500 border-emerald-500/30 text-[10px] uppercase tracking-wider">
+                                Current
+                              </Badge>
+                            )}
+                          </div>
+                        </td>
+                        <td className="px-4 py-2.5">
+                          <div className="flex flex-col">
+                            <span className="text-foreground">{v.deployerName || v.deployerEmail}</span>
+                            {v.deployerName && v.deployerName !== v.deployerEmail && (
+                              <span className="text-xs text-muted-foreground">{v.deployerEmail}</span>
+                            )}
+                          </div>
+                        </td>
+                        <td className="px-4 py-2.5 text-muted-foreground">
+                          {new Date(v.createdAt).toLocaleString("en-US", {
+                            month: "short",
+                            day: "numeric",
+                            year: "numeric",
+                            hour: "2-digit",
+                            minute: "2-digit",
+                          })}
+                        </td>
+                      </tr>
+                    ))
+                  )}
                 </tbody>
               </table>
             </Card>

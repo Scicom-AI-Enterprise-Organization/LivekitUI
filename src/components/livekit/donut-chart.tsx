@@ -34,7 +34,7 @@ export function DonutChart({
         {segments.map((segment, i) => {
           const pct = total > 0 ? segment.value / total : 0;
           const dashLength = pct * circumference;
-          const dashOffset = -(accumulated / total) * circumference;
+          const dashOffset = total > 0 ? -(accumulated / total) * circumference : 0;
           accumulated += segment.value;
 
           return (

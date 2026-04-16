@@ -10,7 +10,6 @@ import {
   Video,
   Loader2,
   Trash2,
-  ExternalLink,
   Code,
   ChevronRight,
   Copy,
@@ -483,11 +482,13 @@ function LogViewer({ name, onClose }: { name: string; onClose: () => void }) {
   );
 }
 
-export default function SandboxPage() {
+export default function SandboxPage({ autoEditName }: { autoEditName?: string } = {}) {
   const [apps, setApps] = useState<SandboxApp[]>([]);
   const [loading, setLoading] = useState(true);
   const [logsApp, setLogsApp] = useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<{ id: number; name: string } | null>(null);
+  const [restartTarget, setRestartTarget] = useState<{ id: number; name: string } | null>(null);
+  const [restarting, setRestarting] = useState(false);
   const [editApp, setEditApp] = useState<SandboxApp | null>(null);
   const [deleting, setDeleting] = useState(false);
 
@@ -502,12 +503,35 @@ export default function SandboxPage() {
     fetchApps();
   }, []);
 
-  const handleRestart = async (id: number, name: string) => {
+  // Auto-open edit dialog when URL contains a sandbox name (e.g. /sandboxes/emery)
+  useEffect(() => {
+    if (!autoEditName || apps.length === 0) return;
+    const match = apps.find(
+      (a) => a.name.toLowerCase() === autoEditName.toLowerCase()
+    );
+    if (match) setEditApp(match);
+  }, [autoEditName, apps]);
+
+  // Update URL without triggering Next.js navigation (no remount/re-fetch)
+  const openEdit = (app: SandboxApp) => {
+    setEditApp(app);
+    window.history.replaceState(null, "", `/sandboxes/${encodeURIComponent(app.name)}`);
+  };
+  const closeEdit = () => {
+    setEditApp(null);
+    window.history.replaceState(null, "", "/sandboxes");
+  };
+
+  const confirmRestart = async () => {
+    if (!restartTarget) return;
+    setRestarting(true);
     await fetch("/api/sandbox-apps/restart", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ id, name }),
+      body: JSON.stringify({ id: restartTarget.id, name: restartTarget.name }),
     });
+    setRestartTarget(null);
+    setRestarting(false);
     fetchApps();
   };
 
@@ -606,7 +630,7 @@ export default function SandboxPage() {
                     <tr
                       key={app.id}
                       className="border-b last:border-0 cursor-pointer hover:bg-muted/30 transition-colors"
-                      onClick={() => setEditApp(app)}
+                      onClick={() => openEdit(app)}
                     >
                       <td className="px-4 py-2.5 font-medium">{app.name}</td>
                       <td className="px-4 py-2.5">
@@ -627,18 +651,18 @@ export default function SandboxPage() {
                         {new Date(app.createdAt).toLocaleDateString()}
                       </td>
                       <td className="px-4 py-2.5" onClick={(e) => e.stopPropagation()}>
-                        <div className="flex items-center justify-end gap-0.5">
-                          <Button
-                            variant="ghost"
-                            size="icon-sm"
-                            className="text-muted-foreground hover:text-foreground"
-                            title="Launch"
-                            asChild
-                          >
-                            <a href={app.url} target="_blank" rel="noopener noreferrer">
-                              <ExternalLink className="size-4" />
-                            </a>
-                          </Button>
+                        <div className="flex items-center justify-end gap-1.5">
+                          {app.status === "running" ? (
+                            <Badge variant="default" className="bg-emerald-500/10 text-emerald-500 gap-1.5 uppercase tracking-wider text-[10px]">
+                              <span className="size-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                              ONLINE
+                            </Badge>
+                          ) : (
+                            <Badge variant="outline" className="text-muted-foreground gap-1.5 uppercase tracking-wider text-[10px]">
+                              <span className="size-1.5 rounded-full bg-muted-foreground" />
+                              OFFLINE
+                            </Badge>
+                          )}
                           <Button
                             variant="ghost"
                             size="icon-sm"
@@ -668,7 +692,7 @@ export default function SandboxPage() {
                             size="icon-sm"
                             className="text-muted-foreground hover:text-foreground"
                             title="Restart"
-                            onClick={() => handleRestart(app.id, app.name)}
+                            onClick={() => setRestartTarget({ id: app.id, name: app.name })}
                           >
                             <RotateCw className="size-4" />
                           </Button>
@@ -699,7 +723,7 @@ export default function SandboxPage() {
       {editApp && (
         <EditSandboxDialog
           app={editApp}
-          onClose={() => setEditApp(null)}
+          onClose={closeEdit}
           onSaved={fetchApps}
         />
       )}
@@ -720,6 +744,27 @@ export default function SandboxPage() {
             <Button variant="destructive" size="sm" onClick={confirmDelete} disabled={deleting}>
               {deleting ? <Loader2 className="size-3 animate-spin mr-1" /> : <Trash2 className="size-3 mr-1" />}
               Delete
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Restart confirmation dialog */}
+      <Dialog open={!!restartTarget} onOpenChange={(open) => { if (!open) setRestartTarget(null); }}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle>Restart sandbox app</DialogTitle>
+            <DialogDescription>
+              Are you sure you want to restart <span className="font-medium text-foreground">{restartTarget?.name}</span>? This will stop the running process and start it again with the latest settings. Active connections will be dropped.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter className="gap-3">
+            <Button variant="outline" size="sm" onClick={() => setRestartTarget(null)} disabled={restarting}>
+              Cancel
+            </Button>
+            <Button size="sm" onClick={confirmRestart} disabled={restarting}>
+              {restarting ? <Loader2 className="size-3 animate-spin mr-1" /> : <RotateCw className="size-3 mr-1" />}
+              Restart
             </Button>
           </DialogFooter>
         </DialogContent>

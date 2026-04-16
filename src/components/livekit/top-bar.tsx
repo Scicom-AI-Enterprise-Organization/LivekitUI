@@ -11,6 +11,8 @@ import {
 } from "@/components/ui/select";
 import { RefreshCw } from "lucide-react";
 import Link from "next/link";
+import { TimeRangePicker, type TimeRangeValue, DEFAULT_TIME_RANGE } from "./time-range-picker";
+import { useState } from "react";
 
 type BreadcrumbItem = string | { label: string; href: string };
 
@@ -20,6 +22,8 @@ interface TopBarProps {
   children?: React.ReactNode;
   showRefresh?: boolean;
   showTimeRange?: boolean;
+  timeRange?: TimeRangeValue;
+  onTimeRangeChange?: (v: TimeRangeValue) => void;
   className?: string;
   actions?: React.ReactNode;
 }
@@ -30,9 +34,14 @@ export function TopBar({
   children,
   showRefresh = false,
   showTimeRange = false,
+  timeRange,
+  onTimeRangeChange,
   className,
   actions,
 }: TopBarProps) {
+  const [internalRange, setInternalRange] = useState<TimeRangeValue>(DEFAULT_TIME_RANGE);
+  const rangeValue = timeRange ?? internalRange;
+  const handleRangeChange = onTimeRangeChange ?? setInternalRange;
   return (
     <div className={cn("flex items-center justify-between border-b px-6 py-3", className)}>
       <div className="flex items-center gap-2">
@@ -77,17 +86,7 @@ export function TopBar({
           </Select>
         )}
         {showTimeRange && (
-          <Select defaultValue="7d">
-            <SelectTrigger size="sm" className="text-xs">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="1d">Past 24 hours</SelectItem>
-              <SelectItem value="7d">Past 7 days</SelectItem>
-              <SelectItem value="30d">Past 30 days</SelectItem>
-              <SelectItem value="90d">Past 90 days</SelectItem>
-            </SelectContent>
-          </Select>
+          <TimeRangePicker value={rangeValue} onChange={handleRangeChange} />
         )}
         {actions}
       </div>

@@ -75,6 +75,15 @@ export interface DbAgentSecret {
   updated_at: string;
 }
 
+export interface DbAgentVersion {
+  id: number;
+  agent_name: string;
+  version: number;
+  deployer_email: string;
+  deployer_name: string;
+  created_at: string;
+}
+
 export interface DbWebhookEvent {
   id: number;
   event: string;
@@ -97,6 +106,14 @@ export interface DbAgentSnapshot {
   id: number;
   sessions: number;
   agents: number;
+  created_at: string;
+}
+
+export interface DbAgentPerSnapshot {
+  id: number;
+  agent_name: string;
+  sessions: number;
+  running: number;
   created_at: string;
 }
 
@@ -130,9 +147,12 @@ export interface Database {
   getAllSandboxApps(): Promise<DbSandboxApp[]>;
   getSandboxApp(id: number): Promise<DbSandboxApp | null>;
   updateSandboxAppSettings(id: number, settings: string): Promise<void>;
+  updateSandboxAppPort(name: string, port: number): Promise<void>;
   deleteSandboxApp(id: number): Promise<void>;
   addAgentSnapshot(sessions: number, agents: number): Promise<void>;
   getAgentSnapshots(hours: number): Promise<DbAgentSnapshot[]>;
+  addAgentPerSnapshot(agentName: string, sessions: number, running: boolean): Promise<void>;
+  getAgentPerSnapshots(agentName: string, hours: number): Promise<DbAgentPerSnapshot[]>;
   createApiKey(description: string, apiKey: string, apiSecretHash: string, owner: string): Promise<DbApiKey>;
   getAllApiKeys(): Promise<DbApiKey[]>;
   deleteApiKey(id: number): Promise<void>;
@@ -147,6 +167,9 @@ export interface Database {
   upsertAgentSecret(agentName: string, key: string, value: string): Promise<void>;
   getAgentSecrets(agentName: string): Promise<DbAgentSecret[]>;
   deleteAgentSecret(agentName: string, key: string): Promise<void>;
+  addAgentVersion(agentName: string, deployerEmail: string, deployerName: string): Promise<DbAgentVersion>;
+  getAgentVersions(agentName: string): Promise<DbAgentVersion[]>;
+  deleteAgentVersions(agentName: string): Promise<void>;
 }
 
 // ---------------------------------------------------------------------------
@@ -216,6 +239,15 @@ function createSqliteDb(): Database {
           agents INTEGER NOT NULL DEFAULT 0,
           created_at TEXT DEFAULT (datetime('now'))
         );
+        CREATE TABLE IF NOT EXISTS agent_per_snapshots (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          agent_name TEXT NOT NULL,
+          sessions INTEGER NOT NULL DEFAULT 0,
+          running INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_agent_per_snapshots_name_time
+          ON agent_per_snapshots(agent_name, created_at);
         CREATE TABLE IF NOT EXISTS api_keys (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           description TEXT NOT NULL,
@@ -248,6 +280,15 @@ function createSqliteDb(): Database {
           created_at TEXT DEFAULT (datetime('now')),
           updated_at TEXT DEFAULT (datetime('now')),
           UNIQUE(agent_name, key)
+        );
+        CREATE TABLE IF NOT EXISTS agent_versions (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          agent_name TEXT NOT NULL,
+          version INTEGER NOT NULL,
+          deployer_email TEXT NOT NULL,
+          deployer_name TEXT NOT NULL DEFAULT '',
+          created_at TEXT DEFAULT (datetime('now')),
+          UNIQUE(agent_name, version)
         );
       `);
     },
@@ -378,6 +419,10 @@ function createSqliteDb(): Database {
       db.prepare("UPDATE sandbox_apps SET settings = ? WHERE id = ?").run(settings, id);
     },
 
+    async updateSandboxAppPort(name, port) {
+      db.prepare("UPDATE sandbox_apps SET port = ? WHERE name = ?").run(port, name);
+    },
+
     async deleteSandboxApp(id) {
       db.prepare("DELETE FROM sandbox_apps WHERE id = ?").run(id);
     },
@@ -392,6 +437,21 @@ function createSqliteDb(): Database {
       return db.prepare(
         "SELECT * FROM agent_snapshots WHERE created_at >= datetime('now', '-' || ? || ' hours') ORDER BY created_at ASC"
       ).all(hours) as DbAgentSnapshot[];
+    },
+
+    async addAgentPerSnapshot(agentName, sessions, running) {
+      db.prepare(
+        "INSERT INTO agent_per_snapshots (agent_name, sessions, running) VALUES (?, ?, ?)"
+      ).run(agentName, sessions, running ? 1 : 0);
+      db.prepare(
+        "DELETE FROM agent_per_snapshots WHERE created_at < datetime('now', '-7 days')"
+      ).run();
+    },
+
+    async getAgentPerSnapshots(agentName, hours) {
+      return db.prepare(
+        "SELECT * FROM agent_per_snapshots WHERE agent_name = ? AND created_at >= datetime('now', '-' || ? || ' hours') ORDER BY created_at ASC"
+      ).all(agentName, hours) as DbAgentPerSnapshot[];
     },
 
     async createApiKey(description, apiKey, apiSecretHash, owner) {
@@ -462,6 +522,27 @@ function createSqliteDb(): Database {
 
     async deleteAgentSecret(agentName, key) {
       db.prepare("DELETE FROM agent_secrets WHERE agent_name = ? AND key = ?").run(agentName, key);
+    },
+
+    async addAgentVersion(agentName, deployerEmail, deployerName) {
+      const row = db.prepare(
+        "SELECT COALESCE(MAX(version), 0) as max_v FROM agent_versions WHERE agent_name = ?"
+      ).get(agentName) as { max_v: number };
+      const nextVersion = (row?.max_v || 0) + 1;
+      const result = db.prepare(
+        "INSERT INTO agent_versions (agent_name, version, deployer_email, deployer_name) VALUES (?, ?, ?, ?)"
+      ).run(agentName, nextVersion, deployerEmail, deployerName);
+      return db.prepare("SELECT * FROM agent_versions WHERE id = ?").get(result.lastInsertRowid) as DbAgentVersion;
+    },
+
+    async getAgentVersions(agentName) {
+      return db.prepare(
+        "SELECT * FROM agent_versions WHERE agent_name = ? ORDER BY version DESC"
+      ).all(agentName) as DbAgentVersion[];
+    },
+
+    async deleteAgentVersions(agentName) {
+      db.prepare("DELETE FROM agent_versions WHERE agent_name = ?").run(agentName);
     },
   };
 }
@@ -539,6 +620,15 @@ function createPostgresDb(): Database {
           agents INTEGER NOT NULL DEFAULT 0,
           created_at TIMESTAMPTZ DEFAULT NOW()
         );
+        CREATE TABLE IF NOT EXISTS agent_per_snapshots (
+          id SERIAL PRIMARY KEY,
+          agent_name TEXT NOT NULL,
+          sessions INTEGER NOT NULL DEFAULT 0,
+          running INTEGER NOT NULL DEFAULT 0,
+          created_at TIMESTAMPTZ DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_agent_per_snapshots_name_time
+          ON agent_per_snapshots(agent_name, created_at);
         CREATE TABLE IF NOT EXISTS api_keys (
           id SERIAL PRIMARY KEY,
           description TEXT NOT NULL,
@@ -571,6 +661,15 @@ function createPostgresDb(): Database {
           created_at TIMESTAMPTZ DEFAULT NOW(),
           updated_at TIMESTAMPTZ DEFAULT NOW(),
           UNIQUE(agent_name, key)
+        );
+        CREATE TABLE IF NOT EXISTS agent_versions (
+          id SERIAL PRIMARY KEY,
+          agent_name TEXT NOT NULL,
+          version INTEGER NOT NULL,
+          deployer_email TEXT NOT NULL,
+          deployer_name TEXT NOT NULL DEFAULT '',
+          created_at TIMESTAMPTZ DEFAULT NOW(),
+          UNIQUE(agent_name, version)
         );
       `);
     },
@@ -714,6 +813,10 @@ function createPostgresDb(): Database {
       await pool.query("UPDATE sandbox_apps SET settings = $1 WHERE id = $2", [settings, id]);
     },
 
+    async updateSandboxAppPort(name, port) {
+      await pool.query("UPDATE sandbox_apps SET port = $1 WHERE name = $2", [port, name]);
+    },
+
     async deleteSandboxApp(id) {
       await pool.query("DELETE FROM sandbox_apps WHERE id = $1", [id]);
     },
@@ -727,6 +830,22 @@ function createPostgresDb(): Database {
       const { rows } = await pool.query(
         "SELECT * FROM agent_snapshots WHERE created_at >= NOW() - make_interval(hours => $1) ORDER BY created_at ASC",
         [hours]
+      );
+      return rows;
+    },
+
+    async addAgentPerSnapshot(agentName, sessions, running) {
+      await pool.query(
+        "INSERT INTO agent_per_snapshots (agent_name, sessions, running) VALUES ($1, $2, $3)",
+        [agentName, sessions, running ? 1 : 0]
+      );
+      await pool.query("DELETE FROM agent_per_snapshots WHERE created_at < NOW() - INTERVAL '7 days'");
+    },
+
+    async getAgentPerSnapshots(agentName, hours) {
+      const { rows } = await pool.query(
+        "SELECT * FROM agent_per_snapshots WHERE agent_name = $1 AND created_at >= NOW() - make_interval(hours => $2) ORDER BY created_at ASC",
+        [agentName, hours]
       );
       return rows;
     },
@@ -812,6 +931,31 @@ function createPostgresDb(): Database {
 
     async deleteAgentSecret(agentName, key) {
       await pool.query("DELETE FROM agent_secrets WHERE agent_name = $1 AND key = $2", [agentName, key]);
+    },
+
+    async addAgentVersion(agentName, deployerEmail, deployerName) {
+      const { rows: maxRows } = await pool.query(
+        "SELECT COALESCE(MAX(version), 0) AS max_v FROM agent_versions WHERE agent_name = $1",
+        [agentName]
+      );
+      const nextVersion = (maxRows[0]?.max_v || 0) + 1;
+      const { rows } = await pool.query(
+        "INSERT INTO agent_versions (agent_name, version, deployer_email, deployer_name) VALUES ($1, $2, $3, $4) RETURNING *",
+        [agentName, nextVersion, deployerEmail, deployerName]
+      );
+      return rows[0];
+    },
+
+    async getAgentVersions(agentName) {
+      const { rows } = await pool.query(
+        "SELECT * FROM agent_versions WHERE agent_name = $1 ORDER BY version DESC",
+        [agentName]
+      );
+      return rows;
+    },
+
+    async deleteAgentVersions(agentName) {
+      await pool.query("DELETE FROM agent_versions WHERE agent_name = $1", [agentName]);
     },
   };
 }

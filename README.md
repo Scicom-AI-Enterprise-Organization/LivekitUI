@@ -20,6 +20,7 @@ Self-hosted dashboard for managing [LiveKit](https://livekit.io) infrastructure.
 
 ```bash
 curl -sSL https://get.livekit.io | bash
+livekit-server --config livekit.yaml --dev
 ```
 
 ### 2. Configure environment

@@ -1,8 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getRoomServiceClient, getAgentDispatchClient } from "@/lib/livekit";
+import { ParticipantInfo_Kind } from "@livekit/protocol";
 import { ensureDb } from "@/lib/db";
 import { getSession } from "@/lib/auth";
-import { stopAgent, deleteAgentFiles } from "@/lib/agent-runner";
+import { stopAgent, deleteAgentFiles, isAgentRunning, getAgentPid, getAgentWorkerId } from "@/lib/agent-runner";
 
 export async function GET(request: NextRequest) {
   try {
@@ -30,36 +31,77 @@ export async function GET(request: NextRequest) {
       concurrentSessions: number;
       rooms: string[];
       status: string;
+      running: boolean;
+      participantIdentities: string[];
+      region: string;
+      pid: number | null;
+      workerId: string | null;
     }>();
 
-    // First, load all draft agents from DB
+    const defaultRegion = process.env.LIVEKIT_REGION || "local";
+
+    // Case-insensitive alias resolver: LiveKit dispatches/participants often
+    // lowercase the agent_name, but the DB keeps the original casing. Map
+    // lowercase -> canonical name so we merge both into one worker entry.
+    const canonicalByLower = new Map<string, string>();
+    const resolveName = (raw: string): string => {
+      const key = raw.toLowerCase();
+      return canonicalByLower.get(key) || raw;
+    };
+
+    // First, load all agents from DB; check the actual process state for each one
     const dbAgents = await db.getAllAgents();
     for (const a of dbAgents) {
+      const running = isAgentRunning(a.name);
+      const realStatus = a.status === "draft" ? "draft" : running ? "connected" : "offline";
       agentWorkers.set(a.name, {
         agentName: a.name,
         concurrentSessions: 0,
         rooms: [],
-        status: a.status,
+        status: realStatus,
+        running,
+        participantIdentities: [],
+        region: defaultRegion,
+        pid: getAgentPid(a.name),
+        workerId: getAgentWorkerId(a.name),
       });
+      canonicalByLower.set(a.name.toLowerCase(), a.name);
     }
 
     // Then merge in live data from LiveKit server
     for (const room of rooms) {
+      // Build a queue of dispatched agent names for this room so we can map
+      // auto-generated participant identities (e.g. "agent-AJ_t8j...") back
+      // to the human-readable agent_name (e.g. "husein") supplied in code.
+      const dispatchedNames: string[] = [];
       try {
         const dispatches = await dispatchClient.listDispatch(room.name);
         for (const dispatch of dispatches) {
-          const name = dispatch.agentName || "agent (auto-dispatch)";
+          const name = resolveName(dispatch.agentName || "agent (auto-dispatch)");
+          dispatchedNames.push(name);
           if (!agentWorkers.has(name)) {
-            agentWorkers.set(name, { agentName: name, concurrentSessions: 0, rooms: [], status: "connected" });
+            const running = isAgentRunning(name);
+            const status = running ? "connected" : "offline";
+            agentWorkers.set(name, { agentName: name, concurrentSessions: 0, rooms: [], status, running, participantIdentities: [], region: defaultRegion, pid: getAgentPid(name), workerId: getAgentWorkerId(name) });
           }
         }
       } catch {}
 
       try {
         const participants = await roomClient.listParticipants(room.name);
+        let dispatchCursor = 0;
         for (const p of participants) {
-          if (p.kind === 2) {
-            const name = p.name || p.identity || "agent (auto-dispatch)";
+          if (p.kind === ParticipantInfo_Kind.AGENT) {
+            // Prefer participant.name if explicitly set; else draw from the
+            // room's dispatch list in order; else fall back to identity.
+            let name: string;
+            if (p.name && !p.name.startsWith("agent-")) {
+              name = resolveName(p.name);
+            } else if (dispatchCursor < dispatchedNames.length) {
+              name = dispatchedNames[dispatchCursor++];
+            } else {
+              name = resolveName(p.name || p.identity || "agent (auto-dispatch)");
+            }
             agentSessions.push({
               agentName: name,
               roomName: room.name,
@@ -70,13 +112,17 @@ export async function GET(request: NextRequest) {
             });
 
             if (!agentWorkers.has(name)) {
-              agentWorkers.set(name, { agentName: name, concurrentSessions: 0, rooms: [], status: "connected" });
+              agentWorkers.set(name, { agentName: name, concurrentSessions: 0, rooms: [], status: "connected", running: true, participantIdentities: [], region: defaultRegion, pid: getAgentPid(name), workerId: getAgentWorkerId(name) });
             }
             const worker = agentWorkers.get(name)!;
             worker.concurrentSessions++;
             worker.rooms.push(room.name);
-            // Mark as connected if it has live sessions
+            worker.participantIdentities.push(p.identity);
+            const r = (room as unknown as { region?: string }).region;
+            if (r) worker.region = r;
+            // Live session in a room implies the agent is running
             worker.status = "connected";
+            worker.running = true;
           }
         }
       } catch {}
@@ -87,6 +133,13 @@ export async function GET(request: NextRequest) {
     const totalAgents = agents.length;
 
     await db.addAgentSnapshot(totalSessions, totalAgents);
+
+    // Per-agent snapshots so we can chart sessions for one specific agent
+    for (const a of agents) {
+      try {
+        await db.addAgentPerSnapshot(a.agentName, a.concurrentSessions, a.running);
+      } catch {}
+    }
 
     const snapshots = await db.getAgentSnapshots(hours);
     const history = snapshots.map((s) => ({
@@ -166,9 +219,30 @@ export async function DELETE(request: NextRequest) {
   stopAgent(name);
   deleteAgentFiles(name);
 
+  // Remove any lingering LiveKit dispatches so the agent stops reappearing
+  // in the list (the /api/agents GET merges dispatch-derived entries with
+  // DB ones). Match case-insensitively since dispatches are often lowercased.
+  try {
+    const roomClient = getRoomServiceClient();
+    const dispatchClient = getAgentDispatchClient();
+    const rooms = await roomClient.listRooms();
+    const needle = name.toLowerCase();
+    for (const room of rooms) {
+      try {
+        const dispatches = await dispatchClient.listDispatch(room.name);
+        for (const d of dispatches) {
+          if ((d.agentName || "").toLowerCase() === needle) {
+            try { await dispatchClient.deleteDispatch(d.id, room.name); } catch {}
+          }
+        }
+      } catch {}
+    }
+  } catch {}
+
   const db = await ensureDb();
   const agent = await db.findAgentByName(name);
   if (agent) {
+    await db.deleteAgentVersions(name);
     await db.deleteAgent(agent.id);
   }
 

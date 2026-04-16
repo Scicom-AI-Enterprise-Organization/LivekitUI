@@ -33,12 +33,51 @@ function findFreePort(start = 3100): Promise<number> {
   });
 }
 
+function isPortFree(port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const s = net.createServer();
+    s.once("error", () => resolve(false));
+    s.listen(port, () => s.close(() => resolve(true)));
+  });
+}
+
 export function getProcessInfo(name: string): SandboxProcess | null {
   return runningProcesses.get(name) || null;
 }
 
 export function isRunning(name: string): boolean {
-  return runningProcesses.has(name);
+  if (runningProcesses.has(name)) return true;
+
+  // Fallback: the dashboard may have restarted, losing the in-memory map.
+  // Scan /proc to see if any process has this sandbox's dir as its cwd.
+  const sandboxDir = path.join(getSandboxesRoot(), name);
+  try {
+    for (const pid of fs.readdirSync("/proc")) {
+      if (!/^\d+$/.test(pid)) continue;
+      try {
+        const cwd = fs.readlinkSync(path.join("/proc", pid, "cwd"));
+        if (cwd === sandboxDir) {
+          // Re-populate the in-memory map so future checks are fast
+          const port = readPortFromCmdline(Number(pid));
+          if (port) {
+            runningProcesses.set(name, { pid: Number(pid), port, logFile: path.join(getLogsDir(), `${name}.log`) });
+          }
+          return true;
+        }
+      } catch {}
+    }
+  } catch {}
+  return false;
+}
+
+function readPortFromCmdline(pid: number): number | null {
+  try {
+    const cmdline = fs.readFileSync(`/proc/${pid}/cmdline`, "utf-8") as string;
+    const match = cmdline.match(/-p\0?(\d+)/);
+    return match ? parseInt(match[1], 10) : null;
+  } catch {
+    return null;
+  }
 }
 
 export function getLogs(name: string, tail = 200): string {
@@ -64,7 +103,10 @@ function getSandboxesRoot(): string {
 function provisionSandboxDir(srcDir: string, dstDir: string) {
   if (!fs.existsSync(dstDir)) fs.mkdirSync(dstDir, { recursive: true });
 
-  const SYMLINK = new Set(["node_modules", ".next", ".git"]);
+  // NOTE: do NOT symlink .next — Next.js inlines NEXT_PUBLIC_* env vars at
+  // build/compile time, and a shared .next would leak one sandbox's agent
+  // name into all others. Each sandbox needs its own build cache.
+  const SYMLINK = new Set(["node_modules", ".git"]);
   const SKIP = new Set([".env.local"]);
 
   for (const entry of fs.readdirSync(srcDir)) {
@@ -124,9 +166,36 @@ export async function deploySandbox(
 
   // Per-sandbox directory under data/sandboxes/{name}
   const sandboxDir = path.join(getSandboxesRoot(), name);
+
+  // Wipe any prior .next build — NEXT_PUBLIC_* env vars are inlined at
+  // compile time, so reusing a stale cache would keep the old agent name.
+  const nextPath = path.join(sandboxDir, ".next");
+  if (fs.existsSync(nextPath)) {
+    try {
+      if (fs.lstatSync(nextPath).isSymbolicLink()) {
+        fs.unlinkSync(nextPath);
+      } else {
+        fs.rmSync(nextPath, { recursive: true, force: true });
+      }
+    } catch {}
+  }
+
   provisionSandboxDir(templateSrcDir, sandboxDir);
 
-  const port = await findFreePort();
+  // Reuse the previously-allocated port if it's still free. This keeps
+  // existing browser cookies valid across redeploys instead of bumping
+  // to a new port every time.
+  let port: number | null = null;
+  try {
+    const { ensureDb } = await import("./db");
+    const db = await ensureDb();
+    const apps = await db.getAllSandboxApps();
+    const existing = apps.find((a) => a.name === name);
+    if (existing?.port && await isPortFree(existing.port)) {
+      port = existing.port;
+    }
+  } catch {}
+  if (!port) port = await findFreePort();
   const base = sandboxDomain || "http://localhost:3000";
   const url = `${base.replace(/\/$/, "")}/sandbox/${name}`;
 
@@ -168,17 +237,41 @@ export default nextConfig;
 
   runningProcesses.set(name, { pid: child.pid!, port, logFile });
 
+  // Persist the fresh port so /enter works after the dashboard restarts
+  // (in-memory map gets lost; DB is the durable source of truth).
+  try {
+    const { ensureDb } = await import("./db");
+    const db = await ensureDb();
+    await db.updateSandboxAppPort(name, port);
+  } catch {}
+
   return { port, url };
 }
 
 export function stopSandbox(name: string): void {
   const proc = runningProcesses.get(name);
   if (proc) {
-    try {
-      process.kill(-proc.pid, "SIGTERM");
-    } catch {}
+    try { process.kill(-proc.pid, "SIGKILL"); }
+    catch { try { process.kill(proc.pid, "SIGKILL"); } catch {} }
     runningProcesses.delete(name);
   }
+
+  // Fallback: the dashboard may have been restarted since the sandbox was
+  // started, losing the in-memory PID. Kill any `next dev` process whose
+  // cwd points at this sandbox's directory so we don't leak.
+  const sandboxDir = path.join(getSandboxesRoot(), name);
+  try {
+    const procDir = "/proc";
+    for (const pid of fs.readdirSync(procDir)) {
+      if (!/^\d+$/.test(pid)) continue;
+      try {
+        const cwd = fs.readlinkSync(path.join(procDir, pid, "cwd"));
+        if (cwd === sandboxDir || cwd.startsWith(sandboxDir + "/")) {
+          try { process.kill(Number(pid), "SIGKILL"); } catch {}
+        }
+      } catch {}
+    }
+  } catch {}
 }
 
 export function deleteSandboxDir(name: string): void {

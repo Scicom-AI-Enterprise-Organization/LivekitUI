@@ -52,6 +52,12 @@ export async function POST(request: NextRequest) {
 
     const db = await ensureDb();
     const app = await db.createSandboxApp(name, template, url, port);
+    if (agentName) {
+      await db.updateSandboxAppSettings(
+        app.id,
+        JSON.stringify({ agentDispatch: agentName, agentName })
+      );
+    }
 
     return NextResponse.json({
       app: {

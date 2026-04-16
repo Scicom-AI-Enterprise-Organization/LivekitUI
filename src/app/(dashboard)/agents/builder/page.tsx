@@ -1947,7 +1947,7 @@ function PreviewPanel({ config }: { config: AgentConfig }) {
 /* Model value → code string mappings */
 const sttModelMap: Record<string, string> = {
   deepgram: "deepgram/nova-3",
-  whisper: "openai/whisper-large-v3",
+  whisper: "openai/whisper-1",
 };
 const llmModelMap: Record<string, string> = {
   "gpt-5.4": "openai/gpt-5.4",
@@ -1986,11 +1986,25 @@ function generateAgentCode(
   endCall: EndCallConfig = { enabled: false, conditions: "", instructions: "", deleteRoom: false },
   callSummary: CallSummaryConfig = { enabled: false, llmModel: "gpt-5.3-chat", reasoningEffort: "low", instructions: "", endpointUrl: "", headers: [] },
 ): string {
-  const agentSlug = config.name.toLowerCase().replace(/\s+/g, "-");
+  const agentSlug = config.name.replace(/\s+/g, "-");
   const sttModel = sttModelMap[config.sttModel] || config.sttModel;
   const llmModel = llmModelMap[config.llmModel] || config.llmModel;
   const ttsModel = ttsModelMap[config.ttsModel] || config.ttsModel;
   const lang = languageMap[config.sttLanguage] || config.sttLanguage;
+
+  // Parse "provider/model" into {plugin, model} so we can use direct plugins
+  // (e.g. openai.STT) instead of inference.* which requires LiveKit Cloud.
+  const stripModel = (id: string): { plugin: string; model: string } => {
+    const idx = id.indexOf("/");
+    if (idx === -1) return { plugin: "openai", model: id };
+    const provider = id.slice(0, idx);
+    const model = id.slice(idx + 1);
+    const known = ["openai", "anthropic", "deepgram", "cartesia", "elevenlabs", "google", "groq"];
+    return { plugin: known.includes(provider) ? provider : "openai", model };
+  };
+  const sttInfo = stripModel(sttModel);
+  const llmInfo = stripModel(llmModel);
+  const ttsInfo = stripModel(ttsModel);
 
   // Escape instructions for Python triple-quoted string
   const escapedInstructions = config.instructions
@@ -2152,17 +2166,16 @@ ${payloadCode}
   let sessionBlock: string;
   if (isRealtime) {
     sessionBlock = `    session = AgentSession(
-        llm=inference.LLM(model="${llmModel}"),
+        llm=${llmInfo.plugin}.LLM(model="${llmInfo.model}"),
         vad=ctx.proc.userdata["vad"],
     )`;
   } else {
     sessionBlock = `    session = AgentSession(
-        stt=inference.STT(model="${sttModel}", language="${lang}"),
-        llm=inference.LLM(model="${llmModel}"),
-        tts=inference.TTS(
-            model="${ttsModel}",
+        stt=${sttInfo.plugin}.STT(model="${sttInfo.model}"),
+        llm=${llmInfo.plugin}.LLM(model="${llmInfo.model}"),
+        tts=${ttsInfo.plugin}.TTS(
+            model="${ttsInfo.model}",
             voice="${config.ttsVoice}",
-            language="${lang}"
         ),
         turn_handling=TurnHandlingOptions(turn_detection=MultilingualModel()),
         vad=ctx.proc.userdata["vad"],
@@ -2191,9 +2204,10 @@ ${payloadCode}
     "AgentSession",
     "JobContext",
     "JobProcess",
+    "MetricsCollectedEvent",
     "TurnHandlingOptions",
     "cli",
-    "inference",
+    "metrics",
   ];
   if (hasMcpServers) {
     agentImports.push("mcp");
@@ -2262,6 +2276,7 @@ ${payloadCode}
   if (hasCallSummary) {
     const escapeTriple = (s: string) => s.replace(/\\/g, "\\\\").replace(/"""/g, '\\"\\"\\"');
     const summaryLlmModel = llmModelMap[callSummary.llmModel] || callSummary.llmModel;
+    const summaryInfo = stripModel(summaryLlmModel);
     const summaryInstructions = escapeTriple(callSummary.instructions || "");
     const reasoning = callSummary.reasoningEffort;
     const endpointUrl = callSummary.endpointUrl;
@@ -2282,7 +2297,7 @@ ${payloadCode}
 
     callSummaryFns = `
 
-async def _summarize_session(summarizer: inference.LLM, chat_ctx: ChatContext) -> str | None:
+async def _summarize_session(summarizer, chat_ctx: ChatContext) -> str | None:
     summary_ctx = ChatContext()
     summary_ctx.add_message(
         role="system",
@@ -2324,7 +2339,7 @@ async def _on_session_end_func(ctx: JobContext) -> None:
         return
 
     report = ctx.make_session_report()
-    summarizer = inference.LLM(model="${summaryLlmModel}")
+    summarizer = ${summaryInfo.plugin}.LLM(model="${summaryInfo.model}")
     summary = await _summarize_session(summarizer, report.chat_history)
     if not summary:
         logger.info("no summary generated for end_of_call processing")
@@ -2361,6 +2376,20 @@ async def _on_session_end_func(ctx: JobContext) -> None:
   // EndCallTool import line
   const endCallImportLine = hasEndCall ? "from livekit.agents.beta.tools import EndCallTool\n" : "";
 
+  // Collect plugins used (direct plugins, not inference) so self-hosted users
+  // don't need LiveKit Cloud credentials.
+  const pluginsSet = new Set<string>(["noise_cancellation", "silero"]);
+  if (!isRealtime) {
+    pluginsSet.add(sttInfo.plugin);
+    pluginsSet.add(ttsInfo.plugin);
+  }
+  pluginsSet.add(llmInfo.plugin);
+  if (hasCallSummary) {
+    const summaryInfo = stripModel(llmModelMap[callSummary.llmModel] || callSummary.llmModel);
+    pluginsSet.add(summaryInfo.plugin);
+  }
+  const pluginsImportStr = Array.from(pluginsSet).sort().map((p) => `    ${p},\n`).join("");
+
   return `import logging
 
 ${extraTopImports}from dotenv import load_dotenv
@@ -2369,9 +2398,7 @@ from livekit.agents import (
 ${agentImportsStr}
 )
 ${endCallImportLine}from livekit.plugins import (
-    noise_cancellation,
-    silero,
-)
+${pluginsImportStr})
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
 logger = logging.getLogger("agent-${agentSlug}")
@@ -2402,6 +2429,10 @@ server.setup_fnc = prewarm
 ${entrypointDecorator}
 async def entrypoint(ctx: JobContext):
 ${sessionBlock}
+
+    @session.on("metrics_collected")
+    def _on_metrics_collected(ev: MetricsCollectedEvent) -> None:
+        metrics.log_metrics(ev.metrics)
 
     await session.start(
         agent=DefaultAgent(),
@@ -2698,15 +2729,12 @@ function AgentBuilderContent() {
           hasLoadedRef.current = true;
         });
     } else {
-      // Create new draft
+      // New draft: pick a random name but don't persist yet. The auto-save
+      // effect will upsert on the first real edit — this avoids leaving
+      // orphan draft rows every time someone just opens the builder.
       const name = randomAgentName();
       originalNameRef.current = name;
       setConfig((prev) => ({ ...prev, name }));
-      fetch("/api/agents", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name, config: { ...defaultConfig, name }, status: "draft" }),
-      }).catch(() => {});
     }
   }, [editingAgentName]);
 
@@ -2742,6 +2770,10 @@ function AgentBuilderContent() {
   const saveAgent = useCallback(async () => {
     const name = config.name?.trim();
     if (!name) return;
+    // If the name was just edited in the input, defer saving until the
+    // rename endpoint updates originalNameRef. Otherwise we'd POST with the
+    // new name and create a duplicate DB row alongside the old one.
+    if (originalNameRef.current && name !== originalNameRef.current) return;
     setSaveState("saving");
     try {
       const res = await fetch("/api/agents", {

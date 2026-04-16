@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { TopBar } from "@/components/livekit/top-bar";
+import { DEFAULT_TIME_RANGE, type TimeRangeValue } from "@/components/livekit/time-range-picker";
 import { StatCard } from "@/components/livekit/stat-card";
 import { MultiLineChart } from "@/components/livekit/line-chart";
 import { Card, CardContent } from "@/components/ui/card";
@@ -101,6 +102,7 @@ interface AgentWorker {
   concurrentSessions: number;
   rooms: string[];
   status: string;
+  running: boolean;
 }
 
 interface AgentSession {
@@ -127,12 +129,13 @@ export default function AgentsPage() {
   const [deleteAgent, setDeleteAgent] = useState<string | null>(null);
   const [logsAgent, setLogsAgent] = useState<string | null>(null);
   const [history, setHistory] = useState<{ time: string; sessions: number; agents: number }[]>([]);
+  const [timeRange, setTimeRange] = useState<TimeRangeValue>(DEFAULT_TIME_RANGE);
 
   const fetchAgents = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch("/api/agents");
+      const res = await fetch(`/api/agents?hours=${timeRange.hours}`);
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Failed to fetch");
       setAgents(data.agents || []);
@@ -141,7 +144,7 @@ export default function AgentsPage() {
 
       // Use persisted history from the server
       const h = (data.history || []).map((entry: { time: string; sessions: number; agents: number }) => ({
-        time: new Date(entry.time).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" }),
+        time: new Date(entry.time).toLocaleString("en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }),
         sessions: entry.sessions,
         agents: entry.agents,
       }));
@@ -151,7 +154,7 @@ export default function AgentsPage() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [timeRange.hours]);
 
   useEffect(() => {
     fetchAgents();
@@ -178,6 +181,8 @@ export default function AgentsPage() {
         title="Agents"
         showRefresh
         showTimeRange
+        timeRange={timeRange}
+        onTimeRangeChange={setTimeRange}
         actions={
           <div className="flex items-center gap-2">
             <Button variant="outline" size="sm" onClick={fetchAgents} disabled={loading} className="gap-1.5">
@@ -197,9 +202,21 @@ export default function AgentsPage() {
       <div className="p-6 space-y-6">
         {/* Stats Row */}
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          <StatCard label="Agents Deployed" value={stats.totalAgents} />
-          <StatCard label="Concurrent Agent Sessions" value={stats.totalSessions} />
-          <StatCard label="Active Rooms with Agents" value={new Set(sessions.map(s => s.roomName)).size} />
+          <StatCard
+            label="Agents Deployed"
+            value={stats.totalAgents}
+            infoText="Number of agents currently deployed in LivekitUI."
+          />
+          <StatCard
+            label="Concurrent Agent Sessions"
+            value={stats.totalSessions}
+            infoText="Number of currently active sessions with agents deployed in LivekitUI."
+          />
+          <StatCard
+            label="Active Rooms with Agents"
+            value={new Set(sessions.map(s => s.roomName)).size}
+            infoText="Number of LiveKit rooms that have at least one agent participant connected right now."
+          />
         </div>
 
         {/* Overview Chart */}
@@ -227,6 +244,8 @@ export default function AgentsPage() {
                   ]}
                   labels={history.map((h) => h.time)}
                   height={180}
+                  viewBoxWidth={900}
+                  fontSize={7}
                 />
               ) : (
                 <div className="flex items-center justify-center h-[180px] text-sm text-muted-foreground">
@@ -313,25 +332,15 @@ export default function AgentsPage() {
                             </span>
                           </div>
 
-                          {agent.concurrentSessions > 0 ? (
-                            <Badge variant="default" className="bg-emerald-500/10 text-emerald-500 gap-1.5">
+                          {agent.running ? (
+                            <Badge variant="default" className="bg-emerald-500/10 text-emerald-500 gap-1.5 uppercase tracking-wider text-[10px]">
                               <span className="size-1.5 rounded-full bg-emerald-500 animate-pulse" />
-                              Active
-                            </Badge>
-                          ) : agent.status === "draft" ? (
-                            <Badge variant="outline" className="gap-1.5">
-                              <span className="size-1.5 rounded-full bg-yellow-500" />
-                              Draft
-                            </Badge>
-                          ) : agent.status === "connected" ? (
-                            <Badge variant="default" className="bg-emerald-500/10 text-emerald-500 gap-1.5">
-                              <span className="size-1.5 rounded-full bg-emerald-500" />
-                              Connected
+                              ONLINE
                             </Badge>
                           ) : (
-                            <Badge variant="outline" className="text-muted-foreground gap-1.5">
+                            <Badge variant="outline" className="text-muted-foreground gap-1.5 uppercase tracking-wider text-[10px]">
                               <span className="size-1.5 rounded-full bg-muted-foreground" />
-                              Idle
+                              OFFLINE
                             </Badge>
                           )}
                         </div>
@@ -368,40 +377,6 @@ export default function AgentsPage() {
           )}
         </div>
 
-        {/* Active Sessions */}
-        {sessions.length > 0 && (
-          <div className="space-y-4">
-            <h2 className="text-sm font-semibold text-foreground">Active sessions</h2>
-            <Card className="py-0 overflow-hidden">
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="border-b text-left text-muted-foreground">
-                    <th className="px-4 py-2.5 font-medium">Agent</th>
-                    <th className="px-4 py-2.5 font-medium">Room</th>
-                    <th className="px-4 py-2.5 font-medium">Participant ID</th>
-                    <th className="px-4 py-2.5 font-medium">Joined At</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {sessions.map((s) => (
-                    <tr key={s.participantSid} className="border-b last:border-0">
-                      <td className="px-4 py-2.5 font-medium">{s.agentName}</td>
-                      <td className="px-4 py-2.5 text-muted-foreground">{s.roomName}</td>
-                      <td className="px-4 py-2.5 text-xs text-muted-foreground">
-                        {s.participantSid.slice(0, 20)}...
-                      </td>
-                      <td className="px-4 py-2.5 text-muted-foreground">
-                        {s.joinedAt
-                          ? new Date(s.joinedAt * 1000).toLocaleString()
-                          : "—"}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </Card>
-          </div>
-        )}
       </div>
 
       {/* Logs viewer */}
