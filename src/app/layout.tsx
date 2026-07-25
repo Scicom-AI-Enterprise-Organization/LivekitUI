@@ -2,6 +2,8 @@ import type { Metadata } from "next";
 import { Inter, Geist_Mono, Roboto, Open_Sans, Montserrat } from "next/font/google";
 import "./globals.css";
 import { BrandProvider } from "@/components/brand-provider";
+import { ThemeProvider } from "@/components/theme-provider";
+import { Toaster } from "@/components/ui/sonner";
 
 // Scicom fonts
 const inter = Inter({
@@ -59,7 +61,15 @@ export default function RootLayout({
       <body
         className={`${inter.variable} ${geistMono.variable} ${roboto.variable} ${montserrat.variable} ${openSans.variable} font-sans antialiased`}
       >
-        <BrandProvider>{children}</BrandProvider>
+        <ThemeProvider
+          attribute="class"
+          defaultTheme="system"
+          enableSystem
+          disableTransitionOnChange
+        >
+          <BrandProvider>{children}</BrandProvider>
+          <Toaster position="bottom-right" />
+        </ThemeProvider>
       </body>
     </html>
   );

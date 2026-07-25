@@ -10,6 +10,8 @@ Self-hosted dashboard for managing [LiveKit](https://livekit.io) infrastructure.
 - **Telephony** — calls, dispatch rules, phone numbers (manual + Twilio/Vonage/Telnyx import), SIP trunks
 - **Egresses / Ingresses** — manage media export and import streams
 - **Sandbox** — create and manage sandbox apps from templates, proxied through the dashboard at `/sandbox/{name}`
+- **Providers** — register any OpenAI-compatible inference endpoint (vLLM, Ollama, LiteLLM, …) and its models; the agent builder picks its model lists from here
+- **Secrets** — project-wide API keys, injected into every deployed agent and selectable as a provider's credential
 - **Settings** — project config, team members, API keys, webhooks with live event log
 - **Auth** — login, register, invite-based onboarding with role assignment
 - **RBAC** — Admin (full access), Member (view-only)
@@ -54,6 +56,7 @@ Run each in a separate terminal:
 |---------|---------|------|
 | LiveKit Server | `livekit-server --config livekit.yaml --dev` | 7880 |
 | Dashboard | `npm run dev` | 3000 |
+| Key gateway (optional) | `npm run gateway` | 7885 |
 | Voice Agent | `cd example/agent-starter-python && source venv/bin/activate && python src/agent.py dev` | — |
 | Agent Frontend | `cd example/agent-starter-react && npx next dev -p 3002` | 3002 |
 
@@ -113,9 +116,61 @@ To configure a custom domain for production:
 NEXT_PUBLIC_SANDBOX_DOMAIN=https://your-domain.com
 ```
 
+## Model Providers
+
+**Settings > Providers** owns every model the agent builder offers — nothing is hardcoded in the UI. A provider is one inference endpoint:
+
+| Field | Meaning |
+|---|---|
+| Slug | Short id used in model refs, e.g. `openai` in `openai/gpt-5.4-mini` |
+| Plugin | LiveKit Python plugin used in the generated agent (`openai`, `anthropic`, `deepgram`, `cartesia`, `elevenlabs`, `google`, `groq`) |
+| Base URL | OpenAI-compatible endpoint. Empty = the plugin's own default |
+| API key secret | Name of a secret from **Settings > Secrets**; the agent reads it as `os.getenv("NAME")` |
+| Models | One row per model, tagged `llm` / `realtime` / `stt` / `tts` |
+| Voices | Optional voice ids for this provider's TTS and realtime models |
+
+On first run the database is seeded with the built-in OpenAI, Anthropic, Deepgram, Cartesia, and ElevenLabs providers. They are ordinary rows — edit, disable, or delete them freely.
+
+The open dialog is reflected in the URL, so a provider form can be linked or bookmarked directly:
+
+| URL | Opens |
+|---|---|
+| `/settings/providers?provider=new` | The add-provider form |
+| `/settings/providers?provider=<slug>` | That provider's edit form |
+
+### Connection test
+
+**Test connection** must pass before a provider can be saved. It sends one read-only listing request to the endpoint using the selected secret — `GET /models` for OpenAI-compatible, Anthropic, Google, and ElevenLabs; `GET /projects` for Deepgram; `GET /voices` for Cartesia — and reports the endpoint reached and which credential was used. Where the response is a model list, the ids come back so you can tick the ones to add.
+
+A key is required when the provider uses the plugin's hosted default endpoint. With a custom base URL the request is attempted without auth too, so an unauthenticated local server passes. The result is tied to the plugin, base URL, and secret: change any of them and the test must be re-run. Editing an existing provider without touching those three keeps **Save** enabled, since those settings were already verified.
+
+### Adding a custom OpenAI-compatible endpoint
+
+1. **Settings > Secrets** → add the API key, e.g. `MY_VLLM_API_KEY`
+2. **Settings > Providers** → *Add provider*
+   - Plugin: **OpenAI-compatible**
+   - Base URL: `http://localhost:8000/v1`
+   - API key secret: `MY_VLLM_API_KEY`
+   - **Test connection** → tick the models it reports, or add them by hand
+3. The models now appear in the agent builder's **Models & Voice** tab, and the generated Python becomes:
+
+```python
+llm=openai.LLM(
+    model="Qwen/Qwen3-32B",
+    base_url="http://localhost:8000/v1",
+    api_key=os.getenv("MY_VLLM_API_KEY"),
+),
+```
+
+## Secrets
+
+**Settings > Secrets** stores project-wide credentials. Every secret is written to each deployed agent's `.env.local` using its name as the environment variable, so a provider's API key reaches the agent process on deploy or restart. Per-agent secrets (agent builder's **Advanced** tab) override project secrets of the same name.
+
+Secret names must be valid environment variable names. Values are masked in the UI and can only be revealed by owners and admins.
+
 ## API Keys
 
-The **Settings > API Keys** page shows your LiveKit server credentials (from `.env`). Use these to connect agents and sandbox apps:
+**Settings > API Keys** does two things: it shows the LiveKit server's own key pair (from `.env`), and it generates additional keys you can hand to individual agents, sandboxes, or services.
 
 ```env
 LIVEKIT_URL=ws://localhost:7880
@@ -123,7 +178,38 @@ LIVEKIT_API_KEY=your_key
 LIVEKIT_API_SECRET=your_secret
 ```
 
-The API secret is hidden by default and can be revealed by admins only.
+The server secret is hidden by default and can be revealed by admins only.
+
+### Multiple API keys
+
+`livekit-server` reads its API keys **once, at boot** — rewriting `keys:` / `key_file` or sending `SIGHUP` does not reload them. Issuing keys at runtime therefore requires a translation layer, which is what `gateway/server.mjs` is:
+
+```
+agent (issued key) ──> gateway :7885 ──(re-signed with server key)──> livekit-server :7880
+                            │
+                            └── WebRTC media still flows agent <──> server directly
+```
+
+The gateway verifies a client's token against the issued key's secret in the database, then re-signs the identical claims — same identity, grants, and expiry — with the server's real key. Only signalling (`/rtc*` and `/twirp/*`) passes through it; media negotiates ICE directly with the SFU.
+
+```bash
+npm run gateway
+```
+
+Then set in `.env`:
+
+```env
+GATEWAY_PORT=7885
+NEXT_PUBLIC_LIVEKIT_GATEWAY_URL=ws://localhost:7885
+```
+
+Generated keys are handed out with the **gateway** URL. Pointing them at the LiveKit server directly will fail — the server has never heard of them.
+
+- **Generating** a key shows the secret exactly once; only an AES-256-GCM-encrypted copy is stored (the gateway needs the plaintext back to verify signatures, so a hash won't do).
+- **Revoking** takes effect on the key's next request. The gateway reads the database per request with no cache, and no restart is involved.
+- The server's own key **passes through** the gateway untouched, so internal services can use either URL.
+
+Encryption uses `API_KEYS_ENC_KEY` if set, otherwise a key derived from `SESSION_SECRET`. Changing either makes previously issued secrets unreadable.
 
 ## Setting Up Examples
 
@@ -140,11 +226,24 @@ cd ..
 # Python voice agent
 git clone --depth 1 https://github.com/livekit-examples/agent-starter-python.git
 cd agent-starter-python
-python3.10 -m venv venv
+python3 -m venv venv        # any Python 3.10 – 3.14
 source venv/bin/activate
-pip install "livekit-agents[openai,silero]~=1.5" python-dotenv
+pip install "livekit-agents[mcp]~=1.5" \
+  livekit-plugins-openai livekit-plugins-anthropic livekit-plugins-google \
+  livekit-plugins-groq livekit-plugins-deepgram livekit-plugins-cartesia \
+  livekit-plugins-elevenlabs livekit-plugins-silero \
+  livekit-plugins-turn-detector livekit-plugins-noise-cancellation \
+  python-dotenv aiohttp
 python src/agent.py download-files
 cp .env.example .env.local   # edit with LiveKit + OpenAI credentials
+```
+
+This venv is also what **Deploy agent** runs in the agent builder, so it needs every plugin the builder can generate — one per provider in **Settings > Providers** — plus `silero`, `turn-detector`, and `noise-cancellation` for the voice pipeline and `[mcp]` for MCP tools. A partial install deploys fine but the agent process exits on an `ImportError`; check **View logs** in the builder if an agent goes OFFLINE right after deploying.
+
+If you already have a suitable interpreter elsewhere, point the dashboard at it instead of creating this venv:
+
+```env
+AGENT_PYTHON_BIN=/path/to/python3
 ```
 
 ## Database
@@ -179,6 +278,8 @@ Phone numbers can always be added manually. To import from a provider, add crede
 | View all pages | Yes | Yes |
 | Manage agents, telephony, egress/ingress | Yes | No |
 | Manage settings, API keys, webhooks | Yes | No |
+| Manage providers and secrets | Yes | No |
+| Reveal secret values | Yes | No |
 | Invite and remove members | Yes | No |
 | Create and delete sandbox apps | Yes | No |
 
@@ -194,7 +295,7 @@ src/
       telephony/         Calls, dispatch rules, phone numbers, SIP trunks
       egresses/          Media export
       ingresses/         Media import
-      settings/          Project, sandbox, team members, API keys, webhooks
+      settings/          Project, providers, secrets, team members, API keys, webhooks
     api/                 REST endpoints
     sandbox/             Sandbox proxy routes
   components/
@@ -204,6 +305,7 @@ src/
     auth.ts              Session management, RBAC helpers
     db.ts                Database abstraction (SQLite + PostgreSQL)
     livekit.ts           LiveKit server SDK clients
+    providers.ts         Model provider types, model refs, built-in provider seeds
     sandbox.ts           Sandbox process management
     utils.ts             Tailwind class merge utility
   middleware.ts          Auth guard + sandbox proxy routing

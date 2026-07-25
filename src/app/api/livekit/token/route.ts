@@ -1,31 +1,69 @@
 import { NextRequest, NextResponse } from "next/server";
 import { AccessToken } from "livekit-server-sdk";
-import { spawn } from "child_process";
-import path from "path";
+import { getSession } from "@/lib/auth";
+import { getAgentDispatchClient, getRoomServiceClient } from "@/lib/livekit";
+import { isAgentRunning } from "@/lib/agent-runner";
 
+/**
+ * Starts a live preview session against a deployed agent.
+ *
+ * Creates a room, dispatches the agent into it by name, and returns a
+ * participant token for the browser. The agent under test is the one actually
+ * running — same generated code, same providers, same secrets — so the preview
+ * reflects production rather than a separate stand-in process.
+ */
 export async function POST(req: NextRequest) {
-  const {
-    agentName,
-    instructions,
-    welcomeMessage,
-    sttModel,
-    llmModel,
-    ttsModel,
-    sttLanguage,
-  } = await req.json();
+  const session = await getSession();
+  if (!session) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  const { agentName } = await req.json();
+
+  if (!agentName) {
+    return NextResponse.json({ error: "agentName is required" }, { status: 400 });
+  }
 
   const apiKey = process.env.LIVEKIT_API_KEY;
   const apiSecret = process.env.LIVEKIT_API_SECRET;
 
   if (!apiKey || !apiSecret) {
     return NextResponse.json(
-      { error: "LiveKit API key/secret not configured" },
+      { error: "LIVEKIT_API_KEY and LIVEKIT_API_SECRET are not configured" },
       { status: 500 }
     );
   }
 
-  const roomName = `agent-preview-${Date.now()}`;
+  // Agents are registered for explicit dispatch, so nothing will join the room
+  // unless the process is up. Say so now instead of letting the browser sit on
+  // "connecting" until it times out.
+  if (!isAgentRunning(agentName)) {
+    return NextResponse.json(
+      {
+        error: `Agent "${agentName}" is not running. Deploy it first, then start the call.`,
+        notRunning: true,
+      },
+      { status: 409 }
+    );
+  }
+
+  // The agent registers under its slug, which is how the builder writes
+  // agent_name into the generated code.
+  const dispatchName = agentName.replace(/\s+/g, "-");
+  const roomName = `agent-preview-${dispatchName}-${Date.now()}`;
   const participantName = `user-${Math.random().toString(36).slice(2, 8)}`;
+
+  try {
+    // Empty rooms are reaped shortly after the preview ends.
+    await getRoomServiceClient().createRoom({ name: roomName, emptyTimeout: 120 });
+    await getAgentDispatchClient().createDispatch(roomName, dispatchName);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return NextResponse.json(
+      { error: `Could not dispatch "${dispatchName}" — ${message}` },
+      { status: 502 }
+    );
+  }
 
   const at = new AccessToken(apiKey, apiSecret, {
     identity: participantName,
@@ -37,41 +75,14 @@ export async function POST(req: NextRequest) {
     roomJoin: true,
     canPublish: true,
     canSubscribe: true,
-    roomCreate: true,
   });
 
   const token = await at.toJwt();
 
-  // Spawn the preview agent process
-  const agentScript = path.join(process.cwd(), "agents", "preview_agent.py");
-  const agentArgs = [
-    agentScript,
-    "--room", roomName,
-    "--instructions", instructions || "You are a helpful voice assistant.",
-    "--welcome", welcomeMessage || "Hey there, how can I help you today?",
-    "--stt", sttModel || "deepgram/nova-3",
-    "--llm", llmModel || "openai/gpt-4.1-mini",
-    "--tts", ttsModel || "cartesia/sonic-3",
-    "--language", sttLanguage || "en",
-  ];
-
-  const agent = spawn("python3.11", agentArgs, {
-    env: {
-      ...process.env,
-      LIVEKIT_URL: process.env.LIVEKIT_URL || "http://localhost:7880",
-      LIVEKIT_API_KEY: apiKey,
-      LIVEKIT_API_SECRET: apiSecret,
-    },
-    stdio: "ignore",
-    detached: true,
-  });
-
-  // Don't let the agent process block the Next.js server from exiting
-  agent.unref();
-
   return NextResponse.json({
     token,
     room: roomName,
+    agent: dispatchName,
     serverUrl: process.env.LIVEKIT_URL || "ws://localhost:7880",
   });
 }

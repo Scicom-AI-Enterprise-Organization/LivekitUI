@@ -190,6 +190,19 @@
   animation: collapsible-up 200ms ease-out;
 }
 
+/* Auth branding panel — an always-dark slab beside the sign-in form. It paints
+   with bg-foreground / text-background, which would invert to a light panel in
+   dark mode, so pin those two tokens locally instead. */
+.auth-brand-panel {
+  --foreground: oklch(0.2103 0.0059 285.8852);
+  --background: oklch(0.9670 0.0029 264.5419);
+}
+.dark .auth-brand-panel {
+  /* Slightly lighter than the page background so the split stays readable */
+  --foreground: oklch(0.2686 0 0);
+  --background: oklch(0.9219 0 0);
+}
+
 /* LiveKit agent preview — override via CSS custom properties */
 .lk-agent-preview {
   --lk-border-radius: 9999px;

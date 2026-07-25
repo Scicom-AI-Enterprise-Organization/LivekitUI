@@ -29,10 +29,13 @@ export async function POST(
     return NextResponse.json({ error: "Agent not found" }, { status: 404 });
   }
 
-  // Load secrets from agent_secrets table
-  const dbSecrets = await db.getAgentSecrets(id);
+  // Project-wide secrets (Settings > Secrets) first — these hold the API keys
+  // that providers reference. Agent-specific secrets override them.
   const secretsMap: Record<string, string> = {};
-  for (const s of dbSecrets) {
+  for (const s of await db.getAllSecrets()) {
+    secretsMap[s.name] = s.value;
+  }
+  for (const s of await db.getAgentSecrets(id)) {
     secretsMap[s.key] = s.value;
   }
 

@@ -30,22 +30,48 @@ function getLogsDir(): string {
   return dir;
 }
 
+/** Plugins the code generator can emit, so the setup hint installs all of them. */
+const AGENT_PIP_PACKAGES = [
+  "'livekit-agents[mcp]~=1.5'",
+  "livekit-plugins-openai",
+  "livekit-plugins-anthropic",
+  "livekit-plugins-google",
+  "livekit-plugins-groq",
+  "livekit-plugins-deepgram",
+  "livekit-plugins-cartesia",
+  "livekit-plugins-elevenlabs",
+  "livekit-plugins-silero",
+  "livekit-plugins-turn-detector",
+  "livekit-plugins-noise-cancellation",
+  "python-dotenv",
+  "aiohttp",
+].join(" ");
+
 function getPythonBin(): string {
-  // Use the venv from example/agent-starter-python
-  const venvPython = path.join(
-    process.cwd(),
-    "example",
-    "agent-starter-python",
-    "venv",
-    "bin",
-    "python3"
-  );
-  if (!fs.existsSync(venvPython)) {
-    throw new Error(
-      "Python venv not found. Set up example/agent-starter-python first:\n  cd example/agent-starter-python && python3.10 -m venv venv && source venv/bin/activate && pip install 'livekit-agents[openai,silero]~=1.5' python-dotenv"
-    );
+  // An explicit interpreter wins — useful when the venv lives outside the repo.
+  const override = process.env.AGENT_PYTHON_BIN;
+  if (override) {
+    if (!fs.existsSync(override)) {
+      throw new Error(`AGENT_PYTHON_BIN points at ${override}, which does not exist.`);
+    }
+    return override;
   }
-  return venvPython;
+
+  const exampleDir = path.join(process.cwd(), "example", "agent-starter-python");
+  for (const dir of ["venv", ".venv"]) {
+    const candidate = path.join(exampleDir, dir, "bin", "python3");
+    if (fs.existsSync(candidate)) return candidate;
+  }
+
+  throw new Error(
+    "Python venv not found. Create it with any Python 3.10–3.14:\n" +
+      `  cd example/agent-starter-python\n` +
+      `  python3 -m venv venv\n` +
+      `  ./venv/bin/pip install ${AGENT_PIP_PACKAGES}\n` +
+      "Then pre-download the model weights so agents start quickly:\n" +
+      "  ./venv/bin/python src/agent.py download-files\n" +
+      "Already have an interpreter with these packages? Set AGENT_PYTHON_BIN to it."
+  );
 }
 
 function pidFilePath(name: string): string {

@@ -59,10 +59,22 @@ export default function TeamMembersPage() {
   const [inviteUrl, setInviteUrl] = useState("");
   const [copied, setCopied] = useState(false);
 
+  const [loadError, setLoadError] = useState("");
+
   const fetchMembers = () => {
     fetch("/api/auth/users")
-      .then((res) => res.json())
-      .then((data) => setMembers(data.users ?? []))
+      .then(async (res) => {
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          throw new Error(data.error || `Failed to load members (HTTP ${res.status})`);
+        }
+        return res.json();
+      })
+      .then((data) => {
+        setMembers(data.users ?? []);
+        setLoadError("");
+      })
+      .catch((err: Error) => setLoadError(err.message))
       .finally(() => setLoading(false));
   };
 
@@ -164,7 +176,20 @@ export default function TeamMembersPage() {
         }
       />
 
-      <div className="flex-1 overflow-y-auto p-6">
+      <div className="flex-1 overflow-y-auto p-6 space-y-4">
+        {loadError && (
+          <div className="rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+            {loadError}
+          </div>
+        )}
+
+        {currentUser && !isOwner && (
+          <div className="rounded-lg border border-border bg-muted/40 px-3 py-2 text-sm text-muted-foreground">
+            You are signed in as <span className="text-foreground">{currentUser.role}</span>. Only the workspace owner
+            can invite or remove members.
+          </div>
+        )}
+
         <Card>
           <CardContent className="p-0">
             {loading ? (

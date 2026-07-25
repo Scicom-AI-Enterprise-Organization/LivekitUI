@@ -28,6 +28,7 @@ import {
   LogOut,
 } from "lucide-react";
 import { useState, useEffect } from "react";
+import { ThemeToggle } from "@/components/theme-toggle";
 
 interface NavItem {
   label: string;
@@ -87,6 +88,8 @@ const navItems: NavItem[] = [
     children: [
       { label: "Project", href: "/settings/project" },
       { label: "Team members", href: "/settings/team-members" },
+      { label: "Providers", href: "/settings/providers" },
+      { label: "Secrets", href: "/settings/secrets" },
       { label: "API keys", href: "/settings/api-keys" },
       { label: "Webhooks", href: "/settings/webhooks" },
     ],
@@ -100,9 +103,18 @@ export function LiveKitSidebar() {
 
   useEffect(() => {
     fetch("/api/auth/me")
-      .then((res) => res.ok ? res.json() : null)
-      .then((data) => { if (data?.user) setUser(data.user); });
-  }, []);
+      .then((res) => {
+        // The session can lapse while a tab sits open. Without this the whole
+        // dashboard silently degrades to empty lists and hidden actions.
+        if (res.status === 401) {
+          router.replace("/login");
+          return null;
+        }
+        return res.ok ? res.json() : null;
+      })
+      .then((data) => { if (data?.user) setUser(data.user); })
+      .catch(() => {});
+  }, [router]);
 
   const displayName = user ? `${user.firstName} ${user.lastName}` : "...";
   const initials = user ? user.firstName.charAt(0).toUpperCase() : "?";
@@ -226,6 +238,8 @@ export function LiveKitSidebar() {
             </Avatar>
             <span className="text-sm text-sidebar-foreground/70 truncate">{displayName}</span>
           </div>
+          <div className="flex items-center gap-0.5">
+          <ThemeToggle size="icon-xs" align="end" />
           <Button
             variant="ghost"
             size="icon-xs"
@@ -238,6 +252,7 @@ export function LiveKitSidebar() {
           >
             <LogOut className="size-3.5" />
           </Button>
+          </div>
         </div>
       </div>
     </aside>

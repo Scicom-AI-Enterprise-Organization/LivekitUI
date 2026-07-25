@@ -39,6 +39,33 @@ services:
       - LIVEKIT_URL=http://livekit:7880
       - LIVEKIT_PROMETHEUS_URL=http://livekit:6789/metrics
       - NEXT_PUBLIC_LIVEKIT_URL=ws://localhost:7880
+      # Issued API keys are handed out with this URL — it must be the gateway,
+      # as seen from the browser/agent, not the LiveKit server.
+      - NEXT_PUBLIC_LIVEKIT_GATEWAY_URL=ws://localhost:7885
+      # Override the .env value: in compose the dashboard is published on 3000.
+      - NEXT_PUBLIC_SANDBOX_DOMAIN=http://localhost:3000
+    depends_on:
+      - livekit
+      - postgres
+    restart: unless-stopped
+
+  # ── API key gateway ──
+  # Translates keys issued in Settings > API keys into the server's real key.
+  # Same image as the dashboard; it only needs the database and LiveKit.
+  gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["node", "gateway/server.mjs"]
+    ports:
+      - "7885:7885"
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=production
+      - GATEWAY_PORT=7885
+      - POSTGRES_HOST=postgres
+      - LIVEKIT_URL=http://livekit:7880
     depends_on:
       - livekit
       - postgres

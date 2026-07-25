@@ -35,10 +35,10 @@ export async function POST(
   }
   const pythonCode = fs.readFileSync(agentFile, "utf-8");
 
-  // Load secrets
-  const dbSecrets = await db.getAgentSecrets(id);
+  // Load secrets — project-wide first, then agent-specific overrides
   const secretsMap: Record<string, string> = {};
-  for (const s of dbSecrets) secretsMap[s.key] = s.value;
+  for (const s of await db.getAllSecrets()) secretsMap[s.name] = s.value;
+  for (const s of await db.getAgentSecrets(id)) secretsMap[s.key] = s.value;
 
   stopAgent(id);
   try {

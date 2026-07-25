@@ -1,5 +1,6 @@
 import path from "path";
 import fs from "fs";
+import { DEFAULT_PROVIDERS } from "./providers";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -84,6 +85,45 @@ export interface DbAgentVersion {
   created_at: string;
 }
 
+/** Project-wide secret. `name` doubles as the env var name in agent code. */
+export interface DbSecret {
+  id: number;
+  name: string;
+  value: string;
+  description: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/** Inference endpoint (OpenAI, Anthropic, or any OpenAI-compatible server). */
+export interface DbProvider {
+  id: number;
+  slug: string;
+  name: string;
+  plugin: string;
+  base_url: string | null;
+  api_key_secret: string | null;
+  audio_format: string | null;
+  models: string; // JSON: ProviderModel[]
+  voices: string; // JSON: ProviderVoice[]
+  builtin: number;
+  enabled: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ProviderInput {
+  slug: string;
+  name: string;
+  plugin: string;
+  baseUrl: string | null;
+  apiKeySecret: string | null;
+  audioFormat: string | null;
+  models: string; // JSON
+  voices: string; // JSON
+  enabled: boolean;
+}
+
 export interface DbWebhookEvent {
   id: number;
   event: string;
@@ -97,9 +137,13 @@ export interface DbApiKey {
   id: number;
   description: string;
   api_key: string;
+  /** Deprecated — kept for schema compatibility, always written as "". */
   api_secret_hash: string;
+  /** Secret encrypted with AES-256-GCM; the gateway needs the plaintext back. */
+  api_secret_enc: string | null;
   owner: string;
   created_at: string;
+  revoked_at: string | null;
 }
 
 export interface DbAgentSnapshot {
@@ -153,8 +197,10 @@ export interface Database {
   getAgentSnapshots(hours: number): Promise<DbAgentSnapshot[]>;
   addAgentPerSnapshot(agentName: string, sessions: number, running: boolean): Promise<void>;
   getAgentPerSnapshots(agentName: string, hours: number): Promise<DbAgentPerSnapshot[]>;
-  createApiKey(description: string, apiKey: string, apiSecretHash: string, owner: string): Promise<DbApiKey>;
+  createApiKey(description: string, apiKey: string, apiSecretEnc: string, owner: string): Promise<DbApiKey>;
   getAllApiKeys(): Promise<DbApiKey[]>;
+  findApiKey(apiKey: string): Promise<DbApiKey | null>;
+  revokeApiKey(id: number): Promise<void>;
   deleteApiKey(id: number): Promise<void>;
   addWebhookEvent(event: string, room: string | null, participant: string | null, payload: string): Promise<void>;
   getWebhookEvents(limit: number): Promise<DbWebhookEvent[]>;
@@ -170,6 +216,16 @@ export interface Database {
   addAgentVersion(agentName: string, deployerEmail: string, deployerName: string): Promise<DbAgentVersion>;
   getAgentVersions(agentName: string): Promise<DbAgentVersion[]>;
   deleteAgentVersions(agentName: string): Promise<void>;
+  upsertSecret(name: string, value: string, description: string | null): Promise<void>;
+  getAllSecrets(): Promise<DbSecret[]>;
+  findSecret(name: string): Promise<DbSecret | null>;
+  deleteSecret(name: string): Promise<void>;
+  createProvider(input: ProviderInput): Promise<DbProvider>;
+  updateProvider(id: number, input: ProviderInput): Promise<void>;
+  getAllProviders(): Promise<DbProvider[]>;
+  findProviderBySlug(slug: string): Promise<DbProvider | null>;
+  getProvider(id: number): Promise<DbProvider | null>;
+  deleteProvider(id: number): Promise<void>;
 }
 
 // ---------------------------------------------------------------------------
@@ -253,8 +309,10 @@ function createSqliteDb(): Database {
           description TEXT NOT NULL,
           api_key TEXT UNIQUE NOT NULL,
           api_secret_hash TEXT NOT NULL,
+          api_secret_enc TEXT,
           owner TEXT NOT NULL,
-          created_at TEXT DEFAULT (datetime('now'))
+          created_at TEXT DEFAULT (datetime('now')),
+          revoked_at TEXT
         );
         CREATE TABLE IF NOT EXISTS webhook_events (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -290,7 +348,61 @@ function createSqliteDb(): Database {
           created_at TEXT DEFAULT (datetime('now')),
           UNIQUE(agent_name, version)
         );
+        CREATE TABLE IF NOT EXISTS secrets (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          name TEXT UNIQUE NOT NULL,
+          value TEXT NOT NULL,
+          description TEXT,
+          created_at TEXT DEFAULT (datetime('now')),
+          updated_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE TABLE IF NOT EXISTS providers (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          slug TEXT UNIQUE NOT NULL,
+          name TEXT NOT NULL,
+          plugin TEXT NOT NULL DEFAULT 'openai',
+          base_url TEXT,
+          api_key_secret TEXT,
+          audio_format TEXT,
+          models TEXT NOT NULL DEFAULT '[]',
+          voices TEXT NOT NULL DEFAULT '[]',
+          builtin INTEGER NOT NULL DEFAULT 0,
+          enabled INTEGER NOT NULL DEFAULT 1,
+          created_at TEXT DEFAULT (datetime('now')),
+          updated_at TEXT DEFAULT (datetime('now'))
+        );
       `);
+
+      // ── Migrations for databases created before a column existed ──
+      // SQLite has no ADD COLUMN IF NOT EXISTS, so check the table first.
+      const apiKeyCols = (
+        db.prepare("PRAGMA table_info(api_keys)").all() as { name: string }[]
+      ).map((c) => c.name);
+      if (!apiKeyCols.includes("api_secret_enc")) {
+        db.exec("ALTER TABLE api_keys ADD COLUMN api_secret_enc TEXT");
+      }
+      if (!apiKeyCols.includes("revoked_at")) {
+        db.exec("ALTER TABLE api_keys ADD COLUMN revoked_at TEXT");
+      }
+
+      const providerCols = (
+        db.prepare("PRAGMA table_info(providers)").all() as { name: string }[]
+      ).map((c) => c.name);
+      if (!providerCols.includes("audio_format")) {
+        db.exec("ALTER TABLE providers ADD COLUMN audio_format TEXT");
+      }
+
+      // Seed the built-in providers once, so a fresh install has a model list.
+      const { n } = db.prepare("SELECT COUNT(*) as n FROM providers").get() as { n: number };
+      if (n === 0) {
+        const insert = db.prepare(
+          `INSERT INTO providers (slug, name, plugin, models, voices, builtin, enabled)
+           VALUES (?, ?, ?, ?, ?, 1, 1)`
+        );
+        for (const p of DEFAULT_PROVIDERS) {
+          insert.run(p.slug, p.name, p.plugin, JSON.stringify(p.models), JSON.stringify(p.voices || []));
+        }
+      }
     },
 
     async findUserByEmail(email) {
@@ -454,15 +566,23 @@ function createSqliteDb(): Database {
       ).all(agentName, hours) as DbAgentPerSnapshot[];
     },
 
-    async createApiKey(description, apiKey, apiSecretHash, owner) {
+    async createApiKey(description, apiKey, apiSecretEnc, owner) {
       const result = db.prepare(
-        "INSERT INTO api_keys (description, api_key, api_secret_hash, owner) VALUES (?, ?, ?, ?)"
-      ).run(description, apiKey, apiSecretHash, owner);
+        "INSERT INTO api_keys (description, api_key, api_secret_hash, api_secret_enc, owner) VALUES (?, ?, '', ?, ?)"
+      ).run(description, apiKey, apiSecretEnc, owner);
       return db.prepare("SELECT * FROM api_keys WHERE id = ?").get(result.lastInsertRowid) as DbApiKey;
     },
 
     async getAllApiKeys() {
       return db.prepare("SELECT * FROM api_keys ORDER BY created_at DESC").all() as DbApiKey[];
+    },
+
+    async findApiKey(apiKey) {
+      return db.prepare("SELECT * FROM api_keys WHERE api_key = ?").get(apiKey) as DbApiKey | null;
+    },
+
+    async revokeApiKey(id) {
+      db.prepare("UPDATE api_keys SET revoked_at = datetime('now') WHERE id = ? AND revoked_at IS NULL").run(id);
     },
 
     async deleteApiKey(id) {
@@ -543,6 +663,84 @@ function createSqliteDb(): Database {
 
     async deleteAgentVersions(agentName) {
       db.prepare("DELETE FROM agent_versions WHERE agent_name = ?").run(agentName);
+    },
+
+    async upsertSecret(name, value, description) {
+      db.prepare(
+        `INSERT INTO secrets (name, value, description) VALUES (?, ?, ?)
+         ON CONFLICT(name) DO UPDATE SET
+           value = excluded.value,
+           description = excluded.description,
+           updated_at = datetime('now')`
+      ).run(name, value, description);
+    },
+
+    async getAllSecrets() {
+      return db.prepare("SELECT * FROM secrets ORDER BY name ASC").all() as DbSecret[];
+    },
+
+    async findSecret(name) {
+      const row = db.prepare("SELECT * FROM secrets WHERE name = ?").get(name) as DbSecret | undefined;
+      return row || null;
+    },
+
+    async deleteSecret(name) {
+      db.prepare("DELETE FROM secrets WHERE name = ?").run(name);
+    },
+
+    async createProvider(input) {
+      const result = db.prepare(
+        `INSERT INTO providers (slug, name, plugin, base_url, api_key_secret, audio_format, models, voices, enabled)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).run(
+        input.slug,
+        input.name,
+        input.plugin,
+        input.baseUrl,
+        input.apiKeySecret,
+        input.audioFormat,
+        input.models,
+        input.voices,
+        input.enabled ? 1 : 0
+      );
+      return db.prepare("SELECT * FROM providers WHERE id = ?").get(result.lastInsertRowid) as DbProvider;
+    },
+
+    async updateProvider(id, input) {
+      db.prepare(
+        `UPDATE providers SET slug = ?, name = ?, plugin = ?, base_url = ?, api_key_secret = ?,
+           audio_format = ?, models = ?, voices = ?, enabled = ?, updated_at = datetime('now')
+         WHERE id = ?`
+      ).run(
+        input.slug,
+        input.name,
+        input.plugin,
+        input.baseUrl,
+        input.apiKeySecret,
+        input.audioFormat,
+        input.models,
+        input.voices,
+        input.enabled ? 1 : 0,
+        id
+      );
+    },
+
+    async getAllProviders() {
+      return db.prepare("SELECT * FROM providers ORDER BY builtin DESC, name ASC").all() as DbProvider[];
+    },
+
+    async findProviderBySlug(slug) {
+      const row = db.prepare("SELECT * FROM providers WHERE slug = ?").get(slug) as DbProvider | undefined;
+      return row || null;
+    },
+
+    async getProvider(id) {
+      const row = db.prepare("SELECT * FROM providers WHERE id = ?").get(id) as DbProvider | undefined;
+      return row || null;
+    },
+
+    async deleteProvider(id) {
+      db.prepare("DELETE FROM providers WHERE id = ?").run(id);
     },
   };
 }
@@ -634,9 +832,13 @@ function createPostgresDb(): Database {
           description TEXT NOT NULL,
           api_key TEXT UNIQUE NOT NULL,
           api_secret_hash TEXT NOT NULL,
+          api_secret_enc TEXT,
           owner TEXT NOT NULL,
-          created_at TIMESTAMPTZ DEFAULT NOW()
+          created_at TIMESTAMPTZ DEFAULT NOW(),
+          revoked_at TIMESTAMPTZ
         );
+        ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS api_secret_enc TEXT;
+        ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS revoked_at TIMESTAMPTZ;
         CREATE TABLE IF NOT EXISTS webhook_events (
           id SERIAL PRIMARY KEY,
           event TEXT NOT NULL,
@@ -671,7 +873,43 @@ function createPostgresDb(): Database {
           created_at TIMESTAMPTZ DEFAULT NOW(),
           UNIQUE(agent_name, version)
         );
+        CREATE TABLE IF NOT EXISTS secrets (
+          id SERIAL PRIMARY KEY,
+          name TEXT UNIQUE NOT NULL,
+          value TEXT NOT NULL,
+          description TEXT,
+          created_at TIMESTAMPTZ DEFAULT NOW(),
+          updated_at TIMESTAMPTZ DEFAULT NOW()
+        );
+        CREATE TABLE IF NOT EXISTS providers (
+          id SERIAL PRIMARY KEY,
+          slug TEXT UNIQUE NOT NULL,
+          name TEXT NOT NULL,
+          plugin TEXT NOT NULL DEFAULT 'openai',
+          base_url TEXT,
+          api_key_secret TEXT,
+          audio_format TEXT,
+          models TEXT NOT NULL DEFAULT '[]',
+          voices TEXT NOT NULL DEFAULT '[]',
+          builtin INTEGER NOT NULL DEFAULT 0,
+          enabled INTEGER NOT NULL DEFAULT 1,
+          created_at TIMESTAMPTZ DEFAULT NOW(),
+          updated_at TIMESTAMPTZ DEFAULT NOW()
+        );
+        ALTER TABLE providers ADD COLUMN IF NOT EXISTS audio_format TEXT;
       `);
+
+      // Seed the built-in providers once, so a fresh install has a model list.
+      const { rows: countRows } = await pool.query("SELECT COUNT(*)::int AS n FROM providers");
+      if ((countRows[0]?.n || 0) === 0) {
+        for (const p of DEFAULT_PROVIDERS) {
+          await pool.query(
+            `INSERT INTO providers (slug, name, plugin, models, voices, builtin, enabled)
+             VALUES ($1, $2, $3, $4, $5, 1, 1) ON CONFLICT (slug) DO NOTHING`,
+            [p.slug, p.name, p.plugin, JSON.stringify(p.models), JSON.stringify(p.voices || [])]
+          );
+        }
+      }
     },
 
     async findUserByEmail(email) {
@@ -850,10 +1088,10 @@ function createPostgresDb(): Database {
       return rows;
     },
 
-    async createApiKey(description, apiKey, apiSecretHash, owner) {
+    async createApiKey(description, apiKey, apiSecretEnc, owner) {
       const { rows } = await pool.query(
-        "INSERT INTO api_keys (description, api_key, api_secret_hash, owner) VALUES ($1, $2, $3, $4) RETURNING *",
-        [description, apiKey, apiSecretHash, owner]
+        "INSERT INTO api_keys (description, api_key, api_secret_hash, api_secret_enc, owner) VALUES ($1, $2, '', $3, $4) RETURNING *",
+        [description, apiKey, apiSecretEnc, owner]
       );
       return rows[0];
     },
@@ -861,6 +1099,15 @@ function createPostgresDb(): Database {
     async getAllApiKeys() {
       const { rows } = await pool.query("SELECT * FROM api_keys ORDER BY created_at DESC");
       return rows;
+    },
+
+    async findApiKey(apiKey) {
+      const { rows } = await pool.query("SELECT * FROM api_keys WHERE api_key = $1", [apiKey]);
+      return rows[0] || null;
+    },
+
+    async revokeApiKey(id) {
+      await pool.query("UPDATE api_keys SET revoked_at = NOW() WHERE id = $1 AND revoked_at IS NULL", [id]);
     },
 
     async deleteApiKey(id) {
@@ -956,6 +1203,89 @@ function createPostgresDb(): Database {
 
     async deleteAgentVersions(agentName) {
       await pool.query("DELETE FROM agent_versions WHERE agent_name = $1", [agentName]);
+    },
+
+    async upsertSecret(name, value, description) {
+      await pool.query(
+        `INSERT INTO secrets (name, value, description) VALUES ($1, $2, $3)
+         ON CONFLICT (name) DO UPDATE SET
+           value = EXCLUDED.value,
+           description = EXCLUDED.description,
+           updated_at = NOW()`,
+        [name, value, description]
+      );
+    },
+
+    async getAllSecrets() {
+      const { rows } = await pool.query("SELECT * FROM secrets ORDER BY name ASC");
+      return rows;
+    },
+
+    async findSecret(name) {
+      const { rows } = await pool.query("SELECT * FROM secrets WHERE name = $1", [name]);
+      return rows[0] || null;
+    },
+
+    async deleteSecret(name) {
+      await pool.query("DELETE FROM secrets WHERE name = $1", [name]);
+    },
+
+    async createProvider(input) {
+      const { rows } = await pool.query(
+        `INSERT INTO providers (slug, name, plugin, base_url, api_key_secret, audio_format, models, voices, enabled)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
+        [
+          input.slug,
+          input.name,
+          input.plugin,
+          input.baseUrl,
+          input.apiKeySecret,
+          input.audioFormat,
+          input.models,
+          input.voices,
+          input.enabled ? 1 : 0,
+        ]
+      );
+      return rows[0];
+    },
+
+    async updateProvider(id, input) {
+      await pool.query(
+        `UPDATE providers SET slug = $1, name = $2, plugin = $3, base_url = $4, api_key_secret = $5,
+           audio_format = $6, models = $7, voices = $8, enabled = $9, updated_at = NOW()
+         WHERE id = $10`,
+        [
+          input.slug,
+          input.name,
+          input.plugin,
+          input.baseUrl,
+          input.apiKeySecret,
+          input.audioFormat,
+          input.models,
+          input.voices,
+          input.enabled ? 1 : 0,
+          id,
+        ]
+      );
+    },
+
+    async getAllProviders() {
+      const { rows } = await pool.query("SELECT * FROM providers ORDER BY builtin DESC, name ASC");
+      return rows;
+    },
+
+    async findProviderBySlug(slug) {
+      const { rows } = await pool.query("SELECT * FROM providers WHERE slug = $1", [slug]);
+      return rows[0] || null;
+    },
+
+    async getProvider(id) {
+      const { rows } = await pool.query("SELECT * FROM providers WHERE id = $1", [id]);
+      return rows[0] || null;
+    },
+
+    async deleteProvider(id) {
+      await pool.query("DELETE FROM providers WHERE id = $1", [id]);
     },
   };
 }

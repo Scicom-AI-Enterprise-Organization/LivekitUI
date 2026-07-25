@@ -5,6 +5,7 @@ const PUBLIC_PATHS = ["/login", "/register", "/api/auth", "/api/sandbox-apps", "
 const DASHBOARD_PREFIXES = [
   "/api/agents", "/api/rooms", "/api/phone-numbers",
   "/api/sandbox-config", "/api/webhooks", "/api/api-keys", "/api/livekit",
+  "/api/providers", "/api/secrets",
   "/settings", "/agents", "/sessions", "/telephony", "/egresses", "/ingresses",
   "/billing", "/hub",
 ];

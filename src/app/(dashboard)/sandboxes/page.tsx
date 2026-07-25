@@ -3,8 +3,8 @@
 import { useEffect, useState } from "react";
 import { TopBar } from "@/components/livekit/top-bar";
 import Link from "next/link";
+import { useParams } from "next/navigation";
 import {
-  Download,
   Info,
   AudioLines,
   Video,
@@ -482,7 +482,12 @@ function LogViewer({ name, onClose }: { name: string; onClose: () => void }) {
   );
 }
 
-export default function SandboxPage({ autoEditName }: { autoEditName?: string } = {}) {
+export default function SandboxPage() {
+  // /sandboxes/[name] renders this same view with that app's edit dialog open.
+  // A Next.js page cannot take props, so the name is read from the route.
+  const routeParams = useParams<{ name?: string }>();
+  const autoEditName = routeParams?.name ? decodeURIComponent(routeParams.name) : undefined;
+
   const [apps, setApps] = useState<SandboxApp[]>([]);
   const [loading, setLoading] = useState(true);
   const [logsApp, setLogsApp] = useState<string | null>(null);
@@ -573,13 +578,6 @@ export default function SandboxPage({ autoEditName }: { autoEditName?: string } 
                     <p className="text-sm text-muted-foreground leading-relaxed">
                       {t.description}
                     </p>
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="absolute top-3 right-3"
-                    >
-                      <Download className="size-4" />
-                    </Button>
                   </CardContent>
                 </Card>
               </Link>

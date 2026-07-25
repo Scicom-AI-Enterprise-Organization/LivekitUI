@@ -61,6 +61,17 @@ import {
   DialogClose,
 } from "@/components/ui/dialog";
 import { useRouter, useSearchParams } from "next/navigation";
+import { toast } from "sonner";
+import {
+  findModel,
+  listModels,
+  normalizeModelValue,
+  resolveModel,
+  voicesForModel,
+  type ModelOption,
+  type Provider,
+  type ResolvedModel,
+} from "@/lib/providers";
 
 /* ────────────────────────────────────
    Insert Variable Dropdown
@@ -753,10 +764,11 @@ You are interacting with the user via voice, and must apply the following rules 
 # Conversational Flow`,
   welcomeMessage: "Greet the user and offer your assistance.",
   pipelineMode: "stt-llm-tts",
-  ttsModel: "openai-tts",
+  // Model values are "<provider-slug>/<model-id>" refs from Settings > Providers.
+  ttsModel: "openai/gpt-4o-mini-tts",
   ttsVoice: "coral",
-  llmModel: "gpt-5.4-mini",
-  sttModel: "deepgram",
+  llmModel: "openai/gpt-5.4-mini",
+  sttModel: "deepgram/nova-3",
   sttLanguage: "en",
   backgroundAudio: "none",
 };
@@ -841,13 +853,157 @@ function InstructionsTab({
 /* ────────────────────────────────────
    Tab: Models & Voice
    ──────────────────────────────────── */
+
+/** Model dropdown backed by Settings > Providers. */
+function ModelSelect({
+  value,
+  onChange,
+  options,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  options: ModelOption[];
+}) {
+  const orphaned = !!value && !options.some((o) => o.ref === value);
+  return (
+    <Select value={value || undefined} onValueChange={onChange}>
+      <SelectTrigger>
+        <SelectValue placeholder="Select a model" />
+      </SelectTrigger>
+      <SelectContent>
+        {options.map((o) => (
+          <SelectItem key={o.ref} value={o.ref}>
+            {o.label}
+          </SelectItem>
+        ))}
+        {orphaned && <SelectItem value={value}>{value} (no provider)</SelectItem>}
+      </SelectContent>
+    </Select>
+  );
+}
+
+/** Shown when no provider offers models of the given kind. */
+function NoModelsNotice({ kind }: { kind: string }) {
+  return (
+    <div className="rounded-lg border border-dashed border-border px-4 py-3 text-xs text-muted-foreground">
+      No {kind} models available.{" "}
+      <Link href="/settings/providers" className="text-primary hover:underline">
+        Add a provider
+      </Link>{" "}
+      to choose one here.
+    </div>
+  );
+}
+
+/** Voice picker — a dropdown when the provider lists voices, else free text. */
+function VoiceField({
+  modelValue,
+  providers,
+  value,
+  onChange,
+}: {
+  modelValue: string;
+  providers: Provider[];
+  value: string;
+  onChange: (v: string) => void;
+}) {
+  const voices = voicesForModel(providers, modelValue);
+
+  if (voices.length === 0) {
+    return (
+      <input
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder="Voice id"
+        className="h-9 w-full rounded-md border border-border bg-card px-3 text-sm text-foreground outline-none focus:border-primary focus:ring-1 focus:ring-primary/30"
+      />
+    );
+  }
+
+  const orphaned = !!value && !voices.some((v) => v.id === value);
+  return (
+    <Select value={value || undefined} onValueChange={onChange}>
+      <SelectTrigger>
+        <SelectValue placeholder="Select a voice" />
+      </SelectTrigger>
+      <SelectContent>
+        {voices.map((v) => (
+          <SelectItem key={v.id} value={v.id}>
+            {v.label || v.id}
+          </SelectItem>
+        ))}
+        {orphaned && <SelectItem value={value}>{value}</SelectItem>}
+      </SelectContent>
+    </Select>
+  );
+}
+
 function ModelsVoiceTab({
   config,
   onChange,
+  providers,
 }: {
   config: AgentConfig;
   onChange: (c: Partial<AgentConfig>) => void;
+  providers: Provider[];
 }) {
+  const llmOptions = listModels(providers, "llm");
+  const realtimeOptions = listModels(providers, "realtime");
+  const ttsOptions = listModels(providers, "tts");
+  const sttOptions = listModels(providers, "stt");
+
+  // Keep the selection valid when switching pipeline mode: a realtime ref is
+  // not a usable LLM ref (and vice versa), so fall back to the first option.
+  const switchToPipeline = () => {
+    const patch: Partial<AgentConfig> = { pipelineMode: "stt-llm-tts" };
+    if (!llmOptions.some((o) => o.ref === config.llmModel)) {
+      patch.llmModel = llmOptions[0]?.ref ?? "";
+    }
+    const tts = ttsOptions.some((o) => o.ref === config.ttsModel) ? config.ttsModel : ttsOptions[0]?.ref ?? "";
+    patch.ttsModel = tts;
+    if (!sttOptions.some((o) => o.ref === config.sttModel)) {
+      patch.sttModel = sttOptions[0]?.ref ?? "";
+    }
+    const voices = voicesForModel(providers, tts);
+    if (voices.length > 0 && !voices.some((v) => v.id === config.ttsVoice)) {
+      patch.ttsVoice = voices[0].id;
+    }
+    onChange(patch);
+  };
+
+  const switchToRealtime = () => {
+    const patch: Partial<AgentConfig> = { pipelineMode: "realtime" };
+    const model = realtimeOptions.some((o) => o.ref === config.llmModel)
+      ? config.llmModel
+      : realtimeOptions[0]?.ref ?? "";
+    patch.llmModel = model;
+    const voices = voicesForModel(providers, model);
+    if (voices.length > 0 && !voices.some((v) => v.id === config.ttsVoice)) {
+      patch.ttsVoice = voices[0].id;
+    }
+    onChange(patch);
+  };
+
+  // Selecting a TTS/realtime model from another provider invalidates the voice.
+  const handleTtsChange = (ref: string) => {
+    const patch: Partial<AgentConfig> = { ttsModel: ref };
+    const voices = voicesForModel(providers, ref);
+    if (voices.length > 0 && !voices.some((v) => v.id === config.ttsVoice)) {
+      patch.ttsVoice = voices[0].id;
+    }
+    onChange(patch);
+  };
+
+  const handleRealtimeChange = (ref: string) => {
+    const patch: Partial<AgentConfig> = { llmModel: ref };
+    const voices = voicesForModel(providers, ref);
+    if (voices.length > 0 && !voices.some((v) => v.id === config.ttsVoice)) {
+      patch.ttsVoice = voices[0].id;
+    }
+    onChange(patch);
+  };
+
+  const realtimeSecret = findModel(providers, config.llmModel)?.provider.apiKeySecret;
 
   return (
     <div className="space-y-6">
@@ -857,7 +1013,7 @@ function ModelsVoiceTab({
         <p className="text-xs text-muted-foreground">Choose how your agent processes conversations.</p>
         <div className="grid grid-cols-2 gap-2">
           <button
-            onClick={() => onChange({ pipelineMode: "stt-llm-tts", llmModel: "gpt-5.4-mini", ttsVoice: "coral" })}
+            onClick={switchToPipeline}
             className={`rounded-lg border px-4 py-3 text-left text-sm transition-colors ${
               config.pipelineMode === "stt-llm-tts"
                 ? "border-primary bg-primary/5 text-foreground"
@@ -870,7 +1026,7 @@ function ModelsVoiceTab({
             </div>
           </button>
           <button
-            onClick={() => onChange({ pipelineMode: "realtime", llmModel: "gpt-realtime-1.5", ttsVoice: "alloy" })}
+            onClick={switchToRealtime}
             className={`rounded-lg border px-4 py-3 text-left text-sm transition-colors ${
               config.pipelineMode === "realtime"
                 ? "border-primary bg-primary/5 text-foreground"
@@ -894,7 +1050,15 @@ function ModelsVoiceTab({
               <div className="text-xs text-muted-foreground">
                 <p>This model requires you to bring your own API key.</p>
                 <p className="mt-1">
-                  Make sure <code className="rounded bg-muted px-1.5 py-0.5 text-xs text-foreground">OPENAI_API_KEY</code> secret is set in the Advanced tab.
+                  Make sure the{" "}
+                  <code className="rounded bg-muted px-1.5 py-0.5 text-xs text-foreground">
+                    {realtimeSecret || "OPENAI_API_KEY"}
+                  </code>{" "}
+                  secret is set in the Advanced tab or in{" "}
+                  <Link href="/settings/secrets" className="text-primary hover:underline">
+                    Settings &gt; Secrets
+                  </Link>
+                  .
                 </p>
               </div>
             </div>
@@ -907,34 +1071,25 @@ function ModelsVoiceTab({
               The AI model that handles both conversation and voice generation.{" "}
               <a href="https://docs.livekit.io/agents/models/realtime/" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">Learn more</a>
             </p>
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <span className="text-xs text-muted-foreground mb-1 block">Model</span>
-                <Select value={config.llmModel} onValueChange={(v) => onChange({ llmModel: v })}>
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="gpt-realtime-1.5">OpenAI GPT Realtime 1.5</SelectItem>
-                    <SelectItem value="gpt-realtime-mini">OpenAI GPT Realtime Mini</SelectItem>
-                  </SelectContent>
-                </Select>
+            {realtimeOptions.length === 0 ? (
+              <NoModelsNotice kind="realtime" />
+            ) : (
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <span className="text-xs text-muted-foreground mb-1 block">Model</span>
+                  <ModelSelect value={config.llmModel} onChange={handleRealtimeChange} options={realtimeOptions} />
+                </div>
+                <div>
+                  <span className="text-xs text-muted-foreground mb-1 block">Voice</span>
+                  <VoiceField
+                    modelValue={config.llmModel}
+                    providers={providers}
+                    value={config.ttsVoice}
+                    onChange={(v) => onChange({ ttsVoice: v })}
+                  />
+                </div>
               </div>
-              <div>
-                <span className="text-xs text-muted-foreground mb-1 block">Voice</span>
-                <Select value={config.ttsVoice} onValueChange={(v) => onChange({ ttsVoice: v })}>
-                  <SelectTrigger>
-                    <SelectValue placeholder="Select a voice" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="alloy">Alloy</SelectItem>
-                    <SelectItem value="echo">Echo</SelectItem>
-                    <SelectItem value="shimmer">Shimmer</SelectItem>
-                    <SelectItem value="savannah">Savannah</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-            </div>
+            )}
           </div>
         </>
       )}
@@ -948,46 +1103,25 @@ function ModelsVoiceTab({
               Convert your agent&apos;s text response into speech using the selected voice.{" "}
               <a href="https://docs.livekit.io/agents/models/tts/" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">Learn more</a>
             </p>
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <span className="text-xs text-muted-foreground mb-1 block">Model</span>
-                <Select value={config.ttsModel} onValueChange={(v) => onChange({ ttsModel: v })}>
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="openai-tts">OpenAI gpt-4o-mini-tts</SelectItem>
-                    <SelectItem value="openai-tts1">OpenAI tts-1</SelectItem>
-                    <SelectItem value="openai-tts1-hd">OpenAI tts-1-hd</SelectItem>
-                    <SelectItem value="cartesia">Cartesia Sonic S</SelectItem>
-                    <SelectItem value="elevenlabs">ElevenLabs</SelectItem>
-                  </SelectContent>
-                </Select>
+            {ttsOptions.length === 0 ? (
+              <NoModelsNotice kind="TTS" />
+            ) : (
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <span className="text-xs text-muted-foreground mb-1 block">Model</span>
+                  <ModelSelect value={config.ttsModel} onChange={handleTtsChange} options={ttsOptions} />
+                </div>
+                <div>
+                  <span className="text-xs text-muted-foreground mb-1 block">Voice</span>
+                  <VoiceField
+                    modelValue={config.ttsModel}
+                    providers={providers}
+                    value={config.ttsVoice}
+                    onChange={(v) => onChange({ ttsVoice: v })}
+                  />
+                </div>
               </div>
-              <div>
-                <span className="text-xs text-muted-foreground mb-1 block">Voice</span>
-                <Select value={config.ttsVoice} onValueChange={(v) => onChange({ ttsVoice: v })}>
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="coral">Coral</SelectItem>
-                    <SelectItem value="alloy">Alloy</SelectItem>
-                    <SelectItem value="ash">Ash</SelectItem>
-                    <SelectItem value="ballad">Ballad</SelectItem>
-                    <SelectItem value="echo">Echo</SelectItem>
-                    <SelectItem value="fable">Fable</SelectItem>
-                    <SelectItem value="nova">Nova</SelectItem>
-                    <SelectItem value="onyx">Onyx</SelectItem>
-                    <SelectItem value="sage">Sage</SelectItem>
-                    <SelectItem value="shimmer">Shimmer</SelectItem>
-                    <SelectItem value="verse">Verse</SelectItem>
-                    <SelectItem value="marin">Marin</SelectItem>
-                    <SelectItem value="cedar">Cedar</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-            </div>
+            )}
           </div>
 
           {/* Large Language model (LLM) */}
@@ -997,44 +1131,33 @@ function ModelsVoiceTab({
               Your agent&apos;s brain responsible for generating responses and using tools.{" "}
               <a href="https://docs.livekit.io/agents/start/builder/#models" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">Learn more</a>
             </p>
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <span className="text-xs text-muted-foreground mb-1 block">Model</span>
-                <Select value={config.llmModel} onValueChange={(v) => onChange({ llmModel: v })}>
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="gpt-5.4">OpenAI GPT-5.4</SelectItem>
-                    <SelectItem value="gpt-5.4-mini">OpenAI GPT-5.4 Mini</SelectItem>
-                    <SelectItem value="gpt-5.4-nano">OpenAI GPT-5.4 Nano</SelectItem>
-                    <SelectItem value="gpt-5.3-chat">OpenAI GPT-5.3 Chat</SelectItem>
-                    <SelectItem value="gpt-5.3-codex">OpenAI GPT-5.3 Codex</SelectItem>
-                    <SelectItem value="claude-opus-4-6">Claude Opus 4.6</SelectItem>
-                    <SelectItem value="claude-sonnet-4-6">Claude Sonnet 4.6</SelectItem>
-                    <SelectItem value="claude-haiku-4-5">Claude Haiku 4.5</SelectItem>
-                    <SelectItem value="claude-opus-4-5">Claude Opus 4.5</SelectItem>
-                    <SelectItem value="claude-sonnet-4-5">Claude Sonnet 4.5</SelectItem>
-                    <SelectItem value="claude-opus-4-1">Claude Opus 4.1</SelectItem>
-                    <SelectItem value="claude-sonnet-4">Claude Sonnet 4</SelectItem>
-                    <SelectItem value="claude-opus-4">Claude Opus 4</SelectItem>
-                  </SelectContent>
-                </Select>
+            {llmOptions.length === 0 ? (
+              <NoModelsNotice kind="LLM" />
+            ) : (
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <span className="text-xs text-muted-foreground mb-1 block">Model</span>
+                  <ModelSelect
+                    value={config.llmModel}
+                    onChange={(v) => onChange({ llmModel: v })}
+                    options={llmOptions}
+                  />
+                </div>
+                <div>
+                  <span className="text-xs text-muted-foreground mb-1 block">Reasoning effort</span>
+                  <Select defaultValue="low">
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="low">Low</SelectItem>
+                      <SelectItem value="medium">Medium</SelectItem>
+                      <SelectItem value="high">High</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
               </div>
-              <div>
-                <span className="text-xs text-muted-foreground mb-1 block">Reasoning effort</span>
-                <Select defaultValue="low">
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="low">Low</SelectItem>
-                    <SelectItem value="medium">Medium</SelectItem>
-                    <SelectItem value="high">High</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-            </div>
+            )}
           </div>
         </>
       )}
@@ -1049,15 +1172,15 @@ function ModelsVoiceTab({
         <div className="grid grid-cols-2 gap-3">
           <div>
             <span className="text-xs text-muted-foreground mb-1 block">Model</span>
-            <Select value={config.sttModel} onValueChange={(v) => onChange({ sttModel: v })}>
-              <SelectTrigger>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="deepgram">Deepgram Nova 3 (Multilingual)</SelectItem>
-                <SelectItem value="whisper">Whisper</SelectItem>
-              </SelectContent>
-            </Select>
+            {sttOptions.length === 0 ? (
+              <NoModelsNotice kind="STT" />
+            ) : (
+              <ModelSelect
+                value={config.sttModel}
+                onChange={(v) => onChange({ sttModel: v })}
+                options={sttOptions}
+              />
+            )}
           </div>
           <div>
             <span className="text-xs text-muted-foreground mb-1 block">Language</span>
@@ -1112,6 +1235,7 @@ function ActionsTab({
   setEndCall,
   callSummary,
   setCallSummary,
+  providers,
 }: {
   httpTools: HttpTool[];
   setHttpTools: React.Dispatch<React.SetStateAction<HttpTool[]>>;
@@ -1123,7 +1247,9 @@ function ActionsTab({
   setEndCall: React.Dispatch<React.SetStateAction<EndCallConfig>>;
   callSummary: CallSummaryConfig;
   setCallSummary: React.Dispatch<React.SetStateAction<CallSummaryConfig>>;
+  providers: Provider[];
 }) {
+  const summaryLlmOptions = listModels(providers, "llm");
   const [httpToolOpen, setHttpToolOpen] = useState(false);
   const [clientToolOpen, setClientToolOpen] = useState(false);
   const [mcpServerOpen, setMcpServerOpen] = useState(false);
@@ -1442,29 +1568,15 @@ function ActionsTab({
               <p className="text-xs text-muted-foreground">
                 The language model used to generate the end-of-call summary.
               </p>
-              <Select
-                value={callSummary.llmModel}
-                onValueChange={(v) => setCallSummary((prev) => ({ ...prev, llmModel: v }))}
-              >
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="gpt-5.4">OpenAI GPT-5.4</SelectItem>
-                  <SelectItem value="gpt-5.4-mini">OpenAI GPT-5.4 Mini</SelectItem>
-                  <SelectItem value="gpt-5.4-nano">OpenAI GPT-5.4 Nano</SelectItem>
-                  <SelectItem value="gpt-5.3-chat">OpenAI GPT-5.3 Chat</SelectItem>
-                  <SelectItem value="gpt-5.3-codex">OpenAI GPT-5.3 Codex</SelectItem>
-                  <SelectItem value="claude-opus-4-6">Claude Opus 4.6</SelectItem>
-                  <SelectItem value="claude-sonnet-4-6">Claude Sonnet 4.6</SelectItem>
-                  <SelectItem value="claude-haiku-4-5">Claude Haiku 4.5</SelectItem>
-                  <SelectItem value="claude-opus-4-5">Claude Opus 4.5</SelectItem>
-                  <SelectItem value="claude-sonnet-4-5">Claude Sonnet 4.5</SelectItem>
-                  <SelectItem value="claude-opus-4-1">Claude Opus 4.1</SelectItem>
-                  <SelectItem value="claude-sonnet-4">Claude Sonnet 4</SelectItem>
-                  <SelectItem value="claude-opus-4">Claude Opus 4</SelectItem>
-                </SelectContent>
-              </Select>
+              {summaryLlmOptions.length === 0 ? (
+                <NoModelsNotice kind="LLM" />
+              ) : (
+                <ModelSelect
+                  value={callSummary.llmModel}
+                  onChange={(v) => setCallSummary((prev) => ({ ...prev, llmModel: v }))}
+                  options={summaryLlmOptions}
+                />
+              )}
             </div>
 
             {/* Reasoning effort */}
@@ -1844,9 +1956,10 @@ function AgentSession({ onTimeout }: { onTimeout: () => void }) {
 
       {timedOut && state !== "listening" && state !== "speaking" && (
         <div className="mt-4 max-w-xs text-center">
-          <p className="text-yellow-400 text-xs font-medium mb-1">No agent detected</p>
+          <p className="text-yellow-400 text-xs font-medium mb-1">Agent did not join</p>
           <p className="text-white/50 text-xs">
-            Deploy a Python agent connected to this LiveKit server to start a live session.
+            It was dispatched but never connected. Check <span className="text-white/70">View logs</span> — a
+            missing plugin or a rejected provider API key usually shows up there.
           </p>
         </div>
       )}
@@ -1859,11 +1972,13 @@ function AgentSession({ onTimeout }: { onTimeout: () => void }) {
   );
 }
 
-function PreviewPanel({ config }: { config: AgentConfig }) {
+function PreviewPanel({ config, running }: { config: AgentConfig; running: boolean | null }) {
   const [token, setToken] = useState<string | null>(null);
   const [connecting, setConnecting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // The preview dispatches the deployed agent into a fresh room, so it exercises
+  // the generated code with its real providers and secrets.
   const startCall = useCallback(async () => {
     setConnecting(true);
     setError(null);
@@ -1871,24 +1986,16 @@ function PreviewPanel({ config }: { config: AgentConfig }) {
       const res = await fetch("/api/livekit/token", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          agentName: config.name,
-          instructions: config.instructions,
-          welcomeMessage: config.welcomeMessage,
-          sttModel: sttModelMap[config.sttModel] || config.sttModel,
-          llmModel: llmModelMap[config.llmModel] || config.llmModel,
-          ttsModel: ttsModelMap[config.ttsModel] || config.ttsModel,
-          sttLanguage: config.sttLanguage,
-        }),
+        body: JSON.stringify({ agentName: config.name }),
       });
       const data = await res.json();
       if (data.token) {
         setToken(data.token);
       } else {
-        setError(data.error || "Failed to get token");
+        setError(data.error || "Failed to start the session");
       }
     } catch {
-      setError("Could not connect to token server");
+      setError("Could not reach the dashboard API");
     } finally {
       setConnecting(false);
     }
@@ -1926,13 +2033,19 @@ function PreviewPanel({ config }: { config: AgentConfig }) {
       <Button
         size="lg"
         onClick={startCall}
-        disabled={connecting}
+        disabled={connecting || running === false}
         className="mt-6 w-56 rounded-full font-mono text-xs font-bold tracking-wider uppercase"
       >
         {connecting ? "Connecting..." : "Start call"}
       </Button>
+      {running === false && !error && (
+        <p className="mt-3 max-w-xs text-center text-[#8b949e] text-xs">
+          This agent is offline. Deploy it to start a live session — the preview talks to the
+          running agent, so it uses your configured providers.
+        </p>
+      )}
       {error && (
-        <p className="mt-3 text-red-400 text-xs">{error}</p>
+        <p className="mt-3 max-w-xs text-center text-red-400 text-xs">{error}</p>
       )}
       <p className="absolute bottom-5 text-[#8b949e] text-xs">
         {config.name} &middot; LiveKit Agents
@@ -1944,17 +2057,21 @@ function PreviewPanel({ config }: { config: AgentConfig }) {
 /* ────────────────────────────────────
    Code Panel (Python agent source)
    ──────────────────────────────────── */
-/* Model value → code string mappings */
-const sttModelMap: Record<string, string> = {
+/* Legacy model keys → provider refs.
+   Configs saved before Settings > Providers existed stored bare keys like
+   "gpt-5.4-mini". These maps migrate them to "<provider-slug>/<model-id>". */
+const legacySttModelMap: Record<string, string> = {
   deepgram: "deepgram/nova-3",
   whisper: "openai/whisper-1",
 };
-const llmModelMap: Record<string, string> = {
+const legacyLlmModelMap: Record<string, string> = {
   "gpt-5.4": "openai/gpt-5.4",
   "gpt-5.4-mini": "openai/gpt-5.4-mini",
   "gpt-5.4-nano": "openai/gpt-5.4-nano",
   "gpt-5.3-chat": "openai/gpt-5.3-chat-latest",
   "gpt-5.3-codex": "openai/gpt-5.3-codex",
+  "gpt-realtime-1.5": "openai/gpt-realtime-1.5",
+  "gpt-realtime-mini": "openai/gpt-realtime-mini",
   "claude-opus-4-6": "anthropic/claude-opus-4-6",
   "claude-sonnet-4-6": "anthropic/claude-sonnet-4-6",
   "claude-haiku-4-5": "anthropic/claude-haiku-4-5",
@@ -1964,7 +2081,7 @@ const llmModelMap: Record<string, string> = {
   "claude-sonnet-4": "anthropic/claude-sonnet-4-0",
   "claude-opus-4": "anthropic/claude-opus-4-0",
 };
-const ttsModelMap: Record<string, string> = {
+const legacyTtsModelMap: Record<string, string> = {
   "openai-tts": "openai/gpt-4o-mini-tts",
   "openai-tts1": "openai/tts-1",
   "openai-tts1-hd": "openai/tts-1-hd",
@@ -1978,33 +2095,40 @@ const languageMap: Record<string, string> = {
   multi: "multi",
 };
 
+/** Renders a Python call, one kwarg per line once there is more than one. */
+function pyCall(expr: string, kwargs: string[], indent: string): string {
+  if (kwargs.length <= 1) return `${expr}(${kwargs.join("")})`;
+  const body = kwargs.map((k) => `${indent}    ${k},`).join("\n");
+  return `${expr}(\n${body}\n${indent})`;
+}
+
 function generateAgentCode(
   config: AgentConfig,
   httpTools: HttpTool[] = [],
   clientTools: ClientTool[] = [],
   mcpServers: McpServer[] = [],
   endCall: EndCallConfig = { enabled: false, conditions: "", instructions: "", deleteRoom: false },
-  callSummary: CallSummaryConfig = { enabled: false, llmModel: "gpt-5.3-chat", reasoningEffort: "low", instructions: "", endpointUrl: "", headers: [] },
+  callSummary: CallSummaryConfig = { enabled: false, llmModel: "openai/gpt-5.3-chat-latest", reasoningEffort: "low", instructions: "", endpointUrl: "", headers: [] },
+  providers: Provider[] = [],
 ): string {
   const agentSlug = config.name.replace(/\s+/g, "-");
-  const sttModel = sttModelMap[config.sttModel] || config.sttModel;
-  const llmModel = llmModelMap[config.llmModel] || config.llmModel;
-  const ttsModel = ttsModelMap[config.ttsModel] || config.ttsModel;
   const lang = languageMap[config.sttLanguage] || config.sttLanguage;
 
-  // Parse "provider/model" into {plugin, model} so we can use direct plugins
-  // (e.g. openai.STT) instead of inference.* which requires LiveKit Cloud.
-  const stripModel = (id: string): { plugin: string; model: string } => {
-    const idx = id.indexOf("/");
-    if (idx === -1) return { plugin: "openai", model: id };
-    const provider = id.slice(0, idx);
-    const model = id.slice(idx + 1);
-    const known = ["openai", "anthropic", "deepgram", "cartesia", "elevenlabs", "google", "groq"];
-    return { plugin: known.includes(provider) ? provider : "openai", model };
+  // Resolve each model through the provider list so custom OpenAI-compatible
+  // endpoints emit their own base_url / api_key. Direct plugins are used (e.g.
+  // openai.STT) instead of inference.*, which would require LiveKit Cloud.
+  const sttInfo = resolveModel(config.sttModel, providers, legacySttModelMap);
+  const llmInfo = resolveModel(config.llmModel, providers, legacyLlmModelMap);
+  const ttsInfo = resolveModel(config.ttsModel, providers, legacyTtsModelMap);
+  const summaryInfo = resolveModel(callSummary.llmModel, providers, legacyLlmModelMap);
+
+  // Endpoint kwargs shared by every plugin constructor.
+  const endpointKwargs = (info: ResolvedModel): string[] => {
+    const parts: string[] = [];
+    if (info.baseUrl) parts.push(`base_url="${info.baseUrl}"`);
+    if (info.apiKeySecret) parts.push(`api_key=os.getenv("${info.apiKeySecret}")`);
+    return parts;
   };
-  const sttInfo = stripModel(sttModel);
-  const llmInfo = stripModel(llmModel);
-  const ttsInfo = stripModel(ttsModel);
 
   // Escape instructions for Python triple-quoted string
   const escapedInstructions = config.instructions
@@ -2020,6 +2144,13 @@ function generateAgentCode(
   const hasAnyTools = hasHttpTools || hasClientTools;
   const hasAnyOptional = httpTools.some((t) => t.params.some((p) => !p.required))
     || clientTools.some((t) => t.params.some((p) => !p.required));
+
+  // Every model the generated agent instantiates, for imports and plugin list.
+  const usedModels: ResolvedModel[] = [llmInfo];
+  if (!isRealtime) usedModels.push(sttInfo, ttsInfo);
+  if (hasCallSummary) usedModels.push(summaryInfo);
+  // `os` is only needed when a provider pulls its API key from a secret.
+  const needsOs = usedModels.some((info) => !!info.apiKeySecret);
 
   const typeMap: Record<string, string> = {
     string: "str",
@@ -2163,20 +2294,39 @@ ${payloadCode}
             raise ToolError(f"error: {e!s}") from e`;
   });
 
+  const llmCall = pyCall(
+    `${llmInfo.plugin}.LLM`,
+    [`model="${llmInfo.model}"`, ...endpointKwargs(llmInfo)],
+    "        "
+  );
+
   let sessionBlock: string;
   if (isRealtime) {
     sessionBlock = `    session = AgentSession(
-        llm=${llmInfo.plugin}.LLM(model="${llmInfo.model}"),
+        llm=${llmCall},
         vad=ctx.proc.userdata["vad"],
     )`;
   } else {
+    const sttCall = pyCall(
+      `${sttInfo.plugin}.STT`,
+      [`model="${sttInfo.model}"`, ...endpointKwargs(sttInfo)],
+      "        "
+    );
+    const ttsCall = pyCall(
+      `${ttsInfo.plugin}.TTS`,
+      [
+        `model="${ttsInfo.model}"`,
+        `voice="${config.ttsVoice}"`,
+        // Self-hosted TTS servers often reject the plugin's mp3 default.
+        ...(ttsInfo.audioFormat ? [`response_format="${ttsInfo.audioFormat}"`] : []),
+        ...endpointKwargs(ttsInfo),
+      ],
+      "        "
+    );
     sessionBlock = `    session = AgentSession(
-        stt=${sttInfo.plugin}.STT(model="${sttInfo.model}"),
-        llm=${llmInfo.plugin}.LLM(model="${llmInfo.model}"),
-        tts=${ttsInfo.plugin}.TTS(
-            model="${ttsInfo.model}",
-            voice="${config.ttsVoice}",
-        ),
+        stt=${sttCall},
+        llm=${llmCall},
+        tts=${ttsCall},
         turn_handling=TurnHandlingOptions(turn_detection=MultilingualModel()),
         vad=ctx.proc.userdata["vad"],
         preemptive_generation=True,
@@ -2185,6 +2335,7 @@ ${payloadCode}
 
   // Build imports
   const topImportLines: string[] = [];
+  if (needsOs) topImportLines.push("import os");
   if (hasAnyOptional) topImportLines.push("from typing import Optional");
   if (hasHttpTools || hasCallSummary) {
     topImportLines.push("import aiohttp");
@@ -2275,8 +2426,6 @@ ${payloadCode}
   let entrypointDecorator = `@server.rtc_session(agent_name="${agentSlug}")`;
   if (hasCallSummary) {
     const escapeTriple = (s: string) => s.replace(/\\/g, "\\\\").replace(/"""/g, '\\"\\"\\"');
-    const summaryLlmModel = llmModelMap[callSummary.llmModel] || callSummary.llmModel;
-    const summaryInfo = stripModel(summaryLlmModel);
     const summaryInstructions = escapeTriple(callSummary.instructions || "");
     const reasoning = callSummary.reasoningEffort;
     const endpointUrl = callSummary.endpointUrl;
@@ -2339,7 +2488,7 @@ async def _on_session_end_func(ctx: JobContext) -> None:
         return
 
     report = ctx.make_session_report()
-    summarizer = ${summaryInfo.plugin}.LLM(model="${summaryInfo.model}")
+    summarizer = ${pyCall(`${summaryInfo.plugin}.LLM`, [`model="${summaryInfo.model}"`, ...endpointKwargs(summaryInfo)], "    ")}
     summary = await _summarize_session(summarizer, report.chat_history)
     if not summary:
         logger.info("no summary generated for end_of_call processing")
@@ -2379,15 +2528,7 @@ async def _on_session_end_func(ctx: JobContext) -> None:
   // Collect plugins used (direct plugins, not inference) so self-hosted users
   // don't need LiveKit Cloud credentials.
   const pluginsSet = new Set<string>(["noise_cancellation", "silero"]);
-  if (!isRealtime) {
-    pluginsSet.add(sttInfo.plugin);
-    pluginsSet.add(ttsInfo.plugin);
-  }
-  pluginsSet.add(llmInfo.plugin);
-  if (hasCallSummary) {
-    const summaryInfo = stripModel(llmModelMap[callSummary.llmModel] || callSummary.llmModel);
-    pluginsSet.add(summaryInfo.plugin);
-  }
+  for (const info of usedModels) pluginsSet.add(info.plugin);
   const pluginsImportStr = Array.from(pluginsSet).sort().map((p) => `    ${p},\n`).join("");
 
   return `import logging
@@ -2516,6 +2657,7 @@ function CodePanel({
   mcpServers,
   endCall,
   callSummary,
+  providers,
 }: {
   config: AgentConfig;
   httpTools: HttpTool[];
@@ -2523,8 +2665,9 @@ function CodePanel({
   mcpServers: McpServer[];
   endCall: EndCallConfig;
   callSummary: CallSummaryConfig;
+  providers: Provider[];
 }) {
-  const code = generateAgentCode(config, httpTools, clientTools, mcpServers, endCall, callSummary);
+  const code = generateAgentCode(config, httpTools, clientTools, mcpServers, endCall, callSummary, providers);
   return (
     <div className="flex h-full w-full flex-col overflow-hidden">
       <div className="flex-1 overflow-auto bg-[#0d1117] p-5">
@@ -2633,10 +2776,18 @@ function AgentBuilderContent() {
   const [editingName, setEditingName] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [deploying, setDeploying] = useState(false);
-  const [deployResult, setDeployResult] = useState<{ success: boolean; message: string; pid?: number } | null>(null);
   const [running, setRunning] = useState<boolean | null>(null);
   const [logsOpen, setLogsOpen] = useState(false);
   const [restarting, setRestarting] = useState(false);
+  const [providers, setProviders] = useState<Provider[]>([]);
+
+  // Models come from Settings > Providers — nothing is hardcoded here.
+  useEffect(() => {
+    fetch("/api/providers")
+      .then((r) => r.json())
+      .then((d) => setProviders((d.providers ?? []).filter((p: Provider) => p.enabled)))
+      .catch(() => {});
+  }, []);
 
   const handleRestart = async () => {
     setRestarting(true);
@@ -2646,9 +2797,11 @@ function AgentBuilderContent() {
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        setDeployResult({ success: false, message: data.error || "Restart failed" });
+        toast.error("Restart failed", { description: data.error || "Unknown error" });
       } else {
-        setDeployResult({ success: true, message: `Agent "${config.name}" restarted.`, pid: data.pid });
+        toast.success(`Agent "${config.name}" restarted`, {
+          description: data.pid ? `PID ${data.pid}` : undefined,
+        });
       }
     } finally {
       setRestarting(false);
@@ -2708,7 +2861,7 @@ function AgentBuilderContent() {
             setCallSummary(
               data.agent.config.callSummary ?? {
                 enabled: false,
-                llmModel: "gpt-5.3-chat",
+                llmModel: "openai/gpt-5.3-chat-latest",
                 reasoningEffort: "low",
                 instructions: "",
                 endpointUrl: "",
@@ -2754,7 +2907,7 @@ function AgentBuilderContent() {
   });
   const [callSummary, setCallSummary] = useState<CallSummaryConfig>({
     enabled: false,
-    llmModel: "gpt-5.3-chat",
+    llmModel: "openai/gpt-5.3-chat-latest",
     reasoningEffort: "low",
     instructions: "",
     endpointUrl: "",
@@ -2765,6 +2918,42 @@ function AgentBuilderContent() {
 
   const updateConfig = (partial: Partial<AgentConfig>) =>
     setConfig((prev) => ({ ...prev, ...partial }));
+
+  // Migrate model values saved before providers existed (e.g. "gpt-5.4-mini")
+  // to "<provider-slug>/<model-id>" refs. Returning `prev` unchanged keeps this
+  // from touching the config — and so from triggering a pointless auto-save.
+  useEffect(() => {
+    if (providers.length === 0) return;
+    setConfig((prev) => {
+      const next: AgentConfig = {
+        ...prev,
+        llmModel: normalizeModelValue(
+          prev.llmModel,
+          providers,
+          prev.pipelineMode === "realtime" ? "realtime" : "llm",
+          legacyLlmModelMap
+        ),
+        ttsModel: normalizeModelValue(prev.ttsModel, providers, "tts", legacyTtsModelMap),
+        sttModel: normalizeModelValue(prev.sttModel, providers, "stt", legacySttModelMap),
+      };
+      const changed =
+        next.llmModel !== prev.llmModel ||
+        next.ttsModel !== prev.ttsModel ||
+        next.sttModel !== prev.sttModel;
+      return changed ? next : prev;
+    });
+    setCallSummary((prev) => {
+      const llmModel = normalizeModelValue(prev.llmModel, providers, "llm", legacyLlmModelMap);
+      return llmModel === prev.llmModel ? prev : { ...prev, llmModel };
+    });
+  }, [
+    providers,
+    config.llmModel,
+    config.ttsModel,
+    config.sttModel,
+    config.pipelineMode,
+    callSummary.llmModel,
+  ]);
 
   // Save the current config to the DB
   const saveAgent = useCallback(async () => {
@@ -2913,7 +3102,8 @@ function AgentBuilderContent() {
                   clientTools,
                   mcpServers,
                   endCall,
-                  callSummary
+                  callSummary,
+                  providers
                 );
                 const res = await fetch(`/api/agents/${encodeURIComponent(config.name)}/deploy`, {
                   method: "POST",
@@ -2922,9 +3112,18 @@ function AgentBuilderContent() {
                 });
                 const data = await res.json();
                 if (!res.ok) {
-                  setDeployResult({ success: false, message: data.error || "Unknown error" });
+                  // Deploy errors are usually long (setup hints, tracebacks), so
+                  // keep them on screen until dismissed.
+                  toast.error("Deployment failed", {
+                    description: data.error || "Unknown error",
+                    duration: Infinity,
+                    closeButton: true,
+                  });
                 } else {
-                  setDeployResult({ success: true, message: `Agent "${config.name}" deployed successfully.`, pid: data.pid });
+                  toast.success(`Agent "${config.name}" deployed`, {
+                    description: data.pid ? `Running as PID ${data.pid}` : undefined,
+                    action: { label: "Logs", onClick: () => setLogsOpen(true) },
+                  });
                 }
               } finally {
                 setDeploying(false);
@@ -3024,8 +3223,8 @@ function AgentBuilderContent() {
         <div className="flex-1 overflow-y-auto border-r">
           <div className="p-6 max-w-2xl">
             {activeTab === "Instructions" && <InstructionsTab config={config} onChange={updateConfig} />}
-            {activeTab === "Models & Voice" && <ModelsVoiceTab config={config} onChange={updateConfig} />}
-            {activeTab === "Actions" && <ActionsTab httpTools={httpTools} setHttpTools={setHttpTools} clientTools={clientTools} setClientTools={setClientTools} mcpServers={mcpServers} setMcpServers={setMcpServers} endCall={endCall} setEndCall={setEndCall} callSummary={callSummary} setCallSummary={setCallSummary} />}
+            {activeTab === "Models & Voice" && <ModelsVoiceTab config={config} onChange={updateConfig} providers={providers} />}
+            {activeTab === "Actions" && <ActionsTab httpTools={httpTools} setHttpTools={setHttpTools} clientTools={clientTools} setClientTools={setClientTools} mcpServers={mcpServers} setMcpServers={setMcpServers} endCall={endCall} setEndCall={setEndCall} callSummary={callSummary} setCallSummary={setCallSummary} providers={providers} />}
             {activeTab === "Advanced" && <AdvancedTab variables={variables} setVariables={setVariables} secrets={secrets} setSecrets={setSecrets} agentName={config.name} />}
           </div>
         </div>
@@ -3033,35 +3232,15 @@ function AgentBuilderContent() {
         {/* Right — Preview / Code panel */}
         <div className="w-1/2 shrink-0 flex flex-col">
           {viewMode === "preview" ? (
-            <PreviewPanel config={config} />
+            <PreviewPanel config={config} running={running} />
           ) : (
-            <CodePanel config={config} httpTools={httpTools} clientTools={clientTools} mcpServers={mcpServers} endCall={endCall} callSummary={callSummary} />
+            <CodePanel config={config} httpTools={httpTools} clientTools={clientTools} mcpServers={mcpServers} endCall={endCall} callSummary={callSummary} providers={providers} />
           )}
         </div>
       </div>
 
       {/* Logs viewer */}
       {logsOpen && <AgentLogViewer name={config.name} onClose={() => setLogsOpen(false)} />}
-
-      {/* Deploy result dialog */}
-      <Dialog open={!!deployResult} onOpenChange={(open) => !open && setDeployResult(null)}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle className={deployResult?.success ? "text-emerald-500" : "text-destructive"}>
-              {deployResult?.success ? "Deployment successful" : "Deployment failed"}
-            </DialogTitle>
-            <DialogDescription>
-              {deployResult?.message}
-              {deployResult?.success && deployResult.pid && (
-                <span className="block mt-2 text-xs font-mono">PID: {deployResult.pid}</span>
-              )}
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button onClick={() => setDeployResult(null)}>Close</Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
 
       {/* Delete agent confirmation dialog */}
       <Dialog open={deleteOpen} onOpenChange={setDeleteOpen}>

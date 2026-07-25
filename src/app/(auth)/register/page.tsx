@@ -127,7 +127,7 @@ function RegisterForm() {
   return (
     <div className="flex min-h-screen">
       {/* Left — Branding Panel */}
-      <div className="hidden w-2/5 flex-col justify-between bg-foreground p-10 lg:flex">
+      <div className="auth-brand-panel hidden w-2/5 flex-col justify-between bg-foreground p-10 lg:flex">
         <div>
           <span className="text-xl font-bold tracking-tight text-background">
             Live<span className="text-primary">Kit</span>

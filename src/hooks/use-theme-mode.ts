@@ -1,38 +1,23 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useTheme } from "next-themes";
 
 /**
  * Hook to manage dark/light mode state.
- * Handles syncing with document class and persists preference.
+ *
+ * Thin wrapper over next-themes (see ThemeProvider in the root layout), which
+ * owns the `dark` class on <html> and persists the preference. Kept as a
+ * separate hook so existing callers keep the same `isDark` / `toggleTheme` API.
  */
 export function useThemeMode() {
-  const [isDark, setIsDark] = useState(false);
+  const { resolvedTheme, setTheme } = useTheme();
 
-  useEffect(() => {
-    // Check for saved preference or system preference on mount
-    const savedTheme = localStorage.getItem("theme");
-    const systemPrefersDark = window.matchMedia(
-      "(prefers-color-scheme: dark)"
-    ).matches;
+  // resolvedTheme collapses "system" to the actual light/dark value. It is
+  // undefined until mounted, which reads as light — matching SSR output.
+  const isDark = resolvedTheme === "dark";
 
-    if (savedTheme === "dark" || (!savedTheme && systemPrefersDark)) {
-      setIsDark(true);
-      document.documentElement.classList.add("dark");
-    }
-  }, []);
-
-  useEffect(() => {
-    if (isDark) {
-      document.documentElement.classList.add("dark");
-      localStorage.setItem("theme", "dark");
-    } else {
-      document.documentElement.classList.remove("dark");
-      localStorage.setItem("theme", "light");
-    }
-  }, [isDark]);
-
-  const toggleTheme = () => setIsDark(!isDark);
+  const setIsDark = (dark: boolean) => setTheme(dark ? "dark" : "light");
+  const toggleTheme = () => setTheme(isDark ? "light" : "dark");
 
   return { isDark, setIsDark, toggleTheme };
 }

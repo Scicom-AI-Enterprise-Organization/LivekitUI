@@ -1,7 +1,11 @@
 # Single image — LivekitUI needs to spawn Python agents and
 # sandbox dev servers at runtime, so everything lives together.
 
-FROM node:20-bookworm-slim
+# Node 24, not 20: the key gateway (gateway/server.mjs) imports the dashboard's
+# src/lib/api-keys.ts directly so the crypto has a single source of truth. That
+# needs native TypeScript type stripping, which landed unflagged in Node 23.6 —
+# on Node 20 the import fails with `Unknown file extension ".ts"`.
+FROM node:24-bookworm-slim
 
 # ── System deps ──
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -49,7 +53,8 @@ ENV DB_TYPE=postgres
 ENV LIVEKIT_URL=http://localhost:7880
 ENV LIVEKIT_PROMETHEUS_URL=http://localhost:6789/metrics
 ENV NEXT_PUBLIC_LIVEKIT_URL=ws://localhost:7880
+ENV GATEWAY_PORT=7885
 
-EXPOSE 3000
+EXPOSE 3000 7885
 
 CMD ["node", ".next/standalone/server.js"]
