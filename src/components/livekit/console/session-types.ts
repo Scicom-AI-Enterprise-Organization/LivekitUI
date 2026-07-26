@@ -27,6 +27,12 @@ export interface TranscriptLine {
   identity: string;
   text: string;
   isAgent: boolean;
+  /**
+   * How the line reached the agent. Typed chat never passes through STT, so it
+   * produces no transcription — it has to be collected from the chat topic or
+   * it goes unrecorded, which reads as the user having said nothing at all.
+   */
+  via?: "voice" | "text";
 }
 
 export interface AgentConfigView {

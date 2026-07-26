@@ -2,6 +2,13 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
+import {
+  TIMELINE_ACTIVE_WINDOW_MS,
+  TimelineAxis,
+  TimelinePlayhead,
+  buildTicks,
+  useTimelineScrub,
+} from "./timeline-plot";
 
 /**
  * Tracing-style timeline for console events, optionally synced to the session
@@ -42,8 +49,11 @@ const LANES: Lane[] = [
   { key: "other", label: "Other", color: "#94a3b8" },
 ];
 
-/** Colours agent states so a span's meaning is obvious without a legend. */
-const AGENT_STATE_COLOR: Record<string, string> = {
+/**
+ * Colours agent states so a span's meaning is obvious without a legend. Shared
+ * with the metrics timeline, which draws the same spans as its reference lane.
+ */
+export const AGENT_STATE_COLOR: Record<string, string> = {
   listening: "#38bdf8",
   thinking: "#a78bfa",
   speaking: "#22c55e",
@@ -51,9 +61,6 @@ const AGENT_STATE_COLOR: Record<string, string> = {
   connecting: "#f59e0b",
   disconnected: "#64748b",
 };
-
-/** How close the playhead must be for a marker to count as "now". */
-export const TIMELINE_ACTIVE_WINDOW_MS = 350;
 
 function laneOf(name: string): string {
   const prefix = name.split(".")[0];
@@ -104,7 +111,6 @@ export function EventTimeline({
   // event: otherwise nothing moves between events and the state the agent is
   // *currently* in never grows.
   const [now, setNow] = useState(() => Date.now());
-  const [scrubbing, setScrubbing] = useState(false);
   useEffect(() => {
     if (!live) return;
     const timer = setInterval(() => setNow(Date.now()), 250);
@@ -131,46 +137,47 @@ export function EventTimeline({
     };
   }, [events]);
 
-  if (!grouped) return null;
-
   // Cheap enough to redo on every tick.
-  const model = (() => {
-    const start = Math.min(grouped.first, audioWindow?.start ?? grouped.first);
-    const end = Math.max(
-      grouped.last + 500,
-      audioWindow?.end ?? 0,
-      live ? now : 0,
-      start + 1000
-    );
-    const span = end - start;
+  const model =
+    grouped &&
+    (() => {
+      const start = Math.min(grouped.first, audioWindow?.start ?? grouped.first);
+      const end = Math.max(
+        grouped.last + 500,
+        audioWindow?.end ?? 0,
+        live ? now : 0,
+        start + 1000
+      );
+      const span = end - start;
 
-    // Agent state → spans between transitions; the last one runs to the edge,
-    // which is "now" during a live session.
-    const spans = grouped.stateEvents.map((e, i) => {
-      const next = grouped.stateEvents[i + 1];
-      const spanEnd = next ? next.at : end;
-      return {
-        id: e.id,
-        state: e.detail,
-        left: ((e.at - start) / span) * 100,
-        width: Math.max(0.4, ((spanEnd - e.at) / span) * 100),
-        at: e.at,
-        durationMs: spanEnd - e.at,
-      };
-    });
-
-    const ticks: { left: number; label: string }[] = [];
-    const tickCount = 6;
-    for (let i = 0; i <= tickCount; i++) {
-      const t = (span / tickCount) * i;
-      ticks.push({
-        left: (i / tickCount) * 100,
-        label: `${(t / 1000).toFixed(t < 10000 ? 1 : 0)}s`,
+      // Agent state → spans between transitions; the last one runs to the edge,
+      // which is "now" during a live session.
+      const spans = grouped.stateEvents.map((e, i) => {
+        const next = grouped.stateEvents[i + 1];
+        const spanEnd = next ? next.at : end;
+        return {
+          id: e.id,
+          state: e.detail,
+          left: ((e.at - start) / span) * 100,
+          width: Math.max(0.4, ((spanEnd - e.at) / span) * 100),
+          at: e.at,
+          durationMs: spanEnd - e.at,
+        };
       });
-    }
 
-    return { start, end, span, byLane: grouped.byLane, spans, ticks };
-  })();
+      return { start, end, span, byLane: grouped.byLane, spans, ticks: buildTicks(span) };
+    })();
+
+  // Hooks run before the early return, so the window is a placeholder until
+  // there is something to plot.
+  const { scrubbing, onPointerDown, cursorClass } = useTimelineScrub({
+    plotRef,
+    start: model ? model.start : 0,
+    span: model ? model.span : 1,
+    onSeek,
+  });
+
+  if (!model) return null;
 
   const lanes = LANES.filter((lane) => (model.byLane.get(lane.key)?.length ?? 0) > 0);
 
@@ -188,46 +195,6 @@ export function EventTimeline({
           100,
       }
     : null;
-
-  const seekFromClientX = (clientX: number) => {
-    const plot = plotRef.current;
-    if (!plot || !onSeek) return;
-    const rect = plot.getBoundingClientRect();
-    if (rect.width === 0) return;
-    const ratio = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
-    onSeek(model.start + ratio * model.span);
-  };
-
-  /**
-   * Press anywhere in the plot to seek there, and keep seeking while the
-   * pointer moves — so a click and a scrub are the same gesture. Listeners live
-   * for the duration of the drag only, and follow the pointer outside the plot
-   * so the playhead doesn't stick when you overshoot.
-   */
-  const startScrub = (event: React.PointerEvent<HTMLDivElement>) => {
-    if (!onSeek) return;
-    event.preventDefault();
-    seekFromClientX(event.clientX);
-    setScrubbing(true);
-
-    const previousCursor = document.body.style.cursor;
-    document.body.style.cursor = "ew-resize";
-    document.body.style.userSelect = "none";
-
-    const move = (e: PointerEvent) => seekFromClientX(e.clientX);
-    const up = () => {
-      document.removeEventListener("pointermove", move);
-      document.removeEventListener("pointerup", up);
-      document.removeEventListener("pointercancel", up);
-      document.body.style.cursor = previousCursor;
-      document.body.style.userSelect = "";
-      setScrubbing(false);
-    };
-
-    document.addEventListener("pointermove", move);
-    document.addEventListener("pointerup", up);
-    document.addEventListener("pointercancel", up);
-  };
 
   return (
     <div className={cn("rounded-lg border p-3", className)}>
@@ -252,24 +219,10 @@ export function EventTimeline({
         {/* Plot */}
         <div
           ref={plotRef}
-          className={cn(
-            "relative min-w-0 flex-1 space-y-1.5 touch-none",
-            onSeek && (scrubbing ? "cursor-ew-resize" : "cursor-pointer")
-          )}
-          onPointerDown={startScrub}
+          className={cn("relative min-w-0 flex-1 space-y-1.5 touch-none", cursorClass)}
+          onPointerDown={onPointerDown}
         >
-          {/* Axis */}
-          <div className="relative h-4 border-b border-border/60">
-            {model.ticks.map((tick, i) => (
-              <div
-                key={i}
-                className="absolute top-0 h-full border-l border-border/40 pl-1 font-mono text-[9px] text-muted-foreground"
-                style={{ left: `${tick.left}%` }}
-              >
-                {tick.label}
-              </div>
-            ))}
-          </div>
+          <TimelineAxis ticks={model.ticks} />
 
           {lanes.map((lane) => {
             const laneEvents = model.byLane.get(lane.key) ?? [];
@@ -345,25 +298,7 @@ export function EventTimeline({
             <div className="pointer-events-none absolute inset-y-0 right-0 w-px animate-pulse bg-emerald-500/70" />
           )}
 
-          {/* Playhead */}
-          {playheadPct !== null && (
-            // Pointer events stay off so the press lands on the plot underneath
-            // — grabbing the line itself is just a scrub that starts on it.
-            <div
-              className={cn(
-                "pointer-events-none absolute inset-y-0 z-10 bg-red-500",
-                scrubbing ? "w-0.5" : "w-px"
-              )}
-              style={{ left: `${playheadPct}%` }}
-            >
-              <div
-                className={cn(
-                  "absolute -top-1 left-1/2 -translate-x-1/2 rounded-full bg-red-500 transition-transform",
-                  scrubbing ? "size-3 ring-2 ring-red-500/30" : "size-2"
-                )}
-              />
-            </div>
-          )}
+          {playheadPct !== null && <TimelinePlayhead pct={playheadPct} scrubbing={scrubbing} />}
         </div>
       </div>
 

@@ -396,7 +396,7 @@ function SessionReplayPage() {
             style={{ height: dockHeight }}
             className={cn(
               "flex min-h-0 flex-col",
-              tab === "Events" ? "overflow-hidden" : "overflow-y-auto"
+              tab === "Events" || tab === "Metrics" ? "overflow-hidden" : "overflow-y-auto"
             )}
           >
             {tab === "Audio" && (
@@ -438,7 +438,14 @@ function SessionReplayPage() {
             {tab === "Metrics" && (
               <MetricsPanel
                 metrics={metrics}
+                events={events}
+                timelineOn={timelineOn}
+                onTimelineToggle={setTimelineOn}
+                recordings={recordings}
+                dockHeight={dockHeight}
+                audio={audio}
                 emptyHint="This session was recorded without metrics. Agents publish them on the lk.metrics topic — redeploy from the Builder and the next session will have them."
+                transportEmptyLabel="no audio saved for this session"
               />
             )}
             {tab === "Models" && <ModelsPanel metrics={metrics} config={session.config} />}

@@ -14,8 +14,47 @@ App-specific, safe to change freely.
 - `top-bar.tsx` — page header: `title`, `breadcrumb`, `actions`, optional refresh/time-range controls.
 - `list-state.tsx` — `ListLoading`, `ListError`, `ServiceNotice`. `ServiceNotice` is the "this LiveKit service isn't deployed" explainer; pair it with the `notice` from `useApiList`.
 - `data-table.tsx`, `stat-card.tsx`, `line-chart.tsx`, `donut-chart.tsx`, `time-range-picker.tsx` — presentational.
-- `console/` — the agent console (live session view) **and** the panels shared with the session replay at `/sessions/history/[id]`: `session-primitives.tsx` (rail rows, dock resize, transcript), `events-panel.tsx`, `metrics-panel.tsx`, `recordings-panel.tsx`, `timeline-audio.tsx`. A panel used by both must take its data as props and its audio via the `useTimelineAudio` handle — replay has no room, no tracks and no live clock.
-  `use-session-persistence.ts` is what makes a session replayable: it posts events, metrics and transcript to `/api/sessions` when `live` goes false (and on unmount, for a tab that navigates away mid-call). It upserts on the room, so saving twice is harmless.
+- `console/` — the agent console and the session replay. Big enough to have its own section below.
+
+## livekit/console/ — the console and the replay view
+
+The live session view (`/agents/[id]/console`) and the replay (`/sessions/history/[id]`) are two hosts for the same panels: `session-primitives.tsx` (rail rows, dock resize, transcript), `events-panel.tsx`, `metrics-panel.tsx`, `recordings-panel.tsx`. A panel used by both takes its data as props and its audio via the `useTimelineAudio` handle — **replay has no room, no tracks and no live clock**, so reaching for a LiveKit hook inside a shared panel breaks it.
+
+`use-session-persistence.ts` is what makes a session replayable: it posts events, metrics and transcript to `/api/sessions` when `live` goes false (and on unmount, for a tab that navigates away mid-call). It upserts on the room, so saving twice is harmless.
+
+Console-only, because they need live tracks: `use-session-recorder.ts` (three Web Audio destinations — mixed, agent, user — recorded in the browser and uploaded when the session ends) and `audio-scope.tsx` (live waveform).
+
+### One clock, one player
+
+Everything a session view draws — the event log, both timelines, the transcript, the metric rows — is positioned by **wall-clock instant** and seeks the same recording. `useTimelineAudio` (`timeline-audio.tsx`) owns the position; it is created once per session view and passed to the panels, which is why playback survives switching tabs and why a click in any panel moves every other one.
+
+Two things about the audio window are easy to get wrong:
+
+- A recording's stored `durationMs` is **wall-clock** (`Date.now()` at stop minus at start), while the file holds however much audio the Web Audio graph actually produced. A suspended `AudioContext` makes the file shorter, and since every instant is mapped through this window, the difference shows up as every marker sitting at the wrong place in the audio. The handle therefore prefers the element's own `duration` once known, keyed by `src` so switching recordings can't inherit the previous one's length.
+- `preload` is `auto`, not `metadata`: a webm from `MediaRecorder` carries no duration in its header, so the whole (short) file has to be read before `duration` stops being `Infinity`.
+
+### The two timelines
+
+`timeline-plot.tsx` is the shared substrate — the axis (`buildTicks`, `TimelineAxis`), the red playhead (`TimelinePlayhead`), the click-or-drag-to-seek gesture (`useTimelineScrub`), and `TIMELINE_ACTIVE_WINDOW_MS`, the tolerance every panel uses to decide what counts as "now". Both timelines look and feel identical because they draw through these rather than reimplementing them.
+
+`useTimelineScrub` must be called **before** any early return — pass a placeholder window when there is nothing to plot. Both timelines bail out on empty input, and a hook after that return is a rules-of-hooks error.
+
+- `event-timeline.tsx` — a lane per event category. Point events are markers; `agent.state` becomes spans between transitions. `AGENT_STATE_COLOR` is exported because the metrics timeline draws the same spans.
+- `metrics-timeline.tsx` — a lane per metric kind, plus an `AGENT` reference lane built from those same `agent.state` transitions. That lane is ground truth: it comes from the room, so it lines up with the recording by definition, and the metric lanes are read against it.
+
+### Placing a metric in time
+
+**A metric's timestamp is when it was *reported*, not when the work happened.** `metricWindows()` in `metrics-timeline.tsx` is the single place that decides where a bar goes, and adding a metric kind means adding its window there rather than drawing a dot at `m.at`:
+
+- **LLM / EOU / turn detector** — compute and silence. The bar runs back from the timestamp over its duration; the solid head is the part the user waited through (TTFT, EOU delay).
+- **TTS** — heard, not computed. Synthesis finishes long before the audio it produced has finished playing, so the bar runs from the request, through the TTFB wait, and on over `audio_duration`, **past its own timestamp**. A reply split into sentences is heard back to back, so chunks sharing a `speech_id` are chained: the second starts when the first stops playing, and shows no wait, because its TTFB elapsed while the agent was still talking. Without the chaining one reply draws as a pile of overlapping bars.
+- **STT** — the user's speech, so it reaches back over `audio_duration` from the timestamp, clamped against the previous segment so consecutive finals don't cover the same speech twice.
+
+`MetricsPanel` looks windows up from the same function, so a row highlights and seeks over exactly the span its bar covers.
+
+### Transcript lines
+
+A `TranscriptLine` carries `via: "voice" | "text"`. Typed turns never pass through STT, so they produce no transcription and have to be collected from the chat topic (`lk.chat`) — the console merges `useChat()` messages into the transcript, and the observer registers the same topic. Panels mark them, since a transcript read as evidence of what was *heard* shouldn't silently include what was typed.
 
 ## Theming
 

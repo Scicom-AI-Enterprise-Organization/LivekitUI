@@ -1,9 +1,12 @@
 "use client";
 
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Keyboard, Loader2, SendHorizontal } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 import { formatClock } from "@/lib/console-metrics";
-import { TIMELINE_ACTIVE_WINDOW_MS } from "./event-timeline";
+import { TIMELINE_ACTIVE_WINDOW_MS } from "./timeline-plot";
 import type { TranscriptLine } from "./session-types";
 
 /** Small building blocks shared by the console and the replay view. */
@@ -154,6 +157,9 @@ export function TranscriptPanel({
   playheadAt,
   canSeekTo,
   onSeek,
+  onSend,
+  sending,
+  composerPlaceholder = "Message the agent…",
 }: {
   lines: TranscriptLine[];
   className?: string;
@@ -163,6 +169,10 @@ export function TranscriptPanel({
   playheadAt?: number | null;
   canSeekTo?: (at: number) => boolean;
   onSeek?: (at: number) => void;
+  /** Given, the pane grows a composer — typing is another way to take a turn. */
+  onSend?: (text: string) => void | Promise<void>;
+  sending?: boolean;
+  composerPlaceholder?: string;
 }) {
   const endRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -227,10 +237,15 @@ export function TranscriptPanel({
               </span>
               <span
                 className={cn(
-                  "shrink-0 font-mono text-xs leading-5",
+                  "flex shrink-0 items-center gap-1 font-mono text-xs leading-5",
                   line.isAgent ? "text-primary" : "text-muted-foreground"
                 )}
               >
+                {/* Typed turns never passed through STT — worth distinguishing
+                    when a transcript is being read as evidence of what was heard. */}
+                {line.via === "text" && (
+                  <Keyboard className="size-3 opacity-70" aria-label="typed" />
+                )}
                 {line.isAgent ? "agent" : line.identity}
               </span>
               <span className="min-w-0 text-foreground/90">{line.text}</span>
@@ -239,7 +254,55 @@ export function TranscriptPanel({
         })}
         <div ref={endRef} />
       </div>
+
+      {onSend && <TranscriptComposer onSend={onSend} sending={sending} placeholder={composerPlaceholder} />}
     </div>
+  );
+}
+
+/**
+ * Types a turn instead of speaking it. The text goes to the agent on the
+ * `lk.chat` topic, which its session treats as user input: it interrupts
+ * whatever it was saying and answers out loud.
+ */
+function TranscriptComposer({
+  onSend,
+  sending,
+  placeholder,
+}: {
+  onSend: (text: string) => void | Promise<void>;
+  sending?: boolean;
+  placeholder: string;
+}) {
+  const [draft, setDraft] = useState("");
+
+  const submit = async (event: React.FormEvent) => {
+    event.preventDefault();
+    const text = draft.trim();
+    if (!text || sending) return;
+    // Cleared first: a send that fails is reported in the event log, and
+    // retyping is cheaper than a box that will not empty.
+    setDraft("");
+    await onSend(text);
+  };
+
+  return (
+    <form onSubmit={submit} className="flex shrink-0 items-center gap-2 border-t p-2">
+      <Input
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        placeholder={placeholder}
+        className="h-8 text-sm"
+        autoComplete="off"
+      />
+      <Button type="submit" size="icon-sm" disabled={!draft.trim() || sending} title="Send">
+        {sending ? (
+          <Loader2 className="size-3.5 animate-spin" />
+        ) : (
+          <SendHorizontal className="size-3.5" />
+        )}
+      </Button>
+    </form>
   );
 }
 

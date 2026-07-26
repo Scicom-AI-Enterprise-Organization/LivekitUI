@@ -63,6 +63,13 @@ Capture is **off by default** (`capture_config`, one row). With it off, a sessio
 
 Phone numbers are the confusing one: that page is a *local registry* only. Adding a number provisions nothing and needs no SIP.
 
+### Reading a session back
+
+The console and the replay at `/sessions/history/[id]` put events, metrics, the transcript and both timelines on **one wall-clock axis**, driven by the session recording: one audio handle per view, and a click anywhere moves every panel. Two facts govern anything drawn there, both detailed in `src/components/CLAUDE.md`:
+
+- A recording's stored `durationMs` is wall-clock, not the length of the audio file. Treating them as the same stretches the whole plot against the playhead.
+- A metric's timestamp is when the agent *reported* it, not when the work happened — TTS in particular is still audibly playing after its metric arrives. `metricWindows()` owns that translation.
+
 ## Conventions
 
 - **Every API route** starts with `getSession()` → 401, then `session.role === "member"` → 403 for writes. Members are view-only.

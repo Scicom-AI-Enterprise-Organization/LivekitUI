@@ -50,6 +50,11 @@ const cfg = {
   agentHint: process.env.OBSERVER_AGENT || "",
   metricsTopic: process.env.OBSERVER_METRICS_TOPIC || "lk.metrics",
   transcriptionTopic: process.env.OBSERVER_TRANSCRIPTION_TOPIC || "lk.transcription",
+  /**
+   * Typed messages travel on their own topic and never become transcriptions —
+   * an agent reached by text would otherwise be recorded talking to itself.
+   */
+  chatTopic: process.env.OBSERVER_CHAT_TOPIC || "lk.chat",
   segmentAttribute: process.env.OBSERVER_SEGMENT_ATTRIBUTE || "lk.segment_id",
   agentStateAttribute: process.env.OBSERVER_AGENT_STATE_ATTRIBUTE || "lk.agent.state",
   consolePrefix: process.env.OBSERVER_CONSOLE_PREFIX || "console-",
@@ -314,11 +319,23 @@ function handleTranscription(reader, participantInfo) {
   void readSegment(reader, info, participantInfo);
 }
 
+/**
+ * A typed message is one stream, complete on arrival — no revisions, no segment
+ * id to join on — so it is recorded as its own line and marked as text.
+ */
+function handleChat(reader, participantInfo) {
+  const info = reader.info ?? {};
+  void readSegment(reader, info, participantInfo, "text");
+}
+
 /** Reads still in flight when the room closes; finalize waits on them briefly. */
 const pendingReads = new Set();
 
-function readSegment(reader, info, participantInfo) {
-  const id = info.attributes?.[cfg.segmentAttribute] || info.streamId || `seg-${segments.size}`;
+function readSegment(reader, info, participantInfo, via = "voice") {
+  const id =
+    via === "text"
+      ? `chat-${info.streamId || segments.size}`
+      : info.attributes?.[cfg.segmentAttribute] || info.streamId || `seg-${segments.size}`;
   const identity = participantInfo?.identity ?? "unknown";
   const existing = segments.get(id);
   const at = existing?.at ?? utteranceStart(info.timestamp);
@@ -329,6 +346,7 @@ function readSegment(reader, info, participantInfo) {
     identity,
     text: existing?.text ?? "",
     isAgent: !!agentIdentity && identity === agentIdentity,
+    via,
     order: existing?.order ?? segments.size,
   });
 
@@ -416,7 +434,7 @@ async function finalize(reason) {
     .sort((a, b) => a.at - b.at || a.order - b.order)
     .filter((line) => line.text)
     // `order` is only a tiebreaker for segments stamped the same millisecond.
-    .map(({ id, at, identity, text, isAgent }) => ({ id, at, identity, text, isAgent }));
+    .map(({ id, at, identity, text, isAgent, via }) => ({ id, at, identity, text, isAgent, via }));
 
   // Nothing was said and nothing happened: a connect that went nowhere is noise
   // in the history list, exactly as it is for the console.
@@ -482,6 +500,7 @@ function clearRecord() {
 async function main() {
   startAudio();
   room.registerTextStreamHandler(cfg.transcriptionTopic, handleTranscription);
+  room.registerTextStreamHandler(cfg.chatTopic, handleChat);
 
   log(`connecting to ${cfg.url}`);
   await room.connect(cfg.url, cfg.token, { autoSubscribe: true, dynacast: false });

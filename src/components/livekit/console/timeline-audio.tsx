@@ -41,6 +41,9 @@ export function useTimelineAudio({
   const [chosenFile, setChosenFile] = useState<string | null>(null);
   const [playing, setPlaying] = useState(false);
   const [positionMs, setPositionMs] = useState(0);
+  // Keyed by src so switching recordings can't be read as the new one's length,
+  // and so nothing has to be reset from inside an effect.
+  const [measured, setMeasured] = useState<{ src: string; ms: number } | null>(null);
 
   // Prefer this session's mixed recording, else the newest one on record.
   const selected = useMemo(() => {
@@ -59,29 +62,54 @@ export function useTimelineAudio({
   }, [chosenFile, recordings, roomName, autoSelectKind]);
 
   const startMs = selected ? new Date(selected.startedAt).getTime() : null;
-  const durationMs = selected?.durationMs ?? 0;
-
   const src = selected ? recordingSrc(agentName, selected.file) : null;
+
+  /**
+   * The file's own length wins over the length the recorder wrote down.
+   *
+   * `durationMs` on the record is wall-clock — `Date.now()` at stop minus at
+   * start — while the bytes are however much audio the graph actually produced.
+   * A suspended AudioContext (autoplay policy, a backgrounded tab) makes the
+   * second shorter than the first, and since the whole timeline maps wall-clock
+   * instants through this window, the difference shows up as every marker
+   * sitting at the wrong place in the audio.
+   */
+  const durationMs =
+    (measured?.src === src ? measured.ms : null) ?? selected?.durationMs ?? 0;
 
   // The player has no UI of its own — the timeline and transport drive it — so
   // the element is created here instead of rendered.
   useEffect(() => {
     if (!src) return;
     const el = new Audio(src);
-    el.preload = "metadata";
+    // Session recordings are seconds long, and the whole file has to be read
+    // before a webm from MediaRecorder reports its real duration.
+    el.preload = "auto";
     elRef.current = el;
 
     const onPlay = () => setPlaying(true);
     const onPause = () => setPlaying(false);
+    // A webm from MediaRecorder carries no duration in its header, so this
+    // reports Infinity until enough of the file has been read. It settles on
+    // `durationchange`, which is why both are listened for.
+    const onDuration = () => {
+      if (Number.isFinite(el.duration) && el.duration > 0) {
+        setMeasured({ src, ms: el.duration * 1000 });
+      }
+    };
     el.addEventListener("play", onPlay);
     el.addEventListener("pause", onPause);
     el.addEventListener("ended", onPause);
+    el.addEventListener("loadedmetadata", onDuration);
+    el.addEventListener("durationchange", onDuration);
 
     return () => {
       el.pause();
       el.removeEventListener("play", onPlay);
       el.removeEventListener("pause", onPause);
       el.removeEventListener("ended", onPause);
+      el.removeEventListener("loadedmetadata", onDuration);
+      el.removeEventListener("durationchange", onDuration);
       elRef.current = null;
     };
   }, [src]);

@@ -5,7 +5,8 @@ import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { cn } from "@/lib/utils";
 import { formatClock } from "@/lib/console-metrics";
-import { EventTimeline, TIMELINE_ACTIVE_WINDOW_MS } from "./event-timeline";
+import { EventTimeline } from "./event-timeline";
+import { TIMELINE_ACTIVE_WINDOW_MS } from "./timeline-plot";
 import { DockEmpty } from "./session-primitives";
 import { TimelineTransport, type TimelineAudio } from "./timeline-audio";
 import type { ConsoleEvent, SavedRecording, TranscriptLine } from "./session-types";
@@ -178,6 +179,11 @@ export function EventsPanel({
                     title={row.line.identity}
                   >
                     {row.line.isAgent ? "agent" : "you"}
+                    {/* Typed, not spoken — worth knowing when no audio exists
+                        for a turn that is nonetheless in the conversation. */}
+                    {row.line.via === "text" && (
+                      <span className="ml-1 text-muted-foreground">· typed</span>
+                    )}
                   </span>
                   <span className="min-w-0 break-words text-foreground">{row.line.text}</span>
                 </>

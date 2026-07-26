@@ -13,13 +13,12 @@
    timeline, saved audio, metrics, model usage — live in
    components/livekit/console/ and are shared with the replay view at
    /sessions/history/[id]. What stays here needs the room: the voice stage, the
-   SIP panel, participants, RPC and DTMF.
+   SIP panel and participants.
    ──────────────────────────────────────────────────────────────────────────── */
 
 import { Suspense, useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
-import { toast } from "sonner";
 import {
   LiveKitRoom,
   RoomAudioRenderer,
@@ -31,6 +30,7 @@ import {
   useLocalParticipant,
   useTracks,
   useTranscriptions,
+  useChat,
 } from "@livekit/components-react";
 import "@livekit/components-styles";
 import {
@@ -117,8 +117,6 @@ const TABS = [
   "Events",
   "Session",
   "Participants",
-  "RPC",
-  "DTMF",
   "Metrics",
   "Models",
 ] as const;
@@ -342,11 +340,14 @@ function AgentConsolePage() {
   }, []);
 
   // "Clear events" resets the whole console for this agent, including the audio
-  // saved on disk — so it asks first, and reports when the files survive.
+  // saved on disk — so it asks first. Success is silent: the panels emptying is
+  // the feedback. Only audio that survived the clear needs saying, in the same
+  // banner the rest of the console uses.
   const clearEverything = useCallback(async () => {
     setEvents([]);
     setMetrics([]);
     setTranscript([]);
+    setError(null);
 
     try {
       const res = await fetch(`/api/agents/${encodeURIComponent(agentName)}/recordings`, {
@@ -356,20 +357,18 @@ function AgentConsolePage() {
       });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
-        toast.warning("Events cleared, saved audio kept", {
-          description:
+        setError(
+          `Events cleared, but the saved audio was kept: ${
             data.error === "Insufficient permissions"
-              ? "Only an admin or owner can delete recordings."
-              : data.error || "The recordings could not be deleted.",
-        });
+              ? "only an admin or owner can delete recordings."
+              : data.error || "the recordings could not be deleted."
+          }`
+        );
         return;
       }
       setRecordings([]);
-      toast.success("Console cleared");
     } catch {
-      toast.warning("Events cleared, saved audio kept", {
-        description: "The dashboard API could not be reached.",
-      });
+      setError("Events cleared, but the saved audio was kept: the dashboard API is unreachable.");
     }
   }, [agentName]);
 
@@ -499,8 +498,9 @@ function AgentConsolePage() {
           return;
         }
         setSipCall({ room, peer: data.callTo, direction: "out" });
+        // The stage says "Calling …" and the event log carries the call id, so
+        // there is nothing left for a notification to add.
         addEvent("sip.dialled", `${data.callTo}${data.sipCallId ? ` (${data.sipCallId})` : ""}`);
-        toast.success(`Calling ${data.callTo}`, { description: "Answer to talk to the agent" });
       } catch {
         setError("Could not reach the dashboard API");
       } finally {
@@ -540,9 +540,6 @@ function AgentConsolePage() {
         setSipCall({ room: call.roomName, peer: call.from ?? "caller", direction: "in" });
         setWaitingForCall(false);
         addEvent("call.attached", `${call.from ?? "caller"} → ${call.roomName}`);
-        toast.success(`Call from ${call.from ?? "unknown"}`, {
-          description: `Watching ${call.roomName}`,
-        });
       } catch {
         setError("Could not reach the dashboard API");
       } finally {
@@ -817,6 +814,9 @@ function ConsoleShell({
   const { state: agentState, agent, audioTrack } = useVoiceAssistant();
   const participants = useParticipants();
   const transcriptions = useTranscriptions();
+  // Typed messages are chat, not transcription: without this a text-only
+  // conversation records as the agent talking to nobody.
+  const { chatMessages, send: sendChat, isSending } = useChat();
   const { microphoneTrack, localParticipant } = useLocalParticipant();
 
   const connectionState = room?.state ?? ConnectionState.Disconnected;
@@ -830,26 +830,39 @@ function ConsoleShell({
   // as "now" and none of them would line up with the event log or the recording.
   const spokenAtRef = useRef(new Map<string, number>());
   useEffect(() => {
-    if (transcriptions.length === 0) return;
+    if (transcriptions.length === 0 && chatMessages.length === 0) return;
     const spokenAt = spokenAtRef.current;
-    onTranscript(
-      transcriptions.map((t) => {
-        const id = t.streamInfo.attributes?.[SEGMENT_ID_ATTRIBUTE] ?? t.streamInfo.id;
-        let at = spokenAt.get(id);
-        if (at === undefined) {
-          at = utteranceStart(t.streamInfo.timestamp);
-          spokenAt.set(id, at);
-        }
-        return {
-          id,
-          at,
-          identity: t.participantInfo.identity,
-          text: t.text,
-          isAgent: !!agentIdentity && t.participantInfo.identity === agentIdentity,
-        };
-      })
-    );
-  }, [transcriptions, agentIdentity, onTranscript]);
+
+    const spoken: TranscriptLine[] = transcriptions.map((t) => {
+      const id = t.streamInfo.attributes?.[SEGMENT_ID_ATTRIBUTE] ?? t.streamInfo.id;
+      let at = spokenAt.get(id);
+      if (at === undefined) {
+        at = utteranceStart(t.streamInfo.timestamp);
+        spokenAt.set(id, at);
+      }
+      return {
+        id,
+        at,
+        identity: t.participantInfo.identity,
+        text: t.text,
+        isAgent: !!agentIdentity && t.participantInfo.identity === agentIdentity,
+        via: "voice",
+      };
+    });
+
+    // A chat message arrives whole and is never revised, so its own timestamp
+    // is the moment it was sent.
+    const typed: TranscriptLine[] = chatMessages.map((m) => ({
+      id: `chat-${m.id}`,
+      at: m.timestamp,
+      identity: m.from?.identity ?? "you",
+      text: m.message,
+      isAgent: !!agentIdentity && m.from?.identity === agentIdentity,
+      via: "text",
+    }));
+
+    onTranscript([...spoken, ...typed].sort((a, b) => a.at - b.at));
+  }, [transcriptions, chatMessages, agentIdentity, onTranscript]);
 
   // ── Session audio: raw media tracks for the scopes and the recorder ──
   const agentMediaTrack = audioTrack?.publication?.track?.mediaStreamTrack;
@@ -867,6 +880,27 @@ function ConsoleShell({
   // One player for the whole console: the Events timeline, its log and the
   // transcript all seek the same recording, and it keeps playing across tabs.
   const timelineAudio = useTimelineAudio({ agentName, roomName, recordings });
+
+  /**
+   * Takes a turn by typing. The agent's session listens on the chat topic and
+   * treats what arrives as user input — it interrupts itself and answers out
+   * loud, exactly as if the words had been spoken.
+   */
+  const sendMessage = useCallback(
+    async (text: string) => {
+      try {
+        await sendChat(text);
+        onAddEvent("chat.sent", text.slice(0, 300));
+      } catch (err) {
+        onAddEvent(
+          "chat.send_failed",
+          err instanceof Error ? err.message : String(err),
+          "error"
+        );
+      }
+    },
+    [sendChat, onAddEvent]
+  );
 
   const { recording, uploading, unsupported } = useSessionRecorder({
     agentName,
@@ -1206,8 +1240,16 @@ function ConsoleShell({
                     <VoiceAssistantControlBar />
                   </div>
                 </div>
-                {/* Transcript */}
-                <TranscriptPanel lines={transcript} />
+                {/* Transcript, with a composer: typing is a third way in
+                    alongside the browser mic and a phone. */}
+                <TranscriptPanel
+                  lines={transcript}
+                  onSend={sendMessage}
+                  sending={isSending}
+                  composerPlaceholder={
+                    agent ? "Message the agent…" : "Waiting for the agent to join…"
+                  }
+                />
               </div>
             ) : transcript.length > 0 && !sipPanelOpen ? (
               /* Ended — what was said stays on screen until you ask for the
@@ -1371,7 +1413,7 @@ function ConsoleShell({
             style={{ height: dockHeight }}
             className={cn(
               "flex min-h-0 flex-col",
-              tab === "Events" ? "overflow-hidden" : "overflow-y-auto"
+              tab === "Events" || tab === "Metrics" ? "overflow-hidden" : "overflow-y-auto"
             )}
           >
             {tab === "Audio" && (
@@ -1420,9 +1462,18 @@ function ConsoleShell({
               />
             )}
             {tab === "Participants" && <ParticipantsTab />}
-            {tab === "RPC" && <RpcTab agentIdentity={agent?.identity} live={live} />}
-            {tab === "DTMF" && <DtmfTab live={live} onAddEvent={onAddEvent} />}
-            {tab === "Metrics" && <MetricsPanel metrics={metrics} live={live} />}
+            {tab === "Metrics" && (
+              <MetricsPanel
+                metrics={metrics}
+                events={events}
+                live={live}
+                timelineOn={timelineOn}
+                onTimelineToggle={onTimelineToggle}
+                recordings={recordings}
+                dockHeight={dockHeight}
+                audio={timelineAudio}
+              />
+            )}
             {tab === "Models" && <ModelsPanel metrics={metrics} config={config} />}
           </div>
         )}
@@ -1960,163 +2011,6 @@ function ParticipantsTab() {
           {saving && <Loader2 className="size-3.5 animate-spin" />}
           Update your participant details
         </Button>
-      </div>
-    </div>
-  );
-}
-
-/* ────────────────────────────────────
-   Tab: RPC
-   ──────────────────────────────────── */
-function RpcTab({ agentIdentity, live }: { agentIdentity?: string; live: boolean }) {
-  const { localParticipant } = useLocalParticipant();
-  const [destination, setDestination] = useState("");
-  const [method, setMethod] = useState("");
-  const [payload, setPayload] = useState("{}");
-  const [result, setResult] = useState<string | null>(null);
-  const [error, setError] = useState("");
-  const [busy, setBusy] = useState(false);
-
-  useEffect(() => {
-    if (agentIdentity && !destination) setDestination(agentIdentity);
-  }, [agentIdentity, destination]);
-
-  if (!live) return <DockEmpty>RPC requires an active session</DockEmpty>;
-
-  const invoke = async () => {
-    if (!localParticipant) return;
-    setBusy(true);
-    setError("");
-    setResult(null);
-    try {
-      const response = await localParticipant.performRpc({
-        destinationIdentity: destination,
-        method,
-        payload,
-      });
-      setResult(response);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <div className="space-y-3 p-4">
-      <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-        <div className="space-y-1.5">
-          <Label className="text-xs text-foreground/70">Destination identity</Label>
-          <Input
-            value={destination}
-            onChange={(e) => setDestination(e.target.value)}
-            placeholder="agent identity"
-            className="h-8 text-sm"
-          />
-        </div>
-        <div className="space-y-1.5">
-          <Label className="text-xs text-foreground/70">Method</Label>
-          <Input
-            value={method}
-            onChange={(e) => setMethod(e.target.value)}
-            placeholder="my.method"
-            className="h-8 text-sm"
-          />
-        </div>
-      </div>
-      <div className="space-y-1.5">
-        <Label className="text-xs text-foreground/70">Payload</Label>
-        <textarea
-          value={payload}
-          onChange={(e) => setPayload(e.target.value)}
-          rows={3}
-          className="w-full rounded-md border border-border bg-card px-2 py-1.5 font-mono text-xs outline-none focus:border-primary"
-        />
-      </div>
-      <Button size="sm" onClick={invoke} disabled={busy || !destination || !method}>
-        {busy && <Loader2 className="size-3.5 animate-spin" />}
-        Invoke
-      </Button>
-      {error && (
-        <pre className="whitespace-pre-wrap rounded-md border border-destructive/30 bg-destructive/10 p-2 font-mono text-xs text-destructive">
-          {error}
-        </pre>
-      )}
-      {result !== null && (
-        <pre className="whitespace-pre-wrap rounded-md border bg-muted/40 p-2 font-mono text-xs text-foreground/80">
-          {result || "(empty response)"}
-        </pre>
-      )}
-    </div>
-  );
-}
-
-/* ────────────────────────────────────
-   Tab: DTMF
-   ──────────────────────────────────── */
-const DTMF_KEYS = [
-  ["1", 1], ["2", 2], ["3", 3],
-  ["4", 4], ["5", 5], ["6", 6],
-  ["7", 7], ["8", 8], ["9", 9],
-  ["*", 10], ["0", 0], ["#", 11],
-] as const;
-
-function DtmfTab({
-  live,
-  onAddEvent,
-}: {
-  live: boolean;
-  onAddEvent: (name: string, detail: string, level?: ConsoleEvent["level"]) => void;
-}) {
-  const { localParticipant } = useLocalParticipant();
-  const [sent, setSent] = useState("");
-  const [error, setError] = useState("");
-
-  if (!live) return <DockEmpty>DTMF requires an active session</DockEmpty>;
-
-  const press = async (digit: string, code: number) => {
-    if (!localParticipant) return;
-    setError("");
-    try {
-      await localParticipant.publishDtmf(code, digit);
-      setSent((s) => s + digit);
-      onAddEvent("dtmf.sent", digit);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    }
-  };
-
-  return (
-    <div className="flex items-start gap-6 p-4">
-      <div className="grid w-[180px] grid-cols-3 gap-2">
-        {DTMF_KEYS.map(([digit, code]) => (
-          <Button
-            key={digit}
-            variant="outline"
-            className="h-11 font-mono text-base"
-            onClick={() => press(digit, code)}
-          >
-            {digit}
-          </Button>
-        ))}
-      </div>
-      <div className="space-y-2">
-        <div className="text-xs font-mono uppercase tracking-wide text-muted-foreground">
-          Sent digits
-        </div>
-        <div className="min-h-8 rounded-md border bg-muted/40 px-3 py-1.5 font-mono text-sm text-foreground/80">
-          {sent || "—"}
-        </div>
-        <p className="max-w-sm text-xs text-muted-foreground">
-          DTMF tones are delivered to SIP participants in the room. A web-only session
-          has nothing to receive them.
-        </p>
-        {error && <p className="text-xs text-destructive">{error}</p>}
-        {sent && (
-          <Button variant="ghost" size="sm" onClick={() => setSent("")}>
-            Clear
-          </Button>
-        )}
       </div>
     </div>
   );

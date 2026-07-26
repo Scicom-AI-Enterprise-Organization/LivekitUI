@@ -43,6 +43,8 @@ Session audio and the history that plays it back.
 
 Where an object lives is recorded **per recording** (`session_recordings.storage`), never inferred from the current settings — switching a deployment to S3 must not orphan the audio already on disk. `console-recordings.ts` is the index over that: DB rows for metadata, storage for bytes, plus a one-time adoption of the pre-index JSON sidecars on first read.
 
+`durationMs` on a recording row is **wall-clock** — what the browser recorder measured between start and stop — and is not necessarily the length of the audio in the file (a suspended `AudioContext` produces no samples while time passes). It is fine for a list, but anything aligning events to the audio must use the file's own duration; the player already does. Same for `startedAt`: it is when the recorder started, which is a moment after the room connected, so it is the anchor for the timelines and not the room's start.
+
 `console-sessions.ts` serialises `console_sessions` rows for the API and normalises the two backends' time formats (`Date` from Postgres, `"YYYY-MM-DD HH:MM:SS"` from SQLite) — use `dbTimeToIso` rather than `new Date(row.created_at)`. It also owns `SESSION_SOURCE_RANK`: a server-side capture must never overwrite a console row, since the tab was the better witness.
 
 ## session-observer.ts / session-capture.ts / capture-settings.ts — recording what no browser saw
@@ -55,6 +57,7 @@ Load-bearing details:
 
 - **The child holds no dashboard credentials.** It drops files; the server adopts them. That is why there is no machine-auth path into `/api/sessions`, and why a capture survives a dashboard restart.
 - **Raw metrics.** The observer stores agent metric payloads exactly as they arrived; `parseConsoleMetric` runs during adoption, so captures cannot drift from the parser the console and the replay share.
+- **Two text topics.** Speech arrives as transcription segments that get revised, joined on a segment id. A typed turn arrives on the chat topic (`lk.chat`) as one complete stream and is recorded as its own line with `via: "text"`. It never becomes a transcription, so an observer that only read the transcription topic would record a text conversation as the user having said nothing at all.
 - **Claim by rename.** Adoption renames a capture before reading it, so a webhook and a page load cannot both adopt it. A `.claimed` file older than five minutes is reclaimed.
 - **Audio needs S3 to be reachable.** If `saveRecording` throws, the capture is put back and retried on the next pass for up to 24 hours rather than writing a row that claims audio nobody stored.
 - **The console wins.** A participant carrying `CONSOLE_PARTICIPANT_ATTRIBUTE` makes the observer drop its audio (two "mixed" recordings would collide on one storage key) and its row loses to the tab's.

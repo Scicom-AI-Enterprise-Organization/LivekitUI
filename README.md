@@ -4,18 +4,19 @@ Self-hosted dashboard for managing [LiveKit](https://livekit.io) infrastructure.
 
 ## Features
 
-- **Overview** — connection stats, participant minutes, data transfer, room sessions
+- **Overview** — connection stats, participant minutes, data transfer and room sessions over a time range, rebuilt from the webhook event log (LiveKit OSS keeps no history of its own)
 - **Sessions** — live room list with participants, status, and duration from the LiveKit server, plus a searchable **History** of finished sessions you can replay; optionally record SIP calls and sandbox sessions server-side, with no browser open
 - **Storage** — keep session audio on the dashboard's disk or in any S3-compatible bucket
 - **Agents** — monitor connected agents, active sessions, historical chart, and deploy new agents via the agent builder
+- **Console** — test one agent live: talk with your microphone, place or receive a real phone call, or type to it; watch the transcript, event timeline and per-turn latency as it happens
 - **Telephony** — calls, dispatch rules, phone numbers (manual + Twilio/Vonage/Telnyx import), SIP trunks
 - **Egresses / Ingresses** — manage media export and import streams
 - **Sandbox** — create and manage sandbox apps from templates, proxied through the dashboard at `/sandbox/{name}`
 - **Providers** — register any OpenAI-compatible inference endpoint (vLLM, Ollama, LiteLLM, …) and its models; the agent builder picks its model lists from here
 - **Secrets** — project-wide API keys, injected into every deployed agent and selectable as a provider's credential
-- **Settings** — project config, team members, API keys, webhooks with live event log
+- **Settings** — project config, session capture, storage, team members, API keys, webhooks with live event log
 - **Auth** — login, register, invite-based onboarding with role assignment
-- **RBAC** — Admin (full access), Member (view-only)
+- **RBAC** — Owner (everything, including invites), Admin (everything but invites), Member (view-only)
 
 ## Quick Start
 
@@ -41,7 +42,7 @@ npm install
 npm run dev
 ```
 
-Open http://localhost:3000. The first registered account becomes the **Admin**.
+Open http://localhost:3000. The first registered account becomes the **owner**.
 
 ### 4. Docker
 
@@ -60,6 +61,11 @@ Run each in a separate terminal:
 | Key gateway (optional) | `npm run gateway` | 7885 |
 | Voice Agent | `cd example/agent-starter-python && source venv/bin/activate && python src/agent.py dev` | — |
 | Agent Frontend | `cd example/agent-starter-react && npx next dev -p 3002` | 3002 |
+| Example MCP server (optional) | `npm run mcp:example` | 7900 |
+
+Three more kinds of process start themselves and need no terminal of their own: agents you deploy from the builder, sandbox apps, and a session observer per room when capture is on. All are detached children that the dashboard re-discovers after a reload — from PID files under `data/`, or by scanning for the process — instead of holding handles in memory. A dashboard restart therefore does not kill a running agent, drop a sandbox, or interrupt a call being recorded.
+
+Egress, ingress and SIP are separate LiveKit services — see [SIP Service](#sip-service).
 
 ### How it connects
 
@@ -102,9 +108,11 @@ webhook:
 
 Events are color-coded, stored in the database, and you can click any event to view the full JSON payload.
 
+The receiver is also what makes the **Overview** page work over a time range. `listRooms()` only reports what exists right now, and LiveKit OSS keeps no history, so the dashboard folds every room and participant event into its own tables and aggregates those. Without webhooks configured, Overview reads zero the moment the last call hangs up — and **session capture** never fires, because `room_started` is how it learns a room exists. Figures a self-hosted server genuinely cannot supply (client OS, negotiated transport, geo-IP — all LiveKit Cloud analytics fields) say so instead of showing a misleading zero.
+
 ## Sandbox
 
-Sandbox apps let you quickly spin up frontend templates for testing agents. Created from **Settings > Sandbox**.
+Sandbox apps let you quickly spin up frontend templates for testing agents. Created from **Sandboxes**.
 
 - Apps are proxied through the dashboard at `http://localhost:3000/sandbox/{name}`
 - No direct port access needed — the dashboard handles routing
@@ -206,9 +214,42 @@ It speaks the HTTP+SSE transport the LiveKit agents MCP plugin expects and expos
 
 Secret names must be valid environment variable names. Values are masked in the UI and can only be revealed by owners and admins.
 
+## Agent console
+
+**Agents > (pick one) > Console** is where you test an agent against a real room. It dispatches the **deployed** agent by name, joins the room itself, and puts everything it can see in one screen: a voice stage, a session rail, and a resizable dock of tabs.
+
+Three ways to take a turn, and they mix freely in one session:
+
+| Mode | How | When |
+|---|---|---|
+| **Browser** | Publishes your microphone into the room | The default — fastest loop |
+| **SIP** | Either direction: **call out** (the console dials a number or SIP address through an outbound trunk, with the agent already in the room) or **call in** (you dial one of your inbound numbers and the console attaches to whichever room the dispatch rule creates, silent) | Testing the telephony path with real codecs and jitter |
+| **Typing** | The composer under the transcript sends on the `lk.chat` topic | No microphone, or checking exactly what the agent does with a given sentence |
+
+Typed turns are real turns: the agent's session treats the text as user input, interrupts whatever it was saying, and answers out loud. They never pass through STT, so the transcript marks them with a keyboard glyph — a typed line is not evidence of what the microphone heard.
+
+Dialling one of your *own* inbound numbers loops the call out through a trunk and back in through a dispatch rule, which means the answer depends on that rule: with an agent attached you get two agents talking to each other. The panel says so before you press Call.
+
+The dock:
+
+| Tab | Shows |
+|---|---|
+| **Audio** | Live scopes off each track (agent, your mic, a dialled caller) and the session's saved recordings |
+| **Events** | The tracing timeline over the event log, with the transcript beside it |
+| **Session** | Room name and SID, connection state, timings, identities |
+| **Participants** | Everyone in the room, their tracks and attributes |
+| **Metrics** | A time-aligned metrics timeline, per-turn latency traces (EOU → LLM TTFT → TTS TTFB) and every raw metric row |
+| **Models** | Token, character and audio usage rolled up per model |
+
+Metrics arrive on the `lk.metrics` room topic. An agent deployed before console metrics existed publishes none — open it in the builder and deploy again.
+
+Nothing here is lost when the tab closes: the session is written to history when it ends, which is the next section.
+
 ## Session history and storage
 
 A console session is recorded in the browser — the agent's audio, your side, and the mix — and uploaded when it ends. Its events, metrics and transcript are saved with it, so **Sessions > History** can replay the whole call: the same timeline, transcript and metrics panels as the live console, driven by the recording instead of a room. Clicking a transcript line or an event seeks the audio to that instant.
+
+The list filters by agent and searches **inside transcripts**, so "what did we say about refunds" finds the call rather than the room name. Sessions are selectable in bulk — shift-click for a range — and deleting one takes its audio with it, since half an artefact is worse than none.
 
 **Settings > Storage** decides where the audio goes:
 
@@ -230,7 +271,7 @@ The above needs a console tab open — it is the browser that records. A phone c
 webhook:
   api_key: devkey
   urls:
-    - http://localhost:3010/api/webhooks/livekit
+    - http://localhost:3000/api/webhooks/livekit   # the port your dashboard runs on
 ```
 
 Worth knowing before you switch it on:
@@ -238,8 +279,10 @@ Worth knowing before you switch it on:
 - **It is off by default and applies to rooms that start after the change.** A call already in progress is not joined.
 - **Every call is recorded, including calls from real phone numbers.** Whether that is legal where you operate, and who you have to tell, is your call to make.
 - **Store the audio** can be turned off on its own, leaving the transcript and event log.
-- A per-session cap (60 minutes by default) stops one forgotten room from filling the disk.
+- A per-session cap (60 minutes by default, 12 hours maximum) stops one forgotten room from filling the disk.
 - A console tab wins: if one is in the room it keeps recording, and the capture keeps only the transcript as a backstop, so you never get two copies of the same call.
+
+There is no extra service to run. The dashboard spawns one detached child process per room (`observer/session-observer.mjs`), which joins the room, mixes the audio, and drops a `<capture>.json` + `<capture>.wav` pair into `data/session-captures`. The observer holds no dashboard credentials — only a room token — so adoption is the dashboard's job: the JSON becomes a history row and the WAV goes through the same storage backend as a console recording. Adoption runs when the room closes and again whenever the history page is listed, so a capture written while the dashboard was restarting is picked up on the next page load rather than lost. Because the children are detached, restarting the dashboard does not cut off calls that are still being recorded.
 
 ## API Keys
 
@@ -321,7 +364,7 @@ AGENT_PYTHON_BIN=/path/to/python3
 
 ## REST API
 
-Every dashboard feature is reachable over REST — 70 endpoints, documented in-app at **/api-docs** with a curl sample per endpoint.
+Nearly every dashboard feature is reachable over REST. **/api-docs** documents 75 of them in-app with a curl sample each; session history (`/api/sessions`), session capture (`/api/sessions/capture`), storage (`/api/storage`) and console recordings (`/api/agents/{name}/recordings`) work the same way but are not in that reference yet.
 
 ### Authentication
 
@@ -370,8 +413,12 @@ Integration tests over the real API — actual routes, database, and LiveKit ser
 | `tests/livekit-keys.test.mjs` | Issued keys, the key crypto, gateway translation |
 | `tests/core.test.mjs` | Agents, rooms, overview, metrics, secrets, providers, sandboxes, webhooks |
 | `tests/media.test.mjs` | Egress, ingress, telephony — validation always, data when the services are up |
+| `tests/tools.test.mjs` | The tool library: HTTP, client and MCP tools, and the URL/scheme validation |
+| `tests/openapi.test.mjs` | The OpenAPI importer — tool-name normalisation, parameter mapping (offline, no server) |
+| `tests/mcp-example.test.mjs` | The example MCP server over SSE + POST; skips unless `npm run mcp:example` is up |
+| `tests/wav-mixer.test.mjs` | The session observer's audio mixer, where an off-by-one shifts a whole recording out of sync (offline) |
 
-Tests that need the gateway or an unavailable LiveKit service skip themselves rather than fail.
+Tests that need the gateway, the MCP example or an unavailable LiveKit service skip themselves rather than fail.
 
 ## Database
 
@@ -386,7 +433,9 @@ POSTGRES_PASSWORD=your_password
 POSTGRES_DB=livekit
 ```
 
-Tables are auto-created on first run.
+Tables are auto-created on first run, and columns added by later versions are migrated in on boot — both dialects are kept in step, so switching engines does not need a schema dump.
+
+Some configuration lives in the database rather than in `.env`, because it is edited in the UI and has to survive a redeploy: **storage** (the backend and its encrypted credentials), **session capture** (on/off, audio, the per-session cap), providers, secrets and issued keys. Session history, the recordings index and the webhook-derived analytics (`console_sessions`, `session_recordings`, `room_sessions`, `participant_sessions`) live here too; the audio itself does not — see [Session history and storage](#session-history-and-storage).
 
 ## Telephony Providers
 
@@ -441,15 +490,21 @@ An inbound trunk needs the SIP port reachable **from the provider**, which `loca
 
 ## Roles
 
-| Permission | Admin | Member |
-|---|---|---|
-| View all pages | Yes | Yes |
-| Manage agents, telephony, egress/ingress | Yes | No |
-| Manage settings, API keys, webhooks | Yes | No |
-| Manage providers and secrets | Yes | No |
-| Reveal secret values | Yes | No |
-| Invite and remove members | Yes | No |
-| Create and delete sandbox apps | Yes | No |
+Three roles. The first account to self-register is the **owner**; everyone else arrives by invite.
+
+| Permission | Owner | Admin | Member |
+|---|---|---|---|
+| View all pages | Yes | Yes | Yes |
+| Manage agents, telephony, egress/ingress | Yes | Yes | No |
+| Manage settings, storage, API keys, webhooks | Yes | Yes | No |
+| Manage providers and secrets | Yes | Yes | No |
+| Reveal secret values | Yes | Yes | No |
+| Create and delete sandbox apps | Yes | Yes | No |
+| Delete session history and recordings | Yes | Yes | No |
+| Invite members | Yes | No | No |
+| Remove members | Yes | Yes, except owners | No |
+
+Members are deliberately more than read-only in one place: they can run a console session, and it saves its own history. Deleting one still needs an admin.
 
 ## Project Structure
 
@@ -458,25 +513,40 @@ src/
   app/
     (auth)/              Login, register, invite flow
     (dashboard)/         All dashboard pages
-      agents/            Agent list, builder
-      sessions/          Live room sessions
+      agents/            Agent list, builder, tool library, per-agent console
+      sessions/          Live rooms, and history/ with the replay view
       telephony/         Calls, dispatch rules, phone numbers, SIP trunks
       egresses/          Media export
       ingresses/         Media import
-      settings/          Project, providers, secrets, team members, API keys, webhooks
+      settings/          Project, storage, providers, secrets, team members, keys, webhooks
+      api-docs/          In-app REST reference
     api/                 REST endpoints
     sandbox/             Sandbox proxy routes
   components/
     ui/                  shadcn/ui (Button, Card, Badge, Dialog, Select, etc.)
     livekit/             Dashboard components (sidebar, stat-card, charts, data-table, top-bar)
+      console/           Session panels shared by the live console and the replay view
   lib/
     auth.ts              Session management, RBAC helpers
     db.ts                Database abstraction (SQLite + PostgreSQL)
     livekit.ts           LiveKit server SDK clients
     providers.ts         Model provider types, model refs, built-in provider seeds
+    agent-runner.ts      Spawns and supervises deployed Python agents
     sandbox.ts           Sandbox process management
+    storage.ts           Local-disk / S3-compatible object storage (SigV4, no AWS SDK)
+    console-sessions.ts  Session history shapes and serialisation
+    console-recordings.ts  The recordings index over the storage backend
+    session-observer.ts  Supervises one capture child process per live room
+    session-capture.ts   Adopts what the observers write into history
+    overview-stats.ts    Rebuilds Overview analytics from the webhook event log
     utils.ts             Tailwind class merge utility
   middleware.ts          Auth guard + sandbox proxy routing
+observer/                Room recorder run as a child process (rtc-node, no dashboard access)
+gateway/                 API-key translating proxy (see API Keys)
+mcp-example/             Example MCP server for the tool library
+agents/                  preview_agent.py, used by the builder's live preview
+tests/                   Integration + offline tests
+data/                    Runtime state: database, agent + observer logs, recordings, captures
 example/
   agent-starter-react/   Web Voice Agent frontend (Next.js)
   agent-starter-python/  Python voice agent (OpenAI STT/LLM/TTS)
@@ -491,6 +561,7 @@ example/
 - [shadcn/ui](https://ui.shadcn.com) + [Radix UI](https://www.radix-ui.com) — components
 - [LiveKit Server SDK](https://docs.livekit.io) — room, agent, egress, ingress, SIP APIs
 - [LiveKit Components React](https://docs.livekit.io/reference/components/react/) — agent session UI
+- [@livekit/rtc-node](https://github.com/livekit/node-sdks) — lets the session observer join a room as a participant and read its audio
 - [better-sqlite3](https://github.com/WiseLibs/better-sqlite3) / [pg](https://node-postgres.com) — database
 - [bcryptjs](https://github.com/dcodeIO/bcrypt.js) — password hashing
 - [Framer Motion](https://www.framer.com/motion) — animations
