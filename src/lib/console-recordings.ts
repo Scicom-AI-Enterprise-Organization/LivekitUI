@@ -1,19 +1,27 @@
 import fs from "fs";
 import path from "path";
+import { ensureDb, type DbSessionRecording } from "./db";
+import { dbTimeToIso } from "./console-sessions";
+import { deleteObject, getObject, putObject } from "./storage";
 
 /**
- * Console session audio, stored on disk next to agent logs.
+ * Console session audio.
  *
- * The browser records the session (agent output, and the mix of agent + your
- * microphone) and uploads it here when the session ends, so a call can still be
- * listened to after the page is closed.
+ * The browser records a session (the agent alone, your side alone, and the mix)
+ * and uploads it here when the session ends, so a call can be listened to after
+ * the page is closed — and replayed from Sessions → History alongside its
+ * events and transcript.
+ *
+ * The bytes go to whatever Settings → Storage points at (the dashboard's disk,
+ * or an S3-compatible bucket). The index lives in the database, which is what
+ * makes recordings queryable across agents and survivable across redeploys.
  */
 
-/** `user` is your microphone alone, `agent` is its TTS alone, `mixed` is both. */
+/** `user` is your microphone or the caller, `agent` its TTS, `mixed` both. */
 export type RecordingKind = "mixed" | "agent" | "user";
 
 export interface RecordingMeta {
-  /** File name on disk, also the id used by the API. */
+  /** Identifies the recording within an agent, and names the stored object. */
   file: string;
   agent: string;
   room: string;
@@ -28,6 +36,8 @@ export interface RecordingMeta {
    */
   startedAt: string;
   createdAt: string;
+  /** Which backend holds the bytes: "local" or "s3". */
+  storage: string;
 }
 
 /** Rejects anything that could escape the recordings directory. */
@@ -41,18 +51,6 @@ function slug(value: string): string {
   return value.replace(/[^a-zA-Z0-9._-]/g, "-").slice(0, 120);
 }
 
-function getRecordingsRoot(): string {
-  const dir = path.join(process.cwd(), "data", "console-recordings");
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  return dir;
-}
-
-function getAgentRecordingsDir(agent: string): string {
-  const dir = path.join(getRecordingsRoot(), slug(agent));
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  return dir;
-}
-
 function extensionFor(mimeType: string): string {
   if (mimeType.includes("ogg")) return "ogg";
   if (mimeType.includes("mp4")) return "mp4";
@@ -61,7 +59,86 @@ function extensionFor(mimeType: string): string {
   return "webm";
 }
 
-export function saveRecording(
+function toIso(value: unknown): string {
+  return dbTimeToIso(value, new Date().toISOString());
+}
+
+function toMeta(row: DbSessionRecording): RecordingMeta {
+  return {
+    file: row.file,
+    agent: row.agent_name,
+    room: row.room,
+    kind: row.kind as RecordingKind,
+    mimeType: row.mime_type,
+    bytes: row.bytes,
+    durationMs: row.duration_ms,
+    startedAt: toIso(row.started_at),
+    createdAt: toIso(row.created_at),
+    storage: row.storage,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Legacy import
+// ---------------------------------------------------------------------------
+
+/**
+ * Recordings written before the index existed are described by a JSON sidecar
+ * next to the audio. They are adopted into the database on first read so the
+ * upgrade does not look like data loss. The audio itself does not move — those
+ * rows keep `storage = "local"`.
+ */
+let legacyImported = false;
+
+async function importLegacyRecordings(): Promise<void> {
+  if (legacyImported) return;
+  legacyImported = true;
+
+  const root = path.join(process.cwd(), "data", "console-recordings");
+  if (!fs.existsSync(root)) return;
+
+  const db = await ensureDb();
+
+  for (const dir of fs.readdirSync(root)) {
+    const agentDir = path.join(root, dir);
+    if (!fs.statSync(agentDir).isDirectory()) continue;
+
+    for (const entry of fs.readdirSync(agentDir)) {
+      if (!entry.endsWith(".json")) continue;
+      try {
+        const meta = JSON.parse(fs.readFileSync(path.join(agentDir, entry), "utf8")) as
+          Partial<RecordingMeta> & { file?: string; agent?: string };
+        if (!meta.file || !meta.agent) continue;
+        if (!fs.existsSync(path.join(agentDir, meta.file))) continue;
+        if (await db.findSessionRecording(meta.agent, meta.file)) continue;
+
+        const createdAt = meta.createdAt || new Date().toISOString();
+        await db.addSessionRecording({
+          agentName: meta.agent,
+          room: meta.room || meta.file.replace(/-(mixed|agent|user)\.[a-z0-9]+$/, ""),
+          kind: meta.kind || "mixed",
+          file: meta.file,
+          storage: "local",
+          objectKey: `${dir}/${meta.file}`,
+          mimeType: meta.mimeType || "audio/webm",
+          bytes: meta.bytes || 0,
+          durationMs: meta.durationMs || 0,
+          startedAt:
+            meta.startedAt ||
+            new Date(new Date(createdAt).getTime() - (meta.durationMs || 0)).toISOString(),
+        });
+      } catch {
+        // A malformed sidecar should not stop the rest from being adopted.
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Recordings
+// ---------------------------------------------------------------------------
+
+export async function saveRecording(
   agent: string,
   input: {
     room: string;
@@ -72,86 +149,71 @@ export function saveRecording(
     startedAtMs?: number;
     data: Buffer;
   }
-): RecordingMeta {
-  const dir = getAgentRecordingsDir(agent);
+): Promise<RecordingMeta> {
   const file = `${slug(input.room)}-${input.kind}.${extensionFor(input.mimeType)}`;
+  const key = `${slug(agent)}/${file}`;
 
-  fs.writeFileSync(path.join(dir, file), input.data);
+  const stored = await putObject(key, input.data, input.mimeType || "audio/webm");
 
   const startedAtMs =
     input.startedAtMs && Number.isFinite(input.startedAtMs)
       ? input.startedAtMs
       : Date.now() - input.durationMs;
 
-  const meta: RecordingMeta = {
-    file,
-    agent,
+  const db = await ensureDb();
+  const row = await db.addSessionRecording({
+    agentName: agent,
     room: input.room,
     kind: input.kind,
-    mimeType: input.mimeType,
+    file,
+    storage: stored.storage,
+    objectKey: stored.objectKey,
+    mimeType: input.mimeType || "audio/webm",
     bytes: input.data.byteLength,
     durationMs: input.durationMs,
     startedAt: new Date(startedAtMs).toISOString(),
-    createdAt: new Date().toISOString(),
-  };
-  fs.writeFileSync(path.join(dir, `${file}.json`), JSON.stringify(meta, null, 2));
+  });
 
-  return meta;
+  return toMeta(row);
 }
 
-/** Fills in `startedAt` for sidecars written before it was recorded. */
-function withStartedAt(meta: RecordingMeta): RecordingMeta {
-  if (meta.startedAt) return meta;
-  const created = new Date(meta.createdAt).getTime();
-  return {
-    ...meta,
-    startedAt: new Date(created - (meta.durationMs || 0)).toISOString(),
-  };
+export async function listRecordings(agent: string): Promise<RecordingMeta[]> {
+  await importLegacyRecordings();
+  const db = await ensureDb();
+  return (await db.getSessionRecordings(agent)).map(toMeta);
 }
 
-export function listRecordings(agent: string): RecordingMeta[] {
-  const dir = getAgentRecordingsDir(agent);
-  const metas: RecordingMeta[] = [];
-
-  for (const entry of fs.readdirSync(dir)) {
-    if (!entry.endsWith(".json")) continue;
-    try {
-      const meta = JSON.parse(fs.readFileSync(path.join(dir, entry), "utf8")) as RecordingMeta;
-      // Skip sidecars whose audio was removed by hand.
-      if (fs.existsSync(path.join(dir, meta.file))) metas.push(withStartedAt(meta));
-    } catch {}
-  }
-
-  return metas.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+/** Every recording of one session, which is how the replay view finds audio. */
+export async function listRecordingsForRoom(room: string): Promise<RecordingMeta[]> {
+  await importLegacyRecordings();
+  const db = await ensureDb();
+  return (await db.getSessionRecordingsForRoom(room)).map(toMeta);
 }
 
-export function readRecording(
+export async function readRecording(
   agent: string,
   file: string
-): { data: Buffer; meta: RecordingMeta | null } | null {
+): Promise<{ data: Buffer; meta: RecordingMeta } | null> {
   assertSafeSegment(file, "file name");
-  const dir = getAgentRecordingsDir(agent);
-  const audioPath = path.join(dir, file);
-  if (!fs.existsSync(audioPath)) return null;
+  await importLegacyRecordings();
 
-  let meta: RecordingMeta | null = null;
-  try {
-    meta = withStartedAt(
-      JSON.parse(fs.readFileSync(`${audioPath}.json`, "utf8")) as RecordingMeta
-    );
-  } catch {}
+  const db = await ensureDb();
+  const row = await db.findSessionRecording(agent, file);
+  if (!row) return null;
 
-  return { data: fs.readFileSync(audioPath), meta };
+  const data = await getObject(row.storage, row.object_key);
+  if (!data) return null;
+
+  return { data, meta: toMeta(row) };
 }
 
-export function deleteRecording(agent: string, file: string): boolean {
+export async function deleteRecording(agent: string, file: string): Promise<boolean> {
   assertSafeSegment(file, "file name");
-  const dir = getAgentRecordingsDir(agent);
-  const audioPath = path.join(dir, file);
-  if (!fs.existsSync(audioPath)) return false;
+  const db = await ensureDb();
+  const row = await db.deleteSessionRecording(agent, file);
+  if (!row) return false;
 
-  fs.rmSync(audioPath, { force: true });
-  fs.rmSync(`${audioPath}.json`, { force: true });
+  await removeObjects([row]);
   return true;
 }
 
@@ -159,11 +221,43 @@ export function deleteRecording(agent: string, file: string): boolean {
  * Removes every recording for an agent. Used when the agent is deleted and when
  * the Console clears a session. Returns how many audio files went away.
  */
-export function deleteAgentRecordings(agent: string): number {
-  const dir = path.join(getRecordingsRoot(), slug(agent));
-  if (!fs.existsSync(dir)) return 0;
+export async function deleteAgentRecordings(agent: string): Promise<number> {
+  await importLegacyRecordings();
+  const db = await ensureDb();
+  const rows = await db.deleteSessionRecordingsForAgent(agent);
+  await removeObjects(rows);
+  return rows.length;
+}
 
-  const count = listRecordings(agent).length;
-  fs.rmSync(dir, { recursive: true, force: true });
-  return count;
+/** Removes the audio of one session, when its history entry is deleted. */
+export async function deleteRoomRecordings(room: string): Promise<number> {
+  const db = await ensureDb();
+  const rows = await db.deleteSessionRecordingsForRoom(room);
+  await removeObjects(rows);
+  return rows.length;
+}
+
+/**
+ * Deletes the stored objects behind rows that are already gone from the index.
+ * A storage backend that refuses is logged, not thrown: the index is the source
+ * of truth for the UI, and a stuck bucket must not block deleting a session.
+ */
+async function removeObjects(rows: DbSessionRecording[]): Promise<void> {
+  for (const row of rows) {
+    try {
+      await deleteObject(row.storage, row.object_key);
+      // Legacy sidecars are left behind by object deletion; clear them too.
+      if (row.storage === "local") {
+        fs.rmSync(
+          path.join(process.cwd(), "data", "console-recordings", `${row.object_key}.json`),
+          { force: true }
+        );
+      }
+    } catch (err) {
+      console.error(
+        `[recordings] could not delete ${row.storage}:${row.object_key}:`,
+        err instanceof Error ? err.message : err
+      );
+    }
+  }
 }

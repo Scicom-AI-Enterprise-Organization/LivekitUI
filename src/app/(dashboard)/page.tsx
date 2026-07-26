@@ -1,11 +1,12 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { ChevronRight, Info } from "lucide-react";
 import { TopBar } from "@/components/livekit/top-bar";
 import { StatCard, StatCardLarge } from "@/components/livekit/stat-card";
 import { DonutChart } from "@/components/livekit/donut-chart";
 import { LineChart, MultiLineChart } from "@/components/livekit/line-chart";
+import { DEFAULT_TIME_RANGE, type TimeRangeValue } from "@/components/livekit/time-range-picker";
 import { Card, CardContent } from "@/components/ui/card";
 import {
   Collapsible,
@@ -29,24 +30,59 @@ function InfoTip({ children }: { children: React.ReactNode }) {
   );
 }
 
-interface Overview {
-  rooms: { total: number; averageSize: number; averageDurationMin: number };
-  participants: { total: number; minutes: number };
-  agents: { activeSessions: number };
-  topCountries: { country: string; count: number }[];
-  platforms: { label: string; value: number }[];
-  connectionTypes: { label: string; value: number }[];
+interface DayPoint {
+  day: string;
+  value: number;
 }
 
-// Generate day labels from history data
-function buildDayLabels(count: number): string[] {
-  const labels: string[] = [];
-  for (let i = count - 1; i >= 0; i--) {
-    const d = new Date();
-    d.setDate(d.getDate() - i);
-    labels.push(d.toLocaleDateString("en-US", { month: "short", day: "numeric" }));
-  }
-  return labels;
+interface Overview {
+  hours: number;
+  rooms: { total: number; averageSize: number; averageDurationMin: number; perDay: DayPoint[] };
+  participants: {
+    total: number;
+    minutes: number;
+    byKind: { label: string; value: number }[];
+    perDay: DayPoint[];
+  };
+  agents: { sessions: number; minutes: number; concurrentPeak: number; activeSessions: number };
+  telephony: {
+    inboundSec: number;
+    outboundSec: number;
+    perDay: { day: string; inbound: number; outbound: number; total: number }[];
+  };
+  platforms: { label: string; value: number }[];
+  live: { available: boolean; rooms: number; participants: number; agents: number };
+  unavailable: {
+    platforms: string | null;
+    topCountries: string;
+    connectionTypes: string;
+  };
+}
+
+interface Metrics {
+  metricsAvailable: boolean;
+  connectionSuccess: number | null;
+  bandwidth: {
+    totalUpstream: { value: string; unit: string };
+    totalDownstream: { value: string; unit: string };
+    rangeUpstream: { value: string; unit: string };
+    rangeDownstream: { value: string; unit: string };
+    sinceServerBootUpstream: { value: string; unit: string };
+    sinceServerBootDownstream: { value: string; unit: string };
+    days: string[];
+    upstream: number[];
+    downstream: number[];
+  };
+}
+
+/** Distinct colors for a donut with more than one slice. */
+const KIND_COLORS = ["var(--primary)", "var(--secondary)", "var(--chart-2)", "var(--chart-3)"];
+
+/** Seconds rendered as the unit that keeps the number readable. */
+function formatDuration(seconds: number): { value: string; unit: string } {
+  if (seconds >= 3600) return { value: (seconds / 3600).toFixed(1), unit: "hr" };
+  if (seconds >= 60) return { value: String(Math.round(seconds / 60)), unit: "min" };
+  return { value: String(Math.round(seconds)), unit: "sec" };
 }
 
 // --- Collapsible section component ---
@@ -77,6 +113,34 @@ function Section({
   );
 }
 
+/**
+ * A metric the self-hosted server genuinely cannot report, with the reason.
+ * Distinct from "no data" — a zero here would read as a measurement.
+ */
+function Unavailable({
+  label,
+  reason,
+  infoText,
+}: {
+  label: string;
+  reason: string;
+  infoText?: string;
+}) {
+  return (
+    <Card className="py-0">
+      <CardContent className="p-4">
+        <div className="flex items-center gap-1.5 mb-3">
+          <span className="text-sm text-muted-foreground">{label}</span>
+          <InfoTip>{infoText || reason}</InfoTip>
+        </div>
+        <div className="flex h-20 items-center justify-center px-2 text-center text-xs text-muted-foreground">
+          Not reported by a self-hosted server
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
 // --- No data placeholder ---
 function NoData({ label, infoText }: { label: string; infoText?: string }) {
   return (
@@ -97,97 +161,79 @@ function NoData({ label, infoText }: { label: string; infoText?: string }) {
 }
 
 export default function OverviewPage() {
+  const [range, setRange] = useState<TimeRangeValue>(DEFAULT_TIME_RANGE);
   const [overview, setOverview] = useState<Overview | null>(null);
-  const [updatedAt, setUpdatedAt] = useState<Date | null>(null);
-  const [history, setHistory] = useState<{ time: string; sessions: number; agents: number }[]>([]);
-  const [bandwidth, setBandwidth] = useState<{
-    totalUpstream: { value: string; unit: string };
-    totalDownstream: { value: string; unit: string };
-    days: string[];
-    upstream: number[];
-    downstream: number[];
-  } | null>(null);
+  const [metrics, setMetrics] = useState<Metrics | null>(null);
+  const [metricsError, setMetricsError] = useState<string | null>(null);
+  // Seconds since the last successful poll. Held in state and ticked by an
+  // interval rather than read from Date.now() during render, which would be an
+  // impure read and would only ever repaint on the 10s fetch anyway.
+  const [staleSec, setStaleSec] = useState<number | null>(null);
+
+  const hours = range.hours;
+
+  const load = useCallback(() => {
+    fetch(`/api/overview?hours=${hours}`)
+      .then((r) => r.json())
+      .then((d) => {
+        if (!d.error) {
+          setOverview(d);
+          setStaleSec(0);
+        }
+      })
+      .catch(() => {});
+
+    fetch(`/api/metrics?hours=${hours}`)
+      .then(async (r) => ({ ok: r.ok, body: await r.json() }))
+      .then(({ ok, body }) => {
+        if (ok && body.bandwidth) {
+          setMetrics(body);
+          setMetricsError(null);
+        } else {
+          setMetrics(null);
+          setMetricsError(body.hint || body.error || "Metrics endpoint unavailable");
+        }
+      })
+      .catch(() => setMetricsError("Metrics endpoint unreachable"));
+  }, [hours]);
 
   useEffect(() => {
-    const tick = () => {
-      fetch("/api/overview")
-        .then((r) => r.json())
-        .then((d) => {
-          if (!d.error) {
-            setOverview(d);
-            setUpdatedAt(new Date());
-          }
-        })
-        .catch(() => {});
-      // Also fetch agent history for time-series graphs
-      fetch("/api/agents?hours=168")
-        .then((r) => r.json())
-        .then((d) => {
-          if (d.history) {
-            setHistory(d.history.map((h: { time: string; sessions: number; agents: number }) => ({
-              time: h.time,
-              sessions: h.sessions,
-              agents: h.agents,
-            })));
-          }
-        })
-        .catch(() => {});
-      // Scrape Prometheus metrics for bandwidth
-      fetch("/api/metrics")
-        .then((r) => r.json())
-        .then((d) => { if (d.bandwidth) setBandwidth(d.bandwidth); })
-        .catch(() => {});
-    };
-    tick();
-    const interval = setInterval(tick, 10_000);
+    load();
+    const interval = setInterval(load, 10_000);
     return () => clearInterval(interval);
+  }, [load]);
+
+  useEffect(() => {
+    const tick = setInterval(() => {
+      setStaleSec((s) => (s === null ? s : s + 1));
+    }, 1000);
+    return () => clearInterval(tick);
   }, []);
 
-  // Group history into daily buckets for graphs
-  const dailyBuckets = (() => {
-    const buckets = new Map<string, { sessions: number[]; agents: number[] }>();
-    for (const h of history) {
-      const day = new Date(h.time).toLocaleDateString("en-US", { month: "short", day: "numeric" });
-      if (!buckets.has(day)) buckets.set(day, { sessions: [], agents: [] });
-      const b = buckets.get(day)!;
-      b.sessions.push(h.sessions);
-      b.agents.push(h.agents);
-    }
-    return buckets;
-  })();
+  const lastUpdated = staleSec === null ? "Loading…" : `Updated ${staleSec}s ago`;
 
-  const dayLabels = dailyBuckets.size > 0
-    ? Array.from(dailyBuckets.keys())
-    : buildDayLabels(7);
+  const dayLabels = overview?.participants.perDay.map((p) => p.day) ?? [];
+  const participantData = overview?.participants.perDay.map((p) => p.value) ?? [];
+  const roomSessionsData = overview?.rooms.perDay.map((p) => p.value) ?? [];
 
-  // Participants per day = peak concurrent sessions seen that day
-  const participantData = dailyBuckets.size > 0
-    ? Array.from(dailyBuckets.values()).map((b) => Math.max(...b.sessions, 0))
-    : dayLabels.map(() => 0);
-
-  // Room sessions per day = peak concurrent sessions seen that day
-  const roomSessionsData = dailyBuckets.size > 0
-    ? Array.from(dailyBuckets.values()).map((b) => Math.max(...b.sessions, 0))
-    : dayLabels.map(() => 0);
-
-  // Connection sparkline = 100% when we have data, 0 when not
-  const connectionSparkline = dayLabels.map((_, i) => {
-    const vals = Array.from(dailyBuckets.values());
-    return i < vals.length && vals[i].sessions.length > 0 ? 100 : 0;
-  });
-
-  const lastUpdated = updatedAt
-    ? `Updated ${Math.max(0, Math.round((Date.now() - updatedAt.getTime()) / 1000))}s ago`
-    : "Loading…";
-
-  const topCountry = overview?.topCountries?.[0];
-  const topPlatform = overview?.platforms?.[0];
-  const topConnection = overview?.connectionTypes?.[0];
+  const connectionSuccess = metrics?.connectionSuccess ?? null;
+  const kinds = overview?.participants.byKind ?? [];
+  const platforms = overview?.platforms ?? [];
+  const inbound = formatDuration(overview?.telephony.inboundSec ?? 0);
+  const outbound = formatDuration(overview?.telephony.outboundSec ?? 0);
+  const telephonyDays = overview?.telephony.perDay ?? [];
+  const hasTelephony = telephonyDays.some((d) => d.total > 0);
 
   return (
     <div className="flex flex-col h-full">
       {/* Top bar */}
-      <TopBar title="Overview" showRefresh showTimeRange>
+      <TopBar
+        title="Overview"
+        showRefresh
+        showTimeRange
+        timeRange={range}
+        onTimeRangeChange={setRange}
+      >
         <span className="text-sm text-muted-foreground whitespace-nowrap">
           {lastUpdated}
         </span>
@@ -204,98 +250,103 @@ export default function OverviewPage() {
                   <span className="text-sm text-muted-foreground">
                     Connection Success
                   </span>
-                  <InfoTip>Percentage of clients that successfully established a WebRTC connection in the selected time range.</InfoTip>
+                  <InfoTip>
+                    Share of sessions that got past signalling to a working WebRTC connection
+                    (<code>rtc_success</code> ÷ <code>signal_connected</code>), counted by the
+                    LiveKit server since it started.
+                  </InfoTip>
                 </div>
-                <div className="flex items-baseline gap-1 mb-3">
-                  <span className="text-2xl font-semibold text-primary">100</span>
-                  <span className="text-sm text-muted-foreground">%</span>
-                </div>
-                <LineChart
-                  data={connectionSparkline}
-                  height={80}
-                  viewBoxWidth={300}
-                  color="var(--primary)"
-                  dashed
-                  className="opacity-60"
-                />
-              </CardContent>
-            </Card>
-
-            {/* Platform */}
-            <Card className="py-0">
-              <CardContent className="p-4">
-                <div className="flex items-center gap-1.5 mb-3">
-                  <span className="text-sm text-muted-foreground">
-                    Platform
-                  </span>
-                  <InfoTip>Breakdown of operating systems used by participants who joined sessions.</InfoTip>
-                </div>
-                {topPlatform ? (
-                  <DonutChart
-                    segments={[{ label: topPlatform.label, value: topPlatform.value, color: "var(--primary)" }]}
-                    size={80}
-                    strokeWidth={6}
-                  />
+                {connectionSuccess === null ? (
+                  <div className="flex h-[104px] items-center justify-center text-xs text-muted-foreground">
+                    {metricsError ? "Metrics unavailable" : "No connections yet"}
+                  </div>
                 ) : (
-                  <div className="flex items-center justify-center h-20 text-xs text-muted-foreground">No data</div>
+                  <>
+                    <div className="flex items-baseline gap-1 mb-3">
+                      <span className="text-2xl font-semibold text-primary">
+                        {connectionSuccess}
+                      </span>
+                      <span className="text-sm text-muted-foreground">%</span>
+                    </div>
+                    <LineChart
+                      data={participantData.map((v) => (v > 0 ? connectionSuccess : 0))}
+                      height={80}
+                      viewBoxWidth={300}
+                      color="var(--primary)"
+                      dashed
+                      className="opacity-60"
+                    />
+                  </>
                 )}
               </CardContent>
             </Card>
 
-            {/* Connection Type */}
+            {/* Platform */}
+            {platforms.length > 0 ? (
+              <Card className="py-0">
+                <CardContent className="p-4">
+                  <div className="flex items-center gap-1.5 mb-3">
+                    <span className="text-sm text-muted-foreground">Platform</span>
+                    <InfoTip>
+                      Operating system of participants who joined through the dashboard, which
+                      stamps it on the token it issues. Clients connecting with their own tokens
+                      are not counted — a self-hosted server does not record platform itself.
+                    </InfoTip>
+                  </div>
+                  <DonutChart
+                    segments={platforms.map((p, i) => ({
+                      label: p.label,
+                      value: p.value,
+                      color: KIND_COLORS[i % KIND_COLORS.length],
+                    }))}
+                    size={80}
+                    strokeWidth={6}
+                  />
+                </CardContent>
+              </Card>
+            ) : (
+              <Unavailable
+                label="Platform"
+                reason={overview?.unavailable.platforms ?? ""}
+                infoText={overview?.unavailable.platforms ?? undefined}
+              />
+            )}
+
+            {/* Participant kind — the breakdown this server can actually report */}
             <Card className="py-0">
               <CardContent className="p-4">
                 <div className="flex items-center gap-1.5 mb-3">
-                  <span className="text-sm text-muted-foreground">
-                    Connection Type
-                  </span>
-                  <InfoTip>Transport protocol used (UDP, TCP, or TURN-relay) by participant connections.</InfoTip>
+                  <span className="text-sm text-muted-foreground">Participant Kind</span>
+                  <InfoTip>
+                    How participants reached the server — browser WebRTC, a SIP phone leg, or an
+                    agent worker. Replaces the Cloud-only UDP/TCP/TURN breakdown, which a
+                    self-hosted server does not report.
+                  </InfoTip>
                 </div>
-                {topConnection ? (
+                {kinds.length > 0 ? (
                   <DonutChart
-                    segments={[{ label: topConnection.label, value: topConnection.value, color: "var(--primary)" }]}
+                    segments={kinds.map((k, i) => ({
+                      label: k.label,
+                      value: k.value,
+                      color: KIND_COLORS[i % KIND_COLORS.length],
+                    }))}
                     size={80}
                     strokeWidth={6}
                   />
                 ) : (
-                  <div className="flex items-center justify-center h-20 text-xs text-muted-foreground">No data</div>
+                  <div className="flex items-center justify-center h-20 text-xs text-muted-foreground">
+                    No sessions in this range
+                  </div>
                 )}
               </CardContent>
             </Card>
 
             {/* Top Countries */}
-            <Card className="py-0">
-              <CardContent className="p-4">
-                <div className="flex items-center gap-1.5 mb-3">
-                  <span className="text-sm text-muted-foreground">
-                    Top Countries
-                  </span>
-                  <InfoTip>Geographic distribution of participants by country (based on IP geolocation).</InfoTip>
-                </div>
-                <table className="w-full text-xs">
-                  <thead>
-                    <tr className="text-muted-foreground border-b border-border">
-                      <th className="text-left font-medium pb-1.5">Country</th>
-                      <th className="text-right font-medium pb-1.5">Count</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {overview?.topCountries?.length ? (
-                      overview.topCountries.map((c) => (
-                        <tr key={c.country} className="text-foreground/70">
-                          <td className="py-1.5">{c.country}</td>
-                          <td className="text-right">{c.count}</td>
-                        </tr>
-                      ))
-                    ) : (
-                      <tr>
-                        <td colSpan={2} className="py-3 text-center text-muted-foreground">No data</td>
-                      </tr>
-                    )}
-                  </tbody>
-                </table>
-              </CardContent>
-            </Card>
+            <Unavailable
+              label="Top Countries"
+              reason={overview?.unavailable.topCountries ?? ""}
+              infoText={overview?.unavailable.topCountries ?? undefined}
+            />
           </div>
         </Section>
 
@@ -306,6 +357,7 @@ export default function OverviewPage() {
               label="WebRTC Participant Minutes"
               value={overview?.participants.minutes ?? 0}
               unit="min"
+              infoText="Time browser participants spent connected, summed over the selected range. SIP and agent participants are counted separately."
             />
             <Card className="py-0">
               <CardContent className="p-5">
@@ -315,13 +367,21 @@ export default function OverviewPage() {
                   </span>
                   <InfoTip>Total participant-minutes broken down by participant kind (WebRTC, SIP, agent).</InfoTip>
                 </div>
-                <DonutChart
-                  segments={[
-                    { label: "WebRTC participant minutes", value: overview?.participants.minutes ?? 0, color: "var(--primary)" },
-                  ]}
-                  size={90}
-                  strokeWidth={7}
-                />
+                {kinds.length > 0 ? (
+                  <DonutChart
+                    segments={kinds.map((k, i) => ({
+                      label: `${k.label} (${k.value} min)`,
+                      value: k.value,
+                      color: KIND_COLORS[i % KIND_COLORS.length],
+                    }))}
+                    size={90}
+                    strokeWidth={7}
+                  />
+                ) : (
+                  <div className="flex items-center justify-center h-[90px] text-xs text-muted-foreground">
+                    No participants in this range
+                  </div>
+                )}
               </CardContent>
             </Card>
             <Card className="py-0">
@@ -330,15 +390,21 @@ export default function OverviewPage() {
                   <span className="text-sm text-muted-foreground">
                     Participants
                   </span>
-                  <InfoTip>Number of participants connected per day in the selected time range.</InfoTip>
+                  <InfoTip>Number of participants that joined per day in the selected time range.</InfoTip>
                 </div>
-                <LineChart
-                  data={participantData}
-                  labels={dayLabels}
-                  height={160}
-                  color="var(--primary)"
-                  fillColor="var(--primary)"
-                />
+                {participantData.length > 0 ? (
+                  <LineChart
+                    data={participantData}
+                    labels={dayLabels}
+                    height={160}
+                    color="var(--primary)"
+                    fillColor="var(--primary)"
+                  />
+                ) : (
+                  <div className="flex items-center justify-center h-[160px] text-xs text-muted-foreground">
+                    No data for the selected time range
+                  </div>
+                )}
               </CardContent>
             </Card>
           </div>
@@ -349,15 +415,23 @@ export default function OverviewPage() {
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
             <StatCard
               label="Total Upstream"
-              value={bandwidth?.totalUpstream.value ?? "0"}
-              unit={bandwidth?.totalUpstream.unit ?? "B"}
-              infoText="Total bytes relayed upstream through the LiveKit server since tracking started."
+              value={metrics?.bandwidth.totalUpstream.value ?? "0"}
+              unit={metrics?.bandwidth.totalUpstream.unit ?? "B"}
+              infoText={
+                `Media bytes clients have sent to the server, accumulated by the dashboard across every restart. ` +
+                `This server has counted ${metrics?.bandwidth.sinceServerBootUpstream.value ?? "0"} ` +
+                `${metrics?.bandwidth.sinceServerBootUpstream.unit ?? "B"} since it last booted.`
+              }
             />
             <StatCard
               label="Total Downstream"
-              value={bandwidth?.totalDownstream.value ?? "0"}
-              unit={bandwidth?.totalDownstream.unit ?? "B"}
-              infoText="Total bytes relayed downstream through the LiveKit server since tracking started."
+              value={metrics?.bandwidth.totalDownstream.value ?? "0"}
+              unit={metrics?.bandwidth.totalDownstream.unit ?? "B"}
+              infoText={
+                `Media bytes the server has sent to clients, accumulated by the dashboard across every restart. ` +
+                `This server has counted ${metrics?.bandwidth.sinceServerBootDownstream.value ?? "0"} ` +
+                `${metrics?.bandwidth.sinceServerBootDownstream.unit ?? "B"} since it last booted.`
+              }
             />
             <Card className="py-0">
               <CardContent className="p-5">
@@ -365,20 +439,28 @@ export default function OverviewPage() {
                   <span className="text-sm text-muted-foreground">
                     Data Transfer
                   </span>
-                  <InfoTip>Upstream and downstream bandwidth consumed by all sessions per day. Scraped from Prometheus metrics.</InfoTip>
+                  <InfoTip>
+                    Bandwidth per day, measured as the rise in the server&apos;s byte counters
+                    between dashboard polls. Traffic that flowed while the dashboard was down is
+                    not counted — nothing records it.
+                  </InfoTip>
                 </div>
-                {bandwidth && bandwidth.days.length > 0 ? (
+                {metricsError ? (
+                  <div className="flex h-[100px] items-center justify-center px-2 text-center text-xs text-muted-foreground">
+                    {metricsError}
+                  </div>
+                ) : metrics && metrics.bandwidth.days.length > 0 ? (
                   <MultiLineChart
                     series={[
-                      { data: bandwidth.downstream, color: "var(--secondary)", label: "Downstream" },
-                      { data: bandwidth.upstream, color: "var(--primary)", label: "Upstream" },
+                      { data: metrics.bandwidth.downstream, color: "var(--secondary)", label: "Downstream" },
+                      { data: metrics.bandwidth.upstream, color: "var(--primary)", label: "Upstream" },
                     ]}
-                    labels={bandwidth.days}
+                    labels={metrics.bandwidth.days}
                     height={100}
                   />
                 ) : (
                   <div className="flex items-center justify-center h-[100px] text-xs text-muted-foreground">
-                    Collecting bandwidth data from Prometheus...
+                    Collecting bandwidth samples…
                   </div>
                 )}
               </CardContent>
@@ -392,18 +474,18 @@ export default function OverviewPage() {
             <StatCard
               label="Total Room Sessions"
               value={overview?.rooms.total ?? 0}
-              infoText="Total number of room sessions created in the selected time range."
+              infoText="Room sessions started in the selected time range."
             />
             <StatCard
               label="Average Room Size"
               value={overview?.rooms.averageSize ?? 0}
-              infoText="Mean number of participants per room across all sessions."
+              infoText="Mean number of participants per room, across rooms that had at least one."
             />
             <StatCard
               label="Average Room Duration"
               value={overview?.rooms.averageDurationMin ?? 0}
               unit="min"
-              infoText="Mean duration of a room session from creation to last participant leaving."
+              infoText="Mean time from room creation to the room closing. Rooms still open count up to now."
             />
             <Card className="py-0">
               <CardContent className="p-4">
@@ -413,13 +495,19 @@ export default function OverviewPage() {
                   </span>
                   <InfoTip>Number of room sessions started per day in the selected time range.</InfoTip>
                 </div>
-                <LineChart
-                  data={roomSessionsData}
-                  labels={dayLabels}
-                  height={120}
-                  color="var(--primary)"
-                  fillColor="var(--primary)"
-                />
+                {roomSessionsData.length > 0 ? (
+                  <LineChart
+                    data={roomSessionsData}
+                    labels={dayLabels}
+                    height={120}
+                    color="var(--primary)"
+                    fillColor="var(--primary)"
+                  />
+                ) : (
+                  <div className="flex items-center justify-center h-[120px] text-xs text-muted-foreground">
+                    No data for the selected time range
+                  </div>
+                )}
               </CardContent>
             </Card>
           </div>
@@ -427,9 +515,28 @@ export default function OverviewPage() {
 
         {/* Agents */}
         <Section title="Agents">
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-            <StatCard label="Agent Session Minutes" value={overview?.participants.minutes ?? 0} unit="min" />
-            <StatCard label="Concurrent Agent Sessions" value={overview?.agents.activeSessions ?? 0} />
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+            <StatCard
+              label="Agent Session Minutes"
+              value={overview?.agents.minutes ?? 0}
+              unit="min"
+              infoText="Time agent workers spent joined to rooms in the selected range."
+            />
+            <StatCard
+              label="Agent Sessions"
+              value={overview?.agents.sessions ?? 0}
+              infoText="Number of times an agent joined a room in the selected range."
+            />
+            <StatCard
+              label="Peak Concurrent Agents"
+              value={overview?.agents.concurrentPeak ?? 0}
+              infoText="Most agents connected at the same moment during the selected range."
+            />
+            <StatCard
+              label="Agents Connected Now"
+              value={overview?.agents.activeSessions ?? 0}
+              infoText="Agent participants in rooms that are live right now."
+            />
           </div>
         </Section>
 
@@ -442,30 +549,39 @@ export default function OverviewPage() {
                   <span className="text-sm text-muted-foreground">
                     Minutes
                   </span>
-                  <InfoTip>Inbound and outbound telephony minutes consumed per day.</InfoTip>
+                  <InfoTip>
+                    Telephony minutes per day. Inbound legs are the ones a dispatch rule
+                    answered; outbound are calls placed from the dashboard.
+                  </InfoTip>
                 </div>
-                <MultiLineChart
-                  series={[
-                    { data: dayLabels.map(() => 0), color: "var(--secondary)", label: "Inbound" },
-                    { data: dayLabels.map(() => 0), color: "var(--primary)", label: "Outbound" },
-                    { data: dayLabels.map(() => 0), color: "var(--chart-2)", label: "Total", dashed: true },
-                  ]}
-                  labels={dayLabels}
-                  height={100}
-                />
+                {hasTelephony ? (
+                  <MultiLineChart
+                    series={[
+                      { data: telephonyDays.map((d) => d.inbound), color: "var(--secondary)", label: "Inbound" },
+                      { data: telephonyDays.map((d) => d.outbound), color: "var(--primary)", label: "Outbound" },
+                      { data: telephonyDays.map((d) => d.total), color: "var(--chart-2)", label: "Total", dashed: true },
+                    ]}
+                    labels={telephonyDays.map((d) => d.day)}
+                    height={100}
+                  />
+                ) : (
+                  <div className="flex items-center justify-center h-[100px] text-xs text-muted-foreground">
+                    No calls in the selected time range
+                  </div>
+                )}
               </CardContent>
             </Card>
             <StatCard
               label="Total Inbound"
-              value="0"
-              unit="sec"
-              infoText="Total seconds of inbound telephony traffic (calls received) in the time range."
+              value={inbound.value}
+              unit={inbound.unit}
+              infoText="Time SIP callers spent connected on legs answered by a dispatch rule."
             />
             <StatCard
               label="Total Outbound"
-              value="0"
-              unit="sec"
-              infoText="Total seconds of outbound telephony traffic (calls placed) in the time range."
+              value={outbound.value}
+              unit={outbound.unit}
+              infoText="Time SIP legs placed from the dashboard spent connected."
             />
           </div>
         </Section>

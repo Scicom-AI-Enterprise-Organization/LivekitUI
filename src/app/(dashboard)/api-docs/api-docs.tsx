@@ -84,7 +84,9 @@ function RoleBadge({ role }: { role?: Endpoint["role"] }) {
 function EndpointSection({ endpoint }: { endpoint: Endpoint }) {
   return (
     <section id={endpoint.id} className="scroll-mt-6 border-b pb-8 last:border-0">
-      <div className="grid gap-6 lg:grid-cols-2">
+      {/* Two even columns until there is real room, then the prose settles and the
+          extra width goes to the samples, which are the part that wraps badly. */}
+      <div className="grid gap-6 lg:grid-cols-2 xl:grid-cols-[minmax(0,32rem)_minmax(0,1fr)]">
         <div className="space-y-3">
           <div className="flex flex-wrap items-center gap-2">
             <MethodBadge method={endpoint.method} />
@@ -196,17 +198,17 @@ curl $BASE/api/auth/me -H "Authorization: Bearer $TOKEN"`;
 
       {/* Reference */}
       <div className="flex-1 overflow-y-auto">
-        <div className="mx-auto max-w-5xl space-y-10 p-6">
+        <div className="w-full space-y-10 p-6">
           <header className="space-y-4">
             <div>
               <h1 className="text-2xl font-semibold">API reference</h1>
-              <p className="mt-1 text-sm text-muted-foreground">
+              <p className="mt-1 max-w-3xl text-sm text-muted-foreground">
                 Every dashboard feature is reachable over REST. {ENDPOINTS.length} endpoints, all
                 accepting either the browser session cookie or a Bearer token.
               </p>
             </div>
 
-            <div className="grid gap-4 lg:grid-cols-2">
+            <div className="grid gap-4 lg:grid-cols-2 xl:grid-cols-[minmax(0,32rem)_minmax(0,1fr)]">
               <div className="space-y-3">
                 <div className="flex items-center gap-2">
                   <KeyRound className="size-4 text-muted-foreground" />
@@ -234,7 +236,7 @@ curl $BASE/api/auth/me -H "Authorization: Bearer $TOKEN"`;
             <div key={group.id} className="space-y-6">
               <div className="border-b pb-3">
                 <h2 className="text-lg font-semibold">{group.title}</h2>
-                <p className="mt-1 text-sm text-muted-foreground">{group.blurb}</p>
+                <p className="mt-1 max-w-3xl text-sm text-muted-foreground">{group.blurb}</p>
               </div>
               <div className="space-y-8">
                 {items.map((e) => (

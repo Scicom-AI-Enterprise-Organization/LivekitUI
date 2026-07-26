@@ -69,6 +69,13 @@ const PROTECTED = [
   ["GET", "/api/webhooks"],
   ["DELETE", "/api/webhooks"],
   ["POST", "/api/livekit/token"],
+  ["GET", "/api/sessions"],
+  ["POST", "/api/sessions"],
+  // Bulk delete must check the session before it looks at the body, or an
+  // anonymous caller would learn which ids exist from the validation error.
+  ["DELETE", "/api/sessions"],
+  ["GET", "/api/sessions/1"],
+  ["DELETE", "/api/sessions/1"],
 ];
 
 /** Deliberately reachable without a session. */

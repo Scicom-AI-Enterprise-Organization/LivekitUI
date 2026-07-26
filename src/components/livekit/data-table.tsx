@@ -3,7 +3,8 @@ import { Card } from "@/components/ui/card";
 
 interface Column {
   key: string;
-  label: string;
+  /** Usually a string; a node so a column can carry a control, e.g. select-all. */
+  label: React.ReactNode;
   sortable?: boolean;
   className?: string;
 }
@@ -13,9 +14,17 @@ interface DataTableProps {
   data: Record<string, React.ReactNode>[];
   emptyMessage?: string;
   className?: string;
+  /** Per-row classes, for state the cells cannot express — selection, say. */
+  rowClassName?: (row: Record<string, React.ReactNode>, index: number) => string | undefined;
 }
 
-export function DataTable({ columns, data, emptyMessage = "No results.", className }: DataTableProps) {
+export function DataTable({
+  columns,
+  data,
+  emptyMessage = "No results.",
+  className,
+  rowClassName,
+}: DataTableProps) {
   return (
     <Card className={cn("py-0 overflow-hidden", className)}>
       <table className="w-full">
@@ -48,7 +57,10 @@ export function DataTable({ columns, data, emptyMessage = "No results.", classNa
             data.map((row, i) => (
               <tr
                 key={i}
-                className="border-b last:border-b-0 hover:bg-accent/50 transition-colors"
+                className={cn(
+                  "border-b last:border-b-0 hover:bg-accent/50 transition-colors",
+                  rowClassName?.(row, i)
+                )}
               >
                 {columns.map((col) => (
                   <td key={col.key} className={cn("px-4 py-3 text-sm", col.className)}>

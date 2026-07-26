@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
 
 /**
@@ -100,19 +100,20 @@ export function EventTimeline({
 }) {
   const plotRef = useRef<HTMLDivElement>(null);
 
-  const model = useMemo(() => {
+  // While the session is live the axis has to follow the clock, not the last
+  // event: otherwise nothing moves between events and the state the agent is
+  // *currently* in never grows.
+  const [now, setNow] = useState(() => Date.now());
+  const [scrubbing, setScrubbing] = useState(false);
+  useEffect(() => {
+    if (!live) return;
+    const timer = setInterval(() => setNow(Date.now()), 250);
+    return () => clearInterval(timer);
+  }, [live]);
+
+  // Grouping only depends on the events, so it survives every clock tick.
+  const grouped = useMemo(() => {
     if (events.length === 0) return null;
-
-    const firstEvent = events[0].at;
-    const lastEvent = events[events.length - 1].at;
-
-    const start = Math.min(firstEvent, audioWindow?.start ?? firstEvent);
-    const end = Math.max(
-      lastEvent + 500,
-      audioWindow?.end ?? 0,
-      start + 1000
-    );
-    const span = end - start;
 
     const byLane = new Map<string, TimelineEvent[]>();
     for (const e of events) {
@@ -122,10 +123,31 @@ export function EventTimeline({
       byLane.set(key, bucket);
     }
 
-    // Agent state → spans between transitions.
-    const stateEvents = (byLane.get("agent") ?? []).filter((e) => e.name === "agent.state");
-    const spans = stateEvents.map((e, i) => {
-      const next = stateEvents[i + 1];
+    return {
+      first: events[0].at,
+      last: events[events.length - 1].at,
+      byLane,
+      stateEvents: (byLane.get("agent") ?? []).filter((e) => e.name === "agent.state"),
+    };
+  }, [events]);
+
+  if (!grouped) return null;
+
+  // Cheap enough to redo on every tick.
+  const model = (() => {
+    const start = Math.min(grouped.first, audioWindow?.start ?? grouped.first);
+    const end = Math.max(
+      grouped.last + 500,
+      audioWindow?.end ?? 0,
+      live ? now : 0,
+      start + 1000
+    );
+    const span = end - start;
+
+    // Agent state → spans between transitions; the last one runs to the edge,
+    // which is "now" during a live session.
+    const spans = grouped.stateEvents.map((e, i) => {
+      const next = grouped.stateEvents[i + 1];
       const spanEnd = next ? next.at : end;
       return {
         id: e.id,
@@ -147,10 +169,8 @@ export function EventTimeline({
       });
     }
 
-    return { start, end, span, byLane, spans, ticks };
-  }, [events, audioWindow]);
-
-  if (!model) return null;
+    return { start, end, span, byLane: grouped.byLane, spans, ticks };
+  })();
 
   const lanes = LANES.filter((lane) => (model.byLane.get(lane.key)?.length ?? 0) > 0);
 
@@ -169,13 +189,44 @@ export function EventTimeline({
       }
     : null;
 
-  const seekFromEvent = (clientX: number) => {
+  const seekFromClientX = (clientX: number) => {
     const plot = plotRef.current;
     if (!plot || !onSeek) return;
     const rect = plot.getBoundingClientRect();
     if (rect.width === 0) return;
     const ratio = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
     onSeek(model.start + ratio * model.span);
+  };
+
+  /**
+   * Press anywhere in the plot to seek there, and keep seeking while the
+   * pointer moves — so a click and a scrub are the same gesture. Listeners live
+   * for the duration of the drag only, and follow the pointer outside the plot
+   * so the playhead doesn't stick when you overshoot.
+   */
+  const startScrub = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (!onSeek) return;
+    event.preventDefault();
+    seekFromClientX(event.clientX);
+    setScrubbing(true);
+
+    const previousCursor = document.body.style.cursor;
+    document.body.style.cursor = "ew-resize";
+    document.body.style.userSelect = "none";
+
+    const move = (e: PointerEvent) => seekFromClientX(e.clientX);
+    const up = () => {
+      document.removeEventListener("pointermove", move);
+      document.removeEventListener("pointerup", up);
+      document.removeEventListener("pointercancel", up);
+      document.body.style.cursor = previousCursor;
+      document.body.style.userSelect = "";
+      setScrubbing(false);
+    };
+
+    document.addEventListener("pointermove", move);
+    document.addEventListener("pointerup", up);
+    document.addEventListener("pointercancel", up);
   };
 
   return (
@@ -201,8 +252,11 @@ export function EventTimeline({
         {/* Plot */}
         <div
           ref={plotRef}
-          className={cn("relative min-w-0 flex-1 space-y-1.5", onSeek && "cursor-pointer")}
-          onClick={(e) => seekFromEvent(e.clientX)}
+          className={cn(
+            "relative min-w-0 flex-1 space-y-1.5 touch-none",
+            onSeek && (scrubbing ? "cursor-ew-resize" : "cursor-pointer")
+          )}
+          onPointerDown={startScrub}
         >
           {/* Axis */}
           <div className="relative h-4 border-b border-border/60">
@@ -286,13 +340,28 @@ export function EventTimeline({
             );
           })}
 
+          {/* "Now" edge — makes it obvious the axis is still advancing. */}
+          {live && (
+            <div className="pointer-events-none absolute inset-y-0 right-0 w-px animate-pulse bg-emerald-500/70" />
+          )}
+
           {/* Playhead */}
           {playheadPct !== null && (
+            // Pointer events stay off so the press lands on the plot underneath
+            // — grabbing the line itself is just a scrub that starts on it.
             <div
-              className="pointer-events-none absolute inset-y-0 z-10 w-px bg-red-500"
+              className={cn(
+                "pointer-events-none absolute inset-y-0 z-10 bg-red-500",
+                scrubbing ? "w-0.5" : "w-px"
+              )}
               style={{ left: `${playheadPct}%` }}
             >
-              <div className="absolute -top-1 left-1/2 size-2 -translate-x-1/2 rounded-full bg-red-500" />
+              <div
+                className={cn(
+                  "absolute -top-1 left-1/2 -translate-x-1/2 rounded-full bg-red-500 transition-transform",
+                  scrubbing ? "size-3 ring-2 ring-red-500/30" : "size-2"
+                )}
+              />
             </div>
           )}
         </div>
@@ -310,7 +379,7 @@ export function EventTimeline({
               {state}
             </span>
           ))}
-          {onSeek && <span className="text-muted-foreground/70">· click to seek</span>}
+          {onSeek && <span className="text-muted-foreground/70">· click or drag to seek</span>}
           {live && <span className="text-muted-foreground/70">· live</span>}
         </div>
       )}

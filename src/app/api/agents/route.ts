@@ -235,7 +235,9 @@ export async function DELETE(request: NextRequest) {
   // Stop running process and remove generated files
   stopAgent(name);
   deleteAgentFiles(name);
-  deleteAgentRecordings(name);
+  // Session audio and the replayable history go with the agent.
+  await deleteAgentRecordings(name);
+  await (await ensureDb()).deleteConsoleSessionsForAgent(name);
 
   // Remove any lingering LiveKit dispatches so the agent stops reappearing
   // in the list (the /api/agents GET merges dispatch-derived entries with

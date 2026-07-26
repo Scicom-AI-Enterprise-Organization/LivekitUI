@@ -14,11 +14,15 @@ export async function GET(
 
   const { id, file } = await params;
 
-  let found: ReturnType<typeof readRecording>;
+  let found: Awaited<ReturnType<typeof readRecording>>;
   try {
-    found = readRecording(decodeURIComponent(id), decodeURIComponent(file));
-  } catch {
-    return NextResponse.json({ error: "Invalid file name" }, { status: 400 });
+    found = await readRecording(decodeURIComponent(id), decodeURIComponent(file));
+  } catch (err) {
+    // A storage backend that is misconfigured or unreachable is worth saying
+    // out loud — the alternative is an <audio> element that silently fails.
+    const message = err instanceof Error ? err.message : String(err);
+    const status = message.startsWith("Invalid") ? 400 : 502;
+    return NextResponse.json({ error: message }, { status });
   }
   if (!found) {
     return NextResponse.json({ error: "Recording not found" }, { status: 404 });
@@ -26,7 +30,7 @@ export async function GET(
 
   return new NextResponse(new Uint8Array(found.data), {
     headers: {
-      "Content-Type": found.meta?.mimeType || "audio/webm",
+      "Content-Type": found.meta.mimeType || "audio/webm",
       "Content-Length": String(found.data.byteLength),
       "Cache-Control": "private, max-age=3600",
       "Content-Disposition": `inline; filename="${decodeURIComponent(file)}"`,

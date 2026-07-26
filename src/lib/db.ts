@@ -137,6 +137,57 @@ export interface DbWebhookEvent {
   created_at: string;
 }
 
+/**
+ * A room's lifetime, recorded from `room_started` / `room_finished` webhooks.
+ * `ended_at` is null while the room is live.
+ */
+export interface DbRoomSession {
+  room_sid: string;
+  room_name: string;
+  started_at: string;
+  ended_at: string | null;
+  duration_sec: number;
+  max_participants: number;
+}
+
+/**
+ * One participant's stay in a room, from `participant_joined` /
+ * `participant_left`. `kind` is LiveKit's own classification (STANDARD, SIP,
+ * AGENT, EGRESS, INGRESS); `direction` is set for SIP only.
+ */
+export interface DbParticipantSession {
+  id: number;
+  room_sid: string;
+  room_name: string;
+  identity: string;
+  kind: string;
+  direction: string | null;
+  platform: string | null;
+  joined_at: string;
+  left_at: string | null;
+  duration_sec: number;
+}
+
+/** A reading of the server's cumulative byte counters, for the transfer chart. */
+export interface DbBandwidthSample {
+  id: number;
+  rx_bytes: number;
+  tx_bytes: number;
+  created_at: string;
+}
+
+/**
+ * A running total accumulated from a counter that resets. `total` is the sum of
+ * every rise we have observed; `last_value` is the previous raw reading, kept so
+ * the next delta can be computed.
+ */
+export interface DbMetricCounter {
+  name: string;
+  total: number;
+  last_value: number;
+  updated_at: string;
+}
+
 export interface DbApiKey {
   id: number;
   description: string;
@@ -189,6 +240,140 @@ export interface DbAgentPerSnapshot {
   created_at: string;
 }
 
+/**
+ * Where session audio is written. `local` is the dashboard's own disk;
+ * `s3` is any S3-compatible bucket (AWS, MinIO, R2, Wasabi…).
+ */
+export type StorageProvider = "local" | "s3";
+
+export interface DbStorageConfig {
+  id: number;
+  provider: StorageProvider;
+  endpoint: string;
+  region: string;
+  bucket: string;
+  prefix: string;
+  access_key_id: string;
+  /** AES-256-GCM blob; never leaves the server. */
+  secret_access_key_enc: string | null;
+  force_path_style: number;
+  updated_at: string;
+}
+
+export interface StorageConfigInput {
+  provider: StorageProvider;
+  endpoint: string;
+  region: string;
+  bucket: string;
+  prefix: string;
+  accessKeyId: string;
+  /** Already encrypted. `null` keeps whatever is stored. */
+  secretAccessKeyEnc: string | null;
+  forcePathStyle: boolean;
+}
+
+/**
+ * Server-side session capture, one row (id 1).
+ *
+ * Off unless someone turns it on: it joins every room the server reports and
+ * writes audio to storage, which is not a thing to start doing on its own.
+ */
+export interface DbCaptureConfig {
+  id: number;
+  enabled: number;
+  capture_audio: number;
+  max_minutes: number;
+  updated_at: string;
+}
+
+export interface CaptureConfigInput {
+  enabled: boolean;
+  captureAudio: boolean;
+  maxMinutes: number;
+}
+
+/**
+ * A finished console session, kept so it can be replayed later. Everything the
+ * live console holds in memory — events, metrics, transcript — is written here
+ * when the session ends; the audio lives in object storage and is joined back
+ * by room name.
+ */
+export interface DbConsoleSessionSummary {
+  id: number;
+  agent_name: string;
+  room: string;
+  room_sid: string | null;
+  /** "browser" or "sip" — how the human side of the call was carried. */
+  talk_mode: string;
+  started_at: string;
+  ended_at: string | null;
+  duration_ms: number;
+  participants: number;
+  event_count: number;
+  metric_count: number;
+  transcript_count: number;
+  agent_identity: string | null;
+  server_url: string;
+  /** "console" — a browser tab hosted it — or "observer" — captured server-side. */
+  source: string;
+  created_at: string;
+}
+
+export interface DbConsoleSession extends DbConsoleSessionSummary {
+  /** JSON: AgentConfigView — the model line-up at the time of the call. */
+  config: string;
+  events: string;
+  metrics: string;
+  transcript: string;
+}
+
+export interface ConsoleSessionInput {
+  agentName: string;
+  room: string;
+  roomSid: string | null;
+  talkMode: string;
+  startedAt: string;
+  endedAt: string | null;
+  durationMs: number;
+  participants: number;
+  agentIdentity: string | null;
+  serverUrl: string;
+  source: string;
+  config: string;
+  events: string;
+  metrics: string;
+  transcript: string;
+}
+
+export interface DbSessionRecording {
+  id: number;
+  agent_name: string;
+  room: string;
+  kind: string;
+  /** Identifies the recording within an agent, and names the stored object. */
+  file: string;
+  storage: string;
+  object_key: string;
+  mime_type: string;
+  bytes: number;
+  duration_ms: number;
+  started_at: string;
+  created_at: string;
+}
+
+export interface SessionRecordingInput {
+  agentName: string;
+  room: string;
+  kind: string;
+  file: string;
+  storage: string;
+  objectKey: string;
+  mimeType: string;
+  bytes: number;
+  durationMs: number;
+  startedAt: string;
+}
+
 export interface Database {
   init(): Promise<void>;
   findUserByEmail(email: string): Promise<DbUser | null>;
@@ -237,6 +422,24 @@ export interface Database {
   addWebhookEvent(event: string, room: string | null, participant: string | null, payload: string): Promise<void>;
   getWebhookEvents(limit: number): Promise<DbWebhookEvent[]>;
   clearWebhookEvents(): Promise<void>;
+  recordRoomStarted(sid: string, name: string, startedAt: string): Promise<void>;
+  recordRoomFinished(sid: string, endedAt: string, durationSec: number): Promise<void>;
+  recordParticipantJoined(p: {
+    roomSid: string;
+    roomName: string;
+    identity: string;
+    kind: string;
+    direction: string | null;
+    platform: string | null;
+    joinedAt: string;
+  }): Promise<void>;
+  recordParticipantLeft(roomSid: string, identity: string, leftAt: string, durationSec: number): Promise<void>;
+  getRoomSessions(hours: number): Promise<DbRoomSession[]>;
+  getParticipantSessions(hours: number): Promise<DbParticipantSession[]>;
+  addBandwidthSample(rxBytes: number, txBytes: number): Promise<void>;
+  getBandwidthSamples(hours: number): Promise<DbBandwidthSample[]>;
+  bumpMetricCounter(name: string, current: number): Promise<void>;
+  getMetricCounters(names: string[]): Promise<DbMetricCounter[]>;
   createAgent(name: string, config: string, status: string): Promise<DbAgent>;
   updateAgent(id: number, name: string, config: string, status: string): Promise<void>;
   getAllAgents(): Promise<DbAgent[]>;
@@ -269,6 +472,50 @@ export interface Database {
   findProviderBySlug(slug: string): Promise<DbProvider | null>;
   getProvider(id: number): Promise<DbProvider | null>;
   deleteProvider(id: number): Promise<void>;
+  getStorageConfig(): Promise<DbStorageConfig | null>;
+  saveStorageConfig(input: StorageConfigInput): Promise<void>;
+  getCaptureConfig(): Promise<DbCaptureConfig | null>;
+  saveCaptureConfig(input: CaptureConfigInput): Promise<void>;
+  /** Keyed on the room, so re-saving a session updates it instead of forking. */
+  upsertConsoleSession(input: ConsoleSessionInput): Promise<DbConsoleSession>;
+  listConsoleSessions(filter: {
+    agent?: string;
+    search?: string;
+    limit: number;
+    offset: number;
+  }): Promise<{ sessions: DbConsoleSessionSummary[]; total: number }>;
+  getConsoleSession(id: number): Promise<DbConsoleSession | null>;
+  findConsoleSessionByRoom(room: string): Promise<DbConsoleSession | null>;
+  deleteConsoleSession(id: number): Promise<DbConsoleSessionSummary | null>;
+  deleteConsoleSessionsForAgent(agentName: string): Promise<number>;
+  getConsoleSessionAgents(): Promise<string[]>;
+  addSessionRecording(input: SessionRecordingInput): Promise<DbSessionRecording>;
+  getSessionRecordings(agentName: string): Promise<DbSessionRecording[]>;
+  getSessionRecordingsForRoom(room: string): Promise<DbSessionRecording[]>;
+  findSessionRecording(agentName: string, file: string): Promise<DbSessionRecording | null>;
+  /** Returns the row that went away, so its object can be removed from storage. */
+  deleteSessionRecording(agentName: string, file: string): Promise<DbSessionRecording | null>;
+  deleteSessionRecordingsForAgent(agentName: string): Promise<DbSessionRecording[]>;
+  deleteSessionRecordingsForRoom(room: string): Promise<DbSessionRecording[]>;
+}
+
+/**
+ * Every session column except the three JSON payloads. A list of sessions with
+ * their events and metrics inlined would be megabytes; the detail view fetches
+ * those one session at a time.
+ */
+const SESSION_SUMMARY_COLUMNS = `id, agent_name, room, room_sid, talk_mode, started_at,
+  ended_at, duration_ms, participants, event_count, metric_count, transcript_count,
+  agent_identity, server_url, source, created_at`;
+
+/** Length of a JSON array, without trusting the caller to have counted. */
+function countJsonArray(json: string): number {
+  try {
+    const parsed = JSON.parse(json);
+    return Array.isArray(parsed) ? parsed.length : 0;
+  } catch {
+    return 0;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -440,6 +687,120 @@ function createSqliteDb(): Database {
           revoked_at TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_dashboard_tokens_hash ON dashboard_tokens(token_hash);
+        -- Where session audio is written. One row, id 1.
+        CREATE TABLE IF NOT EXISTS storage_config (
+          id INTEGER PRIMARY KEY,
+          provider TEXT NOT NULL DEFAULT 'local',
+          endpoint TEXT NOT NULL DEFAULT '',
+          region TEXT NOT NULL DEFAULT 'us-east-1',
+          bucket TEXT NOT NULL DEFAULT '',
+          prefix TEXT NOT NULL DEFAULT '',
+          access_key_id TEXT NOT NULL DEFAULT '',
+          secret_access_key_enc TEXT,
+          force_path_style INTEGER NOT NULL DEFAULT 1,
+          updated_at TEXT DEFAULT (datetime('now'))
+        );
+        -- Server-side session capture. One row, id 1, off until switched on in
+        -- Settings → Project: it observes every room and writes audio to storage.
+        CREATE TABLE IF NOT EXISTS capture_config (
+          id INTEGER PRIMARY KEY,
+          enabled INTEGER NOT NULL DEFAULT 0,
+          capture_audio INTEGER NOT NULL DEFAULT 1,
+          max_minutes INTEGER NOT NULL DEFAULT 60,
+          updated_at TEXT DEFAULT (datetime('now'))
+        );
+        -- A finished console session, replayable from /sessions/history.
+        CREATE TABLE IF NOT EXISTS console_sessions (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          agent_name TEXT NOT NULL,
+          room TEXT NOT NULL UNIQUE,
+          room_sid TEXT,
+          talk_mode TEXT NOT NULL DEFAULT 'browser',
+          started_at TEXT NOT NULL,
+          ended_at TEXT,
+          duration_ms INTEGER NOT NULL DEFAULT 0,
+          participants INTEGER NOT NULL DEFAULT 0,
+          event_count INTEGER NOT NULL DEFAULT 0,
+          metric_count INTEGER NOT NULL DEFAULT 0,
+          transcript_count INTEGER NOT NULL DEFAULT 0,
+          agent_identity TEXT,
+          server_url TEXT NOT NULL DEFAULT '',
+          -- Who wrote the row: "console" (a browser tab hosted the session) or
+          -- "observer" (the server-side capture recorded it). Precedence lives
+          -- in console-sessions.ts — an observer must not overwrite a console row.
+          source TEXT NOT NULL DEFAULT 'console',
+          config TEXT NOT NULL DEFAULT '{}',
+          events TEXT NOT NULL DEFAULT '[]',
+          metrics TEXT NOT NULL DEFAULT '[]',
+          transcript TEXT NOT NULL DEFAULT '[]',
+          created_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_console_sessions_agent
+          ON console_sessions(agent_name, started_at);
+        -- Audio for a session. The bytes live in storage; this is the index.
+        CREATE TABLE IF NOT EXISTS session_recordings (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          agent_name TEXT NOT NULL,
+          room TEXT NOT NULL,
+          kind TEXT NOT NULL,
+          file TEXT NOT NULL,
+          storage TEXT NOT NULL DEFAULT 'local',
+          object_key TEXT NOT NULL,
+          mime_type TEXT NOT NULL DEFAULT 'audio/webm',
+          bytes INTEGER NOT NULL DEFAULT 0,
+          duration_ms INTEGER NOT NULL DEFAULT 0,
+          started_at TEXT NOT NULL,
+          created_at TEXT DEFAULT (datetime('now')),
+          UNIQUE(agent_name, file)
+        );
+        CREATE INDEX IF NOT EXISTS idx_session_recordings_room ON session_recordings(room);
+        -- ── Overview analytics ──
+        -- LiveKit keeps no history: listRooms() returns only what is live right
+        -- now, and webhook_events is trimmed to the last 500 rows. These three
+        -- tables are the dashboard's own record, written by the webhook
+        -- receiver, so the Overview page can report a time range instead of an
+        -- instant.
+        CREATE TABLE IF NOT EXISTS room_sessions (
+          room_sid TEXT PRIMARY KEY,
+          room_name TEXT NOT NULL,
+          started_at TEXT NOT NULL,
+          ended_at TEXT,
+          duration_sec INTEGER NOT NULL DEFAULT 0,
+          max_participants INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS idx_room_sessions_started ON room_sessions(started_at);
+        CREATE TABLE IF NOT EXISTS participant_sessions (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          room_sid TEXT NOT NULL,
+          room_name TEXT NOT NULL,
+          identity TEXT NOT NULL,
+          kind TEXT NOT NULL DEFAULT 'STANDARD',
+          direction TEXT,
+          platform TEXT,
+          joined_at TEXT NOT NULL,
+          left_at TEXT,
+          duration_sec INTEGER NOT NULL DEFAULT 0,
+          UNIQUE(room_sid, identity, joined_at)
+        );
+        CREATE INDEX IF NOT EXISTS idx_participant_sessions_joined
+          ON participant_sessions(joined_at);
+        CREATE TABLE IF NOT EXISTS bandwidth_samples (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          rx_bytes INTEGER NOT NULL DEFAULT 0,
+          tx_bytes INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_bandwidth_samples_time ON bandwidth_samples(created_at);
+        -- Lifetime totals. The server's own counters run from its last boot, so
+        -- reading them directly means every restart looks like the traffic never
+        -- happened. This accumulates the rise between readings instead, which
+        -- survives restarts of both the server and the dashboard.
+        CREATE TABLE IF NOT EXISTS metric_counters (
+          name TEXT PRIMARY KEY,
+          total INTEGER NOT NULL DEFAULT 0,
+          last_value INTEGER NOT NULL DEFAULT 0,
+          updated_at TEXT DEFAULT (datetime('now'))
+        );
       `);
 
       // ── Migrations for databases created before a column existed ──
@@ -466,6 +827,16 @@ function createSqliteDb(): Database {
       ).map((c) => c.name);
       if (!providerCols.includes("audio_format")) {
         db.exec("ALTER TABLE providers ADD COLUMN audio_format TEXT");
+      }
+
+      const sessionCols = (
+        db.prepare("PRAGMA table_info(console_sessions)").all() as { name: string }[]
+      ).map((c) => c.name);
+      // Rows that predate server-side capture were all written by a console tab.
+      if (!sessionCols.includes("source")) {
+        db.exec(
+          "ALTER TABLE console_sessions ADD COLUMN source TEXT NOT NULL DEFAULT 'console'"
+        );
       }
 
       // Seed the built-in providers once, so a fresh install has a model list.
@@ -695,6 +1066,110 @@ function createSqliteDb(): Database {
       db.prepare("DELETE FROM webhook_events").run();
     },
 
+    async recordRoomStarted(sid, name, startedAt) {
+      db.prepare(
+        `INSERT INTO room_sessions (room_sid, room_name, started_at) VALUES (?, ?, ?)
+         ON CONFLICT(room_sid) DO UPDATE SET room_name = excluded.room_name`
+      ).run(sid, name, startedAt);
+      db.prepare("DELETE FROM room_sessions WHERE started_at < datetime('now', '-60 days')").run();
+    },
+
+    async recordRoomFinished(sid, endedAt, durationSec) {
+      // A room can finish without us having seen it start (dashboard restarted
+      // mid-session). Insert a stub in that case so the session still counts.
+      db.prepare(
+        `INSERT INTO room_sessions (room_sid, room_name, started_at, ended_at, duration_sec)
+         VALUES (?, '', datetime(?, '-' || ? || ' seconds'), ?, ?)
+         ON CONFLICT(room_sid) DO UPDATE SET ended_at = excluded.ended_at, duration_sec = excluded.duration_sec`
+      ).run(sid, endedAt, Math.round(durationSec), endedAt, Math.round(durationSec));
+      db.prepare(
+        `UPDATE room_sessions SET max_participants = (
+           SELECT COUNT(*) FROM participant_sessions WHERE room_sid = ?
+         ) WHERE room_sid = ?`
+      ).run(sid, sid);
+    },
+
+    async recordParticipantJoined(p) {
+      db.prepare(
+        `INSERT INTO participant_sessions
+           (room_sid, room_name, identity, kind, direction, platform, joined_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(room_sid, identity, joined_at) DO NOTHING`
+      ).run(p.roomSid, p.roomName, p.identity, p.kind, p.direction, p.platform, p.joinedAt);
+      db.prepare("DELETE FROM participant_sessions WHERE joined_at < datetime('now', '-60 days')").run();
+    },
+
+    async recordParticipantLeft(roomSid, identity, leftAt, durationSec) {
+      // Close the most recent open stay — an identity can rejoin the same room.
+      db.prepare(
+        `UPDATE participant_sessions SET left_at = ?, duration_sec = ?
+         WHERE id = (
+           SELECT id FROM participant_sessions
+           WHERE room_sid = ? AND identity = ? AND left_at IS NULL
+           ORDER BY joined_at DESC LIMIT 1
+         )`
+      ).run(leftAt, Math.round(durationSec), roomSid, identity);
+    },
+
+    async getRoomSessions(hours) {
+      return db.prepare(
+        "SELECT * FROM room_sessions WHERE started_at >= datetime('now', '-' || ? || ' hours') ORDER BY started_at ASC"
+      ).all(hours) as DbRoomSession[];
+    },
+
+    async getParticipantSessions(hours) {
+      return db.prepare(
+        "SELECT * FROM participant_sessions WHERE joined_at >= datetime('now', '-' || ? || ' hours') ORDER BY joined_at ASC"
+      ).all(hours) as DbParticipantSession[];
+    },
+
+    async addBandwidthSample(rxBytes, txBytes) {
+      // The Overview polls every 10s, but the chart buckets by day — keeping
+      // every reading would be ~500k rows over the 60-day window for no extra
+      // resolution. One a minute is plenty, and deltas across the sparser
+      // samples still account for all the traffic in between.
+      db.prepare(
+        `INSERT INTO bandwidth_samples (rx_bytes, tx_bytes)
+         SELECT ?, ?
+         WHERE NOT EXISTS (
+           SELECT 1 FROM bandwidth_samples WHERE created_at > datetime('now', '-55 seconds')
+         )`
+      ).run(Math.round(rxBytes), Math.round(txBytes));
+      db.prepare("DELETE FROM bandwidth_samples WHERE created_at < datetime('now', '-60 days')").run();
+    },
+
+    async getBandwidthSamples(hours) {
+      return db.prepare(
+        "SELECT * FROM bandwidth_samples WHERE created_at >= datetime('now', '-' || ? || ' hours') ORDER BY created_at ASC"
+      ).all(hours) as DbBandwidthSample[];
+    },
+
+    async bumpMetricCounter(name, current) {
+      const value = Math.max(0, Math.round(current));
+      // A reading below the last one means the server restarted and its counter
+      // went back to zero, so everything it reports now is new traffic. Add the
+      // whole reading rather than dropping the interval.
+      db.prepare(
+        `INSERT INTO metric_counters (name, total, last_value) VALUES (?, ?, ?)
+         ON CONFLICT(name) DO UPDATE SET
+           total = total + CASE
+             WHEN excluded.last_value >= metric_counters.last_value
+               THEN excluded.last_value - metric_counters.last_value
+             ELSE excluded.last_value
+           END,
+           last_value = excluded.last_value,
+           updated_at = datetime('now')`
+      ).run(name, value, value);
+    },
+
+    async getMetricCounters(names) {
+      if (names.length === 0) return [];
+      const placeholders = names.map(() => "?").join(", ");
+      return db
+        .prepare(`SELECT * FROM metric_counters WHERE name IN (${placeholders})`)
+        .all(...names) as DbMetricCounter[];
+    },
+
     async createAgent(name, config, status) {
       const result = db.prepare(
         "INSERT INTO agents (name, config, status) VALUES (?, ?, ?)"
@@ -899,6 +1374,254 @@ function createSqliteDb(): Database {
     async deleteProvider(id) {
       db.prepare("DELETE FROM providers WHERE id = ?").run(id);
     },
+
+    // ── Storage ──
+
+    async getStorageConfig() {
+      return (db.prepare("SELECT * FROM storage_config WHERE id = 1").get() ??
+        null) as DbStorageConfig | null;
+    },
+
+    async saveStorageConfig(input) {
+      // A null secret means "keep the stored one", so it is only overwritten
+      // when the caller actually supplied a new value.
+      db.prepare(
+        `INSERT INTO storage_config
+           (id, provider, endpoint, region, bucket, prefix, access_key_id,
+            secret_access_key_enc, force_path_style, updated_at)
+         VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+         ON CONFLICT(id) DO UPDATE SET
+           provider = excluded.provider,
+           endpoint = excluded.endpoint,
+           region = excluded.region,
+           bucket = excluded.bucket,
+           prefix = excluded.prefix,
+           access_key_id = excluded.access_key_id,
+           secret_access_key_enc =
+             COALESCE(excluded.secret_access_key_enc, storage_config.secret_access_key_enc),
+           force_path_style = excluded.force_path_style,
+           updated_at = datetime('now')`
+      ).run(
+        input.provider,
+        input.endpoint,
+        input.region,
+        input.bucket,
+        input.prefix,
+        input.accessKeyId,
+        input.secretAccessKeyEnc,
+        input.forcePathStyle ? 1 : 0
+      );
+    },
+
+    async getCaptureConfig() {
+      return (db.prepare("SELECT * FROM capture_config WHERE id = 1").get() ??
+        null) as DbCaptureConfig | null;
+    },
+
+    async saveCaptureConfig(input) {
+      db.prepare(
+        `INSERT INTO capture_config (id, enabled, capture_audio, max_minutes, updated_at)
+         VALUES (1, ?, ?, ?, datetime('now'))
+         ON CONFLICT(id) DO UPDATE SET
+           enabled = excluded.enabled,
+           capture_audio = excluded.capture_audio,
+           max_minutes = excluded.max_minutes,
+           updated_at = datetime('now')`
+      ).run(input.enabled ? 1 : 0, input.captureAudio ? 1 : 0, input.maxMinutes);
+    },
+
+    // ── Console session history ──
+
+    async upsertConsoleSession(input) {
+      db.prepare(
+        `INSERT INTO console_sessions
+           (agent_name, room, room_sid, talk_mode, started_at, ended_at, duration_ms,
+            participants, event_count, metric_count, transcript_count, agent_identity,
+            server_url, source, config, events, metrics, transcript)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(room) DO UPDATE SET
+           room_sid = excluded.room_sid,
+           talk_mode = excluded.talk_mode,
+           ended_at = excluded.ended_at,
+           duration_ms = excluded.duration_ms,
+           participants = excluded.participants,
+           event_count = excluded.event_count,
+           metric_count = excluded.metric_count,
+           transcript_count = excluded.transcript_count,
+           agent_identity = excluded.agent_identity,
+           server_url = excluded.server_url,
+           source = excluded.source,
+           config = excluded.config,
+           events = excluded.events,
+           metrics = excluded.metrics,
+           transcript = excluded.transcript`
+      ).run(
+        input.agentName,
+        input.room,
+        input.roomSid,
+        input.talkMode,
+        input.startedAt,
+        input.endedAt,
+        input.durationMs,
+        input.participants,
+        countJsonArray(input.events),
+        countJsonArray(input.metrics),
+        countJsonArray(input.transcript),
+        input.agentIdentity,
+        input.serverUrl,
+        input.source,
+        input.config,
+        input.events,
+        input.metrics,
+        input.transcript
+      );
+
+      return db
+        .prepare("SELECT * FROM console_sessions WHERE room = ?")
+        .get(input.room) as DbConsoleSession;
+    },
+
+    async listConsoleSessions({ agent, search, limit, offset }) {
+      const where: string[] = [];
+      const args: unknown[] = [];
+      if (agent) {
+        where.push("agent_name = ?");
+        args.push(agent);
+      }
+      if (search) {
+        where.push("(room LIKE ? OR agent_name LIKE ? OR transcript LIKE ?)");
+        const like = `%${search}%`;
+        args.push(like, like, like);
+      }
+      const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";
+
+      const { n } = db
+        .prepare(`SELECT COUNT(*) as n FROM console_sessions ${clause}`)
+        .get(...args) as { n: number };
+
+      const sessions = db
+        .prepare(
+          `SELECT ${SESSION_SUMMARY_COLUMNS} FROM console_sessions ${clause}
+           ORDER BY started_at DESC LIMIT ? OFFSET ?`
+        )
+        .all(...args, limit, offset) as DbConsoleSessionSummary[];
+
+      return { sessions, total: n };
+    },
+
+    async getConsoleSession(id) {
+      return (db.prepare("SELECT * FROM console_sessions WHERE id = ?").get(id) ??
+        null) as DbConsoleSession | null;
+    },
+
+    async findConsoleSessionByRoom(room) {
+      return (db.prepare("SELECT * FROM console_sessions WHERE room = ?").get(room) ??
+        null) as DbConsoleSession | null;
+    },
+
+    async deleteConsoleSession(id) {
+      const row = db
+        .prepare(`SELECT ${SESSION_SUMMARY_COLUMNS} FROM console_sessions WHERE id = ?`)
+        .get(id) as DbConsoleSessionSummary | undefined;
+      if (!row) return null;
+      db.prepare("DELETE FROM console_sessions WHERE id = ?").run(id);
+      return row;
+    },
+
+    async deleteConsoleSessionsForAgent(agentName) {
+      const info = db
+        .prepare("DELETE FROM console_sessions WHERE agent_name = ?")
+        .run(agentName);
+      return info.changes as number;
+    },
+
+    async getConsoleSessionAgents() {
+      const rows = db
+        .prepare("SELECT DISTINCT agent_name FROM console_sessions ORDER BY agent_name")
+        .all() as { agent_name: string }[];
+      return rows.map((r) => r.agent_name);
+    },
+
+    // ── Session recordings ──
+
+    async addSessionRecording(input) {
+      db.prepare(
+        `INSERT INTO session_recordings
+           (agent_name, room, kind, file, storage, object_key, mime_type, bytes,
+            duration_ms, started_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(agent_name, file) DO UPDATE SET
+           room = excluded.room,
+           kind = excluded.kind,
+           storage = excluded.storage,
+           object_key = excluded.object_key,
+           mime_type = excluded.mime_type,
+           bytes = excluded.bytes,
+           duration_ms = excluded.duration_ms,
+           started_at = excluded.started_at,
+           created_at = datetime('now')`
+      ).run(
+        input.agentName,
+        input.room,
+        input.kind,
+        input.file,
+        input.storage,
+        input.objectKey,
+        input.mimeType,
+        input.bytes,
+        input.durationMs,
+        input.startedAt
+      );
+
+      return db
+        .prepare("SELECT * FROM session_recordings WHERE agent_name = ? AND file = ?")
+        .get(input.agentName, input.file) as DbSessionRecording;
+    },
+
+    async getSessionRecordings(agentName) {
+      return db
+        .prepare(
+          "SELECT * FROM session_recordings WHERE agent_name = ? ORDER BY created_at DESC"
+        )
+        .all(agentName) as DbSessionRecording[];
+    },
+
+    async getSessionRecordingsForRoom(room) {
+      return db
+        .prepare("SELECT * FROM session_recordings WHERE room = ? ORDER BY kind")
+        .all(room) as DbSessionRecording[];
+    },
+
+    async findSessionRecording(agentName, file) {
+      return (db
+        .prepare("SELECT * FROM session_recordings WHERE agent_name = ? AND file = ?")
+        .get(agentName, file) ?? null) as DbSessionRecording | null;
+    },
+
+    async deleteSessionRecording(agentName, file) {
+      const row = db
+        .prepare("SELECT * FROM session_recordings WHERE agent_name = ? AND file = ?")
+        .get(agentName, file) as DbSessionRecording | undefined;
+      if (!row) return null;
+      db.prepare("DELETE FROM session_recordings WHERE id = ?").run(row.id);
+      return row;
+    },
+
+    async deleteSessionRecordingsForAgent(agentName) {
+      const rows = db
+        .prepare("SELECT * FROM session_recordings WHERE agent_name = ?")
+        .all(agentName) as DbSessionRecording[];
+      db.prepare("DELETE FROM session_recordings WHERE agent_name = ?").run(agentName);
+      return rows;
+    },
+
+    async deleteSessionRecordingsForRoom(room) {
+      const rows = db
+        .prepare("SELECT * FROM session_recordings WHERE room = ?")
+        .all(room) as DbSessionRecording[];
+      db.prepare("DELETE FROM session_recordings WHERE room = ?").run(room);
+      return rows;
+    },
   };
 }
 
@@ -1080,6 +1803,123 @@ function createPostgresDb(): Database {
           revoked_at TIMESTAMPTZ
         );
         CREATE INDEX IF NOT EXISTS idx_dashboard_tokens_hash ON dashboard_tokens(token_hash);
+        -- Where session audio is written. One row, id 1.
+        CREATE TABLE IF NOT EXISTS storage_config (
+          id INTEGER PRIMARY KEY,
+          provider TEXT NOT NULL DEFAULT 'local',
+          endpoint TEXT NOT NULL DEFAULT '',
+          region TEXT NOT NULL DEFAULT 'us-east-1',
+          bucket TEXT NOT NULL DEFAULT '',
+          prefix TEXT NOT NULL DEFAULT '',
+          access_key_id TEXT NOT NULL DEFAULT '',
+          secret_access_key_enc TEXT,
+          force_path_style INTEGER NOT NULL DEFAULT 1,
+          updated_at TIMESTAMPTZ DEFAULT NOW()
+        );
+        -- Server-side session capture. One row, id 1, off until switched on in
+        -- Settings → Project: it observes every room and writes audio to storage.
+        CREATE TABLE IF NOT EXISTS capture_config (
+          id INTEGER PRIMARY KEY,
+          enabled INTEGER NOT NULL DEFAULT 0,
+          capture_audio INTEGER NOT NULL DEFAULT 1,
+          max_minutes INTEGER NOT NULL DEFAULT 60,
+          updated_at TIMESTAMPTZ DEFAULT NOW()
+        );
+        -- A finished console session, replayable from /sessions/history.
+        CREATE TABLE IF NOT EXISTS console_sessions (
+          id SERIAL PRIMARY KEY,
+          agent_name TEXT NOT NULL,
+          room TEXT NOT NULL UNIQUE,
+          room_sid TEXT,
+          talk_mode TEXT NOT NULL DEFAULT 'browser',
+          started_at TEXT NOT NULL,
+          ended_at TEXT,
+          duration_ms INTEGER NOT NULL DEFAULT 0,
+          participants INTEGER NOT NULL DEFAULT 0,
+          event_count INTEGER NOT NULL DEFAULT 0,
+          metric_count INTEGER NOT NULL DEFAULT 0,
+          transcript_count INTEGER NOT NULL DEFAULT 0,
+          agent_identity TEXT,
+          server_url TEXT NOT NULL DEFAULT '',
+          -- Who wrote the row: "console" (a browser tab hosted the session) or
+          -- "observer" (the server-side capture recorded it). Precedence lives
+          -- in console-sessions.ts — an observer must not overwrite a console row.
+          source TEXT NOT NULL DEFAULT 'console',
+          config TEXT NOT NULL DEFAULT '{}',
+          events TEXT NOT NULL DEFAULT '[]',
+          metrics TEXT NOT NULL DEFAULT '[]',
+          transcript TEXT NOT NULL DEFAULT '[]',
+          created_at TIMESTAMPTZ DEFAULT NOW()
+        );
+        -- Rows that predate server-side capture were all written by a console tab.
+        ALTER TABLE console_sessions
+          ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'console';
+        CREATE INDEX IF NOT EXISTS idx_console_sessions_agent
+          ON console_sessions(agent_name, started_at);
+        -- Audio for a session. The bytes live in storage; this is the index.
+        CREATE TABLE IF NOT EXISTS session_recordings (
+          id SERIAL PRIMARY KEY,
+          agent_name TEXT NOT NULL,
+          room TEXT NOT NULL,
+          kind TEXT NOT NULL,
+          file TEXT NOT NULL,
+          storage TEXT NOT NULL DEFAULT 'local',
+          object_key TEXT NOT NULL,
+          mime_type TEXT NOT NULL DEFAULT 'audio/webm',
+          bytes INTEGER NOT NULL DEFAULT 0,
+          duration_ms INTEGER NOT NULL DEFAULT 0,
+          started_at TEXT NOT NULL,
+          created_at TIMESTAMPTZ DEFAULT NOW(),
+          UNIQUE(agent_name, file)
+        );
+        CREATE INDEX IF NOT EXISTS idx_session_recordings_room ON session_recordings(room);
+        -- ── Overview analytics ──
+        -- LiveKit keeps no history: listRooms() returns only what is live right
+        -- now, and webhook_events is trimmed to the last 500 rows. These three
+        -- tables are the dashboard's own record, written by the webhook
+        -- receiver, so the Overview page can report a time range instead of an
+        -- instant.
+        CREATE TABLE IF NOT EXISTS room_sessions (
+          room_sid TEXT PRIMARY KEY,
+          room_name TEXT NOT NULL,
+          started_at TEXT NOT NULL,
+          ended_at TEXT,
+          duration_sec INTEGER NOT NULL DEFAULT 0,
+          max_participants INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS idx_room_sessions_started ON room_sessions(started_at);
+        CREATE TABLE IF NOT EXISTS participant_sessions (
+          id SERIAL PRIMARY KEY,
+          room_sid TEXT NOT NULL,
+          room_name TEXT NOT NULL,
+          identity TEXT NOT NULL,
+          kind TEXT NOT NULL DEFAULT 'STANDARD',
+          direction TEXT,
+          platform TEXT,
+          joined_at TEXT NOT NULL,
+          left_at TEXT,
+          duration_sec INTEGER NOT NULL DEFAULT 0,
+          UNIQUE(room_sid, identity, joined_at)
+        );
+        CREATE INDEX IF NOT EXISTS idx_participant_sessions_joined
+          ON participant_sessions(joined_at);
+        CREATE TABLE IF NOT EXISTS bandwidth_samples (
+          id SERIAL PRIMARY KEY,
+          rx_bytes BIGINT NOT NULL DEFAULT 0,
+          tx_bytes BIGINT NOT NULL DEFAULT 0,
+          created_at TIMESTAMPTZ DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_bandwidth_samples_time ON bandwidth_samples(created_at);
+        -- Lifetime totals. The server's own counters run from its last boot, so
+        -- reading them directly means every restart looks like the traffic never
+        -- happened. This accumulates the rise between readings instead, which
+        -- survives restarts of both the server and the dashboard.
+        CREATE TABLE IF NOT EXISTS metric_counters (
+          name TEXT PRIMARY KEY,
+          total BIGINT NOT NULL DEFAULT 0,
+          last_value BIGINT NOT NULL DEFAULT 0,
+          updated_at TIMESTAMPTZ DEFAULT NOW()
+        );
         ALTER TABLE providers ADD COLUMN IF NOT EXISTS audio_format TEXT;
       `);
 
@@ -1331,6 +2171,135 @@ function createPostgresDb(): Database {
       await pool.query("DELETE FROM webhook_events");
     },
 
+    async recordRoomStarted(sid, name, startedAt) {
+      await pool.query(
+        `INSERT INTO room_sessions (room_sid, room_name, started_at) VALUES ($1, $2, $3)
+         ON CONFLICT (room_sid) DO UPDATE SET room_name = EXCLUDED.room_name`,
+        [sid, name, startedAt]
+      );
+      await pool.query("DELETE FROM room_sessions WHERE started_at < to_char(NOW() - INTERVAL '60 days', 'YYYY-MM-DD HH24:MI:SS')");
+    },
+
+    async recordRoomFinished(sid, endedAt, durationSec) {
+      // A room can finish without us having seen it start (dashboard restarted
+      // mid-session). Insert a stub in that case so the session still counts.
+      const seconds = Math.round(durationSec);
+      await pool.query(
+        `INSERT INTO room_sessions (room_sid, room_name, started_at, ended_at, duration_sec)
+         VALUES ($1, '', to_char($2::timestamp - make_interval(secs => $3), 'YYYY-MM-DD HH24:MI:SS'), $2, $3)
+         ON CONFLICT (room_sid) DO UPDATE SET ended_at = EXCLUDED.ended_at, duration_sec = EXCLUDED.duration_sec`,
+        [sid, endedAt, seconds]
+      );
+      await pool.query(
+        `UPDATE room_sessions SET max_participants = (
+           SELECT COUNT(*) FROM participant_sessions WHERE room_sid = $1
+         ) WHERE room_sid = $1`,
+        [sid]
+      );
+    },
+
+    async recordParticipantJoined(p) {
+      await pool.query(
+        `INSERT INTO participant_sessions
+           (room_sid, room_name, identity, kind, direction, platform, joined_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
+         ON CONFLICT (room_sid, identity, joined_at) DO NOTHING`,
+        [p.roomSid, p.roomName, p.identity, p.kind, p.direction, p.platform, p.joinedAt]
+      );
+      await pool.query("DELETE FROM participant_sessions WHERE joined_at < to_char(NOW() - INTERVAL '60 days', 'YYYY-MM-DD HH24:MI:SS')");
+    },
+
+    async recordParticipantLeft(roomSid, identity, leftAt, durationSec) {
+      // Close the most recent open stay — an identity can rejoin the same room.
+      await pool.query(
+        `UPDATE participant_sessions SET left_at = $1, duration_sec = $2
+         WHERE id = (
+           SELECT id FROM participant_sessions
+           WHERE room_sid = $3 AND identity = $4 AND left_at IS NULL
+           ORDER BY joined_at DESC LIMIT 1
+         )`,
+        [leftAt, Math.round(durationSec), roomSid, identity]
+      );
+    },
+
+    async getRoomSessions(hours) {
+      const { rows } = await pool.query(
+        `SELECT * FROM room_sessions
+         WHERE started_at >= to_char(NOW() - make_interval(hours => $1), 'YYYY-MM-DD HH24:MI:SS')
+         ORDER BY started_at ASC`,
+        [hours]
+      );
+      return rows;
+    },
+
+    async getParticipantSessions(hours) {
+      const { rows } = await pool.query(
+        `SELECT * FROM participant_sessions
+         WHERE joined_at >= to_char(NOW() - make_interval(hours => $1), 'YYYY-MM-DD HH24:MI:SS')
+         ORDER BY joined_at ASC`,
+        [hours]
+      );
+      return rows;
+    },
+
+    async addBandwidthSample(rxBytes, txBytes) {
+      // The Overview polls every 10s, but the chart buckets by day — keeping
+      // every reading would be ~500k rows over the 60-day window for no extra
+      // resolution. One a minute is plenty, and deltas across the sparser
+      // samples still account for all the traffic in between.
+      await pool.query(
+        `INSERT INTO bandwidth_samples (rx_bytes, tx_bytes)
+         SELECT $1::bigint, $2::bigint
+         WHERE NOT EXISTS (
+           SELECT 1 FROM bandwidth_samples WHERE created_at > NOW() - INTERVAL '55 seconds'
+         )`,
+        [Math.round(rxBytes), Math.round(txBytes)]
+      );
+      await pool.query("DELETE FROM bandwidth_samples WHERE created_at < NOW() - INTERVAL '60 days'");
+    },
+
+    async getBandwidthSamples(hours) {
+      const { rows } = await pool.query(
+        "SELECT * FROM bandwidth_samples WHERE created_at >= NOW() - make_interval(hours => $1) ORDER BY created_at ASC",
+        [hours]
+      );
+      // BIGINT comes back as a string from pg; the chart needs numbers.
+      return rows.map((r: DbBandwidthSample) => ({
+        ...r,
+        rx_bytes: Number(r.rx_bytes),
+        tx_bytes: Number(r.tx_bytes),
+      }));
+    },
+
+    async bumpMetricCounter(name, current) {
+      const value = Math.max(0, Math.round(current));
+      // A reading below the last one means the server restarted and its counter
+      // went back to zero, so everything it reports now is new traffic. Add the
+      // whole reading rather than dropping the interval.
+      await pool.query(
+        `INSERT INTO metric_counters (name, total, last_value) VALUES ($1, $2, $2)
+         ON CONFLICT (name) DO UPDATE SET
+           total = metric_counters.total + CASE
+             WHEN EXCLUDED.last_value >= metric_counters.last_value
+               THEN EXCLUDED.last_value - metric_counters.last_value
+             ELSE EXCLUDED.last_value
+           END,
+           last_value = EXCLUDED.last_value,
+           updated_at = NOW()`,
+        [name, value]
+      );
+    },
+
+    async getMetricCounters(names) {
+      if (names.length === 0) return [];
+      const { rows } = await pool.query("SELECT * FROM metric_counters WHERE name = ANY($1)", [names]);
+      return rows.map((r: DbMetricCounter) => ({
+        ...r,
+        total: Number(r.total),
+        last_value: Number(r.last_value),
+      }));
+    },
+
     async createAgent(name, config, status) {
       const { rows } = await pool.query(
         "INSERT INTO agents (name, config, status) VALUES ($1, $2, $3) RETURNING *",
@@ -1557,6 +2526,255 @@ function createPostgresDb(): Database {
 
     async deleteProvider(id) {
       await pool.query("DELETE FROM providers WHERE id = $1", [id]);
+    },
+
+    // ── Storage ──
+
+    async getStorageConfig() {
+      const { rows } = await pool.query("SELECT * FROM storage_config WHERE id = 1");
+      return rows[0] || null;
+    },
+
+    async saveStorageConfig(input) {
+      // A null secret means "keep the stored one", so it is only overwritten
+      // when the caller actually supplied a new value.
+      await pool.query(
+        `INSERT INTO storage_config
+           (id, provider, endpoint, region, bucket, prefix, access_key_id,
+            secret_access_key_enc, force_path_style, updated_at)
+         VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, NOW())
+         ON CONFLICT (id) DO UPDATE SET
+           provider = EXCLUDED.provider,
+           endpoint = EXCLUDED.endpoint,
+           region = EXCLUDED.region,
+           bucket = EXCLUDED.bucket,
+           prefix = EXCLUDED.prefix,
+           access_key_id = EXCLUDED.access_key_id,
+           secret_access_key_enc =
+             COALESCE(EXCLUDED.secret_access_key_enc, storage_config.secret_access_key_enc),
+           force_path_style = EXCLUDED.force_path_style,
+           updated_at = NOW()`,
+        [
+          input.provider,
+          input.endpoint,
+          input.region,
+          input.bucket,
+          input.prefix,
+          input.accessKeyId,
+          input.secretAccessKeyEnc,
+          input.forcePathStyle ? 1 : 0,
+        ]
+      );
+    },
+
+    async getCaptureConfig() {
+      const { rows } = await pool.query("SELECT * FROM capture_config WHERE id = 1");
+      return (rows[0] ?? null) as DbCaptureConfig | null;
+    },
+
+    async saveCaptureConfig(input) {
+      await pool.query(
+        `INSERT INTO capture_config (id, enabled, capture_audio, max_minutes, updated_at)
+         VALUES (1, $1, $2, $3, NOW())
+         ON CONFLICT (id) DO UPDATE SET
+           enabled = EXCLUDED.enabled,
+           capture_audio = EXCLUDED.capture_audio,
+           max_minutes = EXCLUDED.max_minutes,
+           updated_at = NOW()`,
+        [input.enabled ? 1 : 0, input.captureAudio ? 1 : 0, input.maxMinutes]
+      );
+    },
+
+    // ── Console session history ──
+
+    async upsertConsoleSession(input) {
+      const { rows } = await pool.query(
+        `INSERT INTO console_sessions
+           (agent_name, room, room_sid, talk_mode, started_at, ended_at, duration_ms,
+            participants, event_count, metric_count, transcript_count, agent_identity,
+            server_url, source, config, events, metrics, transcript)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+         ON CONFLICT (room) DO UPDATE SET
+           room_sid = EXCLUDED.room_sid,
+           talk_mode = EXCLUDED.talk_mode,
+           ended_at = EXCLUDED.ended_at,
+           duration_ms = EXCLUDED.duration_ms,
+           participants = EXCLUDED.participants,
+           event_count = EXCLUDED.event_count,
+           metric_count = EXCLUDED.metric_count,
+           transcript_count = EXCLUDED.transcript_count,
+           agent_identity = EXCLUDED.agent_identity,
+           server_url = EXCLUDED.server_url,
+           source = EXCLUDED.source,
+           config = EXCLUDED.config,
+           events = EXCLUDED.events,
+           metrics = EXCLUDED.metrics,
+           transcript = EXCLUDED.transcript
+         RETURNING *`,
+        [
+          input.agentName,
+          input.room,
+          input.roomSid,
+          input.talkMode,
+          input.startedAt,
+          input.endedAt,
+          input.durationMs,
+          input.participants,
+          countJsonArray(input.events),
+          countJsonArray(input.metrics),
+          countJsonArray(input.transcript),
+          input.agentIdentity,
+          input.serverUrl,
+          input.source,
+          input.config,
+          input.events,
+          input.metrics,
+          input.transcript,
+        ]
+      );
+      return rows[0];
+    },
+
+    async listConsoleSessions({ agent, search, limit, offset }) {
+      const where: string[] = [];
+      const args: unknown[] = [];
+      if (agent) {
+        args.push(agent);
+        where.push(`agent_name = $${args.length}`);
+      }
+      if (search) {
+        args.push(`%${search}%`);
+        const n = args.length;
+        where.push(`(room ILIKE $${n} OR agent_name ILIKE $${n} OR transcript ILIKE $${n})`);
+      }
+      const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";
+
+      const { rows: countRows } = await pool.query(
+        `SELECT COUNT(*)::int AS n FROM console_sessions ${clause}`,
+        args
+      );
+      const { rows } = await pool.query(
+        `SELECT ${SESSION_SUMMARY_COLUMNS} FROM console_sessions ${clause}
+         ORDER BY started_at DESC LIMIT $${args.length + 1} OFFSET $${args.length + 2}`,
+        [...args, limit, offset]
+      );
+
+      return { sessions: rows, total: countRows[0]?.n || 0 };
+    },
+
+    async getConsoleSession(id) {
+      const { rows } = await pool.query("SELECT * FROM console_sessions WHERE id = $1", [id]);
+      return rows[0] || null;
+    },
+
+    async findConsoleSessionByRoom(room) {
+      const { rows } = await pool.query("SELECT * FROM console_sessions WHERE room = $1", [room]);
+      return rows[0] || null;
+    },
+
+    async deleteConsoleSession(id) {
+      const { rows } = await pool.query(
+        `DELETE FROM console_sessions WHERE id = $1 RETURNING ${SESSION_SUMMARY_COLUMNS}`,
+        [id]
+      );
+      return rows[0] || null;
+    },
+
+    async deleteConsoleSessionsForAgent(agentName) {
+      const result = await pool.query("DELETE FROM console_sessions WHERE agent_name = $1", [
+        agentName,
+      ]);
+      return result.rowCount || 0;
+    },
+
+    async getConsoleSessionAgents() {
+      const { rows } = await pool.query(
+        "SELECT DISTINCT agent_name FROM console_sessions ORDER BY agent_name"
+      );
+      return rows.map((r: { agent_name: string }) => r.agent_name);
+    },
+
+    // ── Session recordings ──
+
+    async addSessionRecording(input) {
+      const { rows } = await pool.query(
+        `INSERT INTO session_recordings
+           (agent_name, room, kind, file, storage, object_key, mime_type, bytes,
+            duration_ms, started_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+         ON CONFLICT (agent_name, file) DO UPDATE SET
+           room = EXCLUDED.room,
+           kind = EXCLUDED.kind,
+           storage = EXCLUDED.storage,
+           object_key = EXCLUDED.object_key,
+           mime_type = EXCLUDED.mime_type,
+           bytes = EXCLUDED.bytes,
+           duration_ms = EXCLUDED.duration_ms,
+           started_at = EXCLUDED.started_at,
+           created_at = NOW()
+         RETURNING *`,
+        [
+          input.agentName,
+          input.room,
+          input.kind,
+          input.file,
+          input.storage,
+          input.objectKey,
+          input.mimeType,
+          input.bytes,
+          input.durationMs,
+          input.startedAt,
+        ]
+      );
+      return rows[0];
+    },
+
+    async getSessionRecordings(agentName) {
+      const { rows } = await pool.query(
+        "SELECT * FROM session_recordings WHERE agent_name = $1 ORDER BY created_at DESC",
+        [agentName]
+      );
+      return rows;
+    },
+
+    async getSessionRecordingsForRoom(room) {
+      const { rows } = await pool.query(
+        "SELECT * FROM session_recordings WHERE room = $1 ORDER BY kind",
+        [room]
+      );
+      return rows;
+    },
+
+    async findSessionRecording(agentName, file) {
+      const { rows } = await pool.query(
+        "SELECT * FROM session_recordings WHERE agent_name = $1 AND file = $2",
+        [agentName, file]
+      );
+      return rows[0] || null;
+    },
+
+    async deleteSessionRecording(agentName, file) {
+      const { rows } = await pool.query(
+        "DELETE FROM session_recordings WHERE agent_name = $1 AND file = $2 RETURNING *",
+        [agentName, file]
+      );
+      return rows[0] || null;
+    },
+
+    async deleteSessionRecordingsForAgent(agentName) {
+      const { rows } = await pool.query(
+        "DELETE FROM session_recordings WHERE agent_name = $1 RETURNING *",
+        [agentName]
+      );
+      return rows;
+    },
+
+    async deleteSessionRecordingsForRoom(room) {
+      const { rows } = await pool.query(
+        "DELETE FROM session_recordings WHERE room = $1 RETURNING *",
+        [room]
+      );
+      return rows;
     },
   };
 }

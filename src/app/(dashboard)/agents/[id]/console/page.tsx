@@ -6,12 +6,20 @@
    The page always mounts a LiveKitRoom (with connect={false} until a session
    starts) so every panel can read room context without a second code path for
    the idle state. Events, metrics and transcript are accumulated in the outer
-   component so they survive the session ending, until "Clear events".
+   component so they survive the session ending, until "Clear events" — and are
+   posted to the session history when it ends, by useSessionPersistence.
+
+   Panels that are not about a *live* room — the transcript, the event log and
+   timeline, saved audio, metrics, model usage — live in
+   components/livekit/console/ and are shared with the replay view at
+   /sessions/history/[id]. What stays here needs the room: the voice stage, the
+   SIP panel, participants, RPC and DTMF.
    ──────────────────────────────────────────────────────────────────────────── */
 
-import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
+import { toast } from "sonner";
 import {
   LiveKitRoom,
   RoomAudioRenderer,
@@ -21,12 +29,14 @@ import {
   useRoomContext,
   useParticipants,
   useLocalParticipant,
+  useTracks,
   useTranscriptions,
 } from "@livekit/components-react";
 import "@livekit/components-styles";
 import {
   ConnectionState,
   RoomEvent,
+  Track,
   type Participant,
   type RemoteParticipant,
   type TrackPublication,
@@ -35,13 +45,14 @@ import {
   ArrowLeft,
   ChevronDown,
   ChevronUp,
-  Download,
   Loader2,
-  Pause,
+  Mic,
+  Phone,
+  PhoneIncoming,
+  PhoneOff,
+  PhoneOutgoing,
   Play,
   Settings2,
-  SkipBack,
-  SkipForward,
   Square,
   Trash2,
   TriangleAlert,
@@ -49,7 +60,6 @@ import {
   X,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { SipDialButton } from "@/components/livekit/sip-dial-button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -69,32 +79,37 @@ import {
   DialogFooter,
   DialogClose,
 } from "@/components/ui/dialog";
-import { Switch } from "@/components/ui/switch";
 import { cn } from "@/lib/utils";
 import { AudioScope } from "@/components/livekit/console/audio-scope";
-import {
-  EventTimeline,
-  TIMELINE_ACTIVE_WINDOW_MS,
-} from "@/components/livekit/console/event-timeline";
+import { rulesAnswering, type DispatchRuleSummary } from "@/lib/sip-loopback";
 import {
   useSessionRecorder,
   type SavedRecording,
 } from "@/components/livekit/console/use-session-recorder";
+import { useSessionPersistence } from "@/components/livekit/console/use-session-persistence";
+import { EventsPanel } from "@/components/livekit/console/events-panel";
+import { MetricsPanel, ModelsPanel } from "@/components/livekit/console/metrics-panel";
+import { SavedAudioList } from "@/components/livekit/console/recordings-panel";
+import {
+  DEFAULT_DOCK_HEIGHT,
+  DockEmpty,
+  DockResizeHandle,
+  RailRow,
+  RailSection,
+  TranscriptPanel,
+} from "@/components/livekit/console/session-primitives";
+import { useTimelineAudio } from "@/components/livekit/console/timeline-audio";
+import {
+  formatBytes,
+  type AgentConfigView,
+  type ConsoleEvent,
+  type TranscriptLine,
+} from "@/components/livekit/console/session-types";
 import {
   CONSOLE_METRICS_TOPIC,
-  METRIC_KIND_LABEL,
-  METRIC_KIND_TITLE,
-  aggregateUsage,
-  buildTurnTraces,
-  formatClock,
-  formatCount,
   formatDuration,
-  formatSeconds,
-  metricRowCells,
   parseConsoleMetric,
-  percentile,
   type ConsoleMetric,
-  type MetricKind,
 } from "@/lib/console-metrics";
 
 const TABS = [
@@ -119,24 +134,24 @@ function capped<T>(items: T[]): T[] {
   return items.length > BUFFER_LIMIT ? items.slice(-BUFFER_LIMIT) : items;
 }
 
-const RECORDING_KIND_LABEL: Record<string, string> = {
-  mixed: "Mixed",
-  agent: "Agent only",
-  user: "You only",
-};
-
 /** `?tab=metrics` → "Metrics"; anything unknown falls back to the first tab. */
 function parseTab(value: string | null): Tab {
   const match = TABS.find((t) => t.toLowerCase() === value?.toLowerCase());
   return match ?? "Audio";
 }
 
-interface ConsoleEvent {
-  id: string;
-  at: number;
-  name: string;
-  detail: string;
-  level: "info" | "warn" | "error";
+/**
+ * How you speak to the agent.
+ *
+ * `browser` publishes your microphone into the room. `sip` means *you* place
+ * the call: you dial one of this deployment's inbound numbers from a phone, the
+ * dispatch rule puts the agent in the room, and the console attaches to that
+ * room to watch, trace and record — without publishing audio of its own.
+ */
+type TalkMode = "browser" | "sip";
+
+function parseTalkMode(value: string | null): TalkMode {
+  return value?.toLowerCase() === "sip" ? "sip" : "browser";
 }
 
 interface AgentListEntry {
@@ -145,25 +160,64 @@ interface AgentListEntry {
   running: boolean;
 }
 
-interface AgentConfigView {
-  llmModel?: string;
-  ttsModel?: string;
-  ttsVoice?: string;
-  sttModel?: string;
-  sttLanguage?: string;
-  pipelineMode?: string;
-}
-
 interface JoinOptions {
   participantName: string;
   participantMetadata: string;
   roomMetadata: string;
 }
 
-interface TranscriptLine {
-  identity: string;
-  text: string;
-  isAgent: boolean;
+/** A live SIP call, as reported by /api/calls. */
+interface LiveCall {
+  callId: string;
+  roomName: string;
+  from: string | null;
+  to: string | null;
+  direction: string | null;
+  status: string;
+  startedAt: string | null;
+}
+
+/** An inbound number to dial, and who the dispatch rules will put on the line. */
+interface DialInTarget {
+  number: string;
+  trunk: string;
+  trunkId: string;
+  agents: string[];
+  ruleName: string | null;
+}
+
+interface OutboundTrunk {
+  trunkId: string;
+  name: string;
+  address?: string;
+}
+
+/**
+ * The phone leg attached to this session.
+ *
+ * Direction decides what hanging up means: a call the console placed is torn
+ * down with the room, while a call that came *in* is only left — the person on
+ * the other end owns it.
+ */
+interface SipCall {
+  room: string;
+  peer: string;
+  direction: "out" | "in";
+}
+
+/** Set on transcription text streams; segments of one utterance share it. */
+const SEGMENT_ID_ATTRIBUTE = "lk.segment_id";
+
+/**
+ * When an utterance started. The sender stamps the stream with its own
+ * `Date.now()`, which is accurate — agents run on this machine — and earlier
+ * than the moment the text arrives here. Fall back to local arrival if that
+ * clock is implausible, because a wrong timestamp would drag the whole
+ * timeline out of shape.
+ */
+function utteranceStart(sentAt: number): number {
+  const now = Date.now();
+  return sentAt > 0 && Math.abs(now - sentAt) <= 60_000 ? sentAt : now;
 }
 
 /* ────────────────────────────────────
@@ -201,20 +255,33 @@ function AgentConsolePage() {
   const [transcript, setTranscript] = useState<TranscriptLine[]>([]);
   const [recordings, setRecordings] = useState<SavedRecording[]>([]);
   const [timelineOn, setTimelineOn] = useState(true);
+  const [transcriptOn, setTranscriptOn] = useState(true);
 
-  // The dock tab lives in the URL so a view can be linked and survives a reload.
+  // The dock tab and talk mode live in the URL so a view can be linked and
+  // survives a reload.
   const searchParams = useSearchParams();
   const tab = parseTab(searchParams.get("tab"));
-  const setTab = useCallback(
-    (next: Tab) => {
+  const talkMode = parseTalkMode(searchParams.get("talk"));
+
+  const setQueryParam = useCallback(
+    (key: string, value: string) => {
       const query = new URLSearchParams(searchParams.toString());
-      query.set("tab", next.toLowerCase());
+      query.set(key, value);
       router.replace(`?${query.toString()}`, { scroll: false });
     },
     [router, searchParams]
   );
+  const setTab = useCallback(
+    (next: Tab) => setQueryParam("tab", next.toLowerCase()),
+    [setQueryParam]
+  );
+  const setTalkMode = useCallback(
+    (next: TalkMode) => setQueryParam("talk", next),
+    [setQueryParam]
+  );
 
   const [dockOpen, setDockOpen] = useState(true);
+  const [dockHeight, setDockHeight] = useState(DEFAULT_DOCK_HEIGHT);
   const [configureOpen, setConfigureOpen] = useState(false);
   const [clearOpen, setClearOpen] = useState(false);
   const [joinOptions, setJoinOptions] = useState<JoinOptions>({
@@ -222,6 +289,18 @@ function AgentConsolePage() {
     participantMetadata: "",
     roomMetadata: "",
   });
+
+  // SIP mode: place a call into this session, or wait for one to arrive.
+  const [dialInTargets, setDialInTargets] = useState<DialInTarget[]>([]);
+  const [outboundTrunks, setOutboundTrunks] = useState<OutboundTrunk[]>([]);
+  const [waitingForCall, setWaitingForCall] = useState(false);
+  const [sipCall, setSipCall] = useState<SipCall | null>(null);
+  /**
+   * Whether the stage shows the dialler or the last call's transcript. It flips
+   * to the transcript when a call ends, because reading what just happened is
+   * the point of hanging up.
+   */
+  const [sipPanelOpen, setSipPanelOpen] = useState(true);
 
   const seqRef = useRef(0);
 
@@ -277,16 +356,20 @@ function AgentConsolePage() {
       });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
-        setError(
-          data.error === "Insufficient permissions"
-            ? "Events cleared. Saved audio was kept — only an admin or owner can delete recordings."
-            : data.error || "Events cleared, but the saved audio could not be deleted."
-        );
+        toast.warning("Events cleared, saved audio kept", {
+          description:
+            data.error === "Insufficient permissions"
+              ? "Only an admin or owner can delete recordings."
+              : data.error || "The recordings could not be deleted.",
+        });
         return;
       }
       setRecordings([]);
+      toast.success("Console cleared");
     } catch {
-      setError("Events cleared, but the saved audio could not be deleted.");
+      toast.warning("Events cleared, saved audio kept", {
+        description: "The dashboard API could not be reached.",
+      });
     }
   }, [agentName]);
 
@@ -312,46 +395,226 @@ function AgentConsolePage() {
   }, [agentName]);
 
   // ── Session control ──
-  const startSession = useCallback(async () => {
-    setConnecting(true);
-    setError(null);
-    setEndedAt(null);
-    try {
-      const res = await fetch("/api/livekit/token", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          agentName,
-          mode: "console",
-          participantName: joinOptions.participantName || undefined,
-          participantMetadata: joinOptions.participantMetadata || undefined,
-          roomMetadata: joinOptions.roomMetadata || undefined,
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok || !data.token) {
-        setError(data.error || "Failed to start the session");
-        addEvent("session.start_failed", data.error || `HTTP ${res.status}`, "error");
-        return;
+  /**
+   * Creates the room, dispatches the agent and joins with the mic live. Returns
+   * the room so a caller (the SIP dialler) can act on it without waiting for a
+   * re-render.
+   */
+  const startSession = useCallback(
+    async (): Promise<string | null> => {
+      setConnecting(true);
+      setError(null);
+      setEndedAt(null);
+      try {
+        const res = await fetch("/api/livekit/token", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            agentName,
+            mode: "console",
+            participantName: joinOptions.participantName || undefined,
+            participantMetadata: joinOptions.participantMetadata || undefined,
+            roomMetadata: joinOptions.roomMetadata || undefined,
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok || !data.token) {
+          setError(data.error || "Failed to start the session");
+          addEvent("session.start_failed", data.error || `HTTP ${res.status}`, "error");
+          return null;
+        }
+        setToken(data.token);
+        setRoomName(data.room);
+        setStartedAt(Date.now());
+        addEvent("session.dispatched", `${data.agent} → ${data.room}`);
+        return data.room as string;
+      } catch {
+        setError("Could not reach the dashboard API");
+        addEvent("session.start_failed", "Could not reach the dashboard API", "error");
+        return null;
+      } finally {
+        setConnecting(false);
       }
-      setToken(data.token);
-      setRoomName(data.room);
-      setStartedAt(Date.now());
-      addEvent("session.dispatched", `${data.agent} → ${data.room}`);
-    } catch {
-      setError("Could not reach the dashboard API");
-      addEvent("session.start_failed", "Could not reach the dashboard API", "error");
-    } finally {
-      setConnecting(false);
-    }
-  }, [agentName, joinOptions, addEvent]);
+    },
+    [agentName, joinOptions, addEvent]
+  );
 
-  const endSession = useCallback(() => {
+  /**
+   * Ends the session. A call the console placed is hung up with the room —
+   * leaving would strand the phone leg and the agent talking to each other. A
+   * call that came in is only left: it is someone else's call.
+   */
+  const endSession = useCallback(async () => {
+    const call = sipCall;
     setToken(null);
     setEndedAt(Date.now());
-  }, []);
+    setWaitingForCall(false);
+    setSipCall(null);
+    setSipPanelOpen(false);
+
+    if (call?.direction === "out") {
+      try {
+        await fetch("/api/calls/place", {
+          method: "DELETE",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ room: call.room }),
+        });
+        addEvent("sip.hung_up", call.peer);
+      } catch {
+        addEvent("sip.hangup_failed", call.room, "warn");
+      }
+    }
+  }, [sipCall, addEvent]);
+
+  /**
+   * Places a call into this console session: the room is created and the agent
+   * dispatched first, so it is already on the line when the callee answers.
+   */
+  const placeCall = useCallback(
+    async ({ callTo, trunkId }: { callTo: string; trunkId?: string }) => {
+      const room = token && roomName ? roomName : await startSession();
+      if (!room) return;
+
+      setConnecting(true);
+      setError(null);
+      try {
+        const res = await fetch("/api/calls/place", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            callTo,
+            trunkId,
+            roomName: room,
+            // The dial tone is published into the room, so the agent would hear
+            // it ringing and its VAD would treat it as speech. The stage says
+            // "Calling …" instead.
+            playDialtone: false,
+          }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          const message = data.reason || data.error || `Dial failed (HTTP ${res.status})`;
+          setError(message);
+          addEvent("sip.dial_failed", message, "error");
+          return;
+        }
+        setSipCall({ room, peer: data.callTo, direction: "out" });
+        addEvent("sip.dialled", `${data.callTo}${data.sipCallId ? ` (${data.sipCallId})` : ""}`);
+        toast.success(`Calling ${data.callTo}`, { description: "Answer to talk to the agent" });
+      } catch {
+        setError("Could not reach the dashboard API");
+      } finally {
+        setConnecting(false);
+      }
+    },
+    [token, roomName, startSession, addEvent]
+  );
 
   const live = !!token;
+
+  /** Attaches the console to a call that is already up, as a silent observer. */
+  const attachToCall = useCallback(
+    async (call: LiveCall) => {
+      setConnecting(true);
+      setError(null);
+      setEndedAt(null);
+      try {
+        const res = await fetch("/api/livekit/token", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            mode: "observe",
+            room: call.roomName,
+            participantName: joinOptions.participantName || undefined,
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok || !data.token) {
+          setError(data.error || "Could not join the call");
+          addEvent("call.attach_failed", data.error || `HTTP ${res.status}`, "error");
+          return;
+        }
+        setToken(data.token);
+        setRoomName(call.roomName);
+        setStartedAt(call.startedAt ? new Date(call.startedAt).getTime() : Date.now());
+        setSipCall({ room: call.roomName, peer: call.from ?? "caller", direction: "in" });
+        setWaitingForCall(false);
+        addEvent("call.attached", `${call.from ?? "caller"} → ${call.roomName}`);
+        toast.success(`Call from ${call.from ?? "unknown"}`, {
+          description: `Watching ${call.roomName}`,
+        });
+      } catch {
+        setError("Could not reach the dashboard API");
+      } finally {
+        setConnecting(false);
+      }
+    },
+    [joinOptions.participantName, addEvent]
+  );
+
+  // While waiting, watch for a SIP call to arrive and jump into its room. The
+  // console's own rooms are skipped: those are browser sessions, not calls in.
+  useEffect(() => {
+    if (!waitingForCall || live) return;
+
+    let cancelled = false;
+    const poll = () => {
+      fetch("/api/calls")
+        .then((res) => (res.ok ? res.json() : null))
+        .then((data) => {
+          if (cancelled || !data?.calls?.length) return;
+          // Newest first from the API. Skip the console's own rooms, and prefer
+          // a call LiveKit marked inbound when an outbound test is also running.
+          const candidates = (data.calls as LiveCall[]).filter(
+            (c) => !c.roomName.startsWith("agent-console-")
+          );
+          const call = candidates.find((c) => c.direction === "inbound") ?? candidates[0];
+          if (call) void attachToCall(call);
+        })
+        .catch(() => {});
+    };
+
+    poll();
+    const timer = setInterval(poll, 2000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [waitingForCall, live, attachToCall]);
+
+  // Numbers to dial in on, with whoever the dispatch rules will put on the line.
+  useEffect(() => {
+    if (talkMode !== "sip") return;
+
+    fetch("/api/sip-trunks?direction=outbound")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => setOutboundTrunks(d?.trunks ?? []))
+      .catch(() => {});
+
+    Promise.all([
+      fetch("/api/sip-trunks?direction=inbound").then((r) => (r.ok ? r.json() : null)),
+      fetch("/api/dispatch-rules").then((r) => (r.ok ? r.json() : null)),
+    ])
+      .then(([trunkData, ruleData]) => {
+        const rules: DispatchRuleSummary[] = ruleData?.rules ?? [];
+        const targets: DialInTarget[] = (trunkData?.trunks ?? []).flatMap(
+          (t: { name: string; trunkId: string; numbers?: string[] }) =>
+            (t.numbers ?? []).map((number: string) => {
+              const matched = rulesAnswering(rules, t.trunkId, number);
+              const withAgent = matched.find((r) => r.agents.length > 0);
+              return {
+                number,
+                trunk: t.name || t.trunkId,
+                trunkId: t.trunkId,
+                agents: withAgent?.agents ?? [],
+                ruleName: (withAgent ?? matched[0])?.name ?? null,
+              };
+            })
+        );
+        setDialInTargets(targets);
+      })
+      .catch(() => {});
+  }, [talkMode]);
 
   return (
     // Keyed on the room: a new session gets a fresh Room (and fresh transcript /
@@ -362,7 +625,9 @@ function AgentConsolePage() {
       token={token ?? undefined}
       serverUrl={serverUrl}
       connect={live}
-      audio
+      // SIP mode keeps the console silent: you are on the phone, and publishing
+      // the browser mic as well would only feed the agent an echo.
+      audio={talkMode === "browser"}
       video={false}
       onDisconnected={() => {
         setToken(null);
@@ -388,12 +653,26 @@ function AgentConsolePage() {
         transcript={transcript}
         recordings={recordings}
         timelineOn={timelineOn}
+        transcriptOn={transcriptOn}
         tab={tab}
         dockOpen={dockOpen}
+        dockHeight={dockHeight}
         joinOptions={joinOptions}
+        talkMode={talkMode}
+        dialInTargets={dialInTargets}
+        outboundTrunks={outboundTrunks}
+        waitingForCall={waitingForCall}
+        sipCall={sipCall}
+        sipPanelOpen={sipPanelOpen}
+        onTalkModeChange={setTalkMode}
+        onWaitForCall={() => setWaitingForCall((w) => !w)}
+        onPlaceCall={(input) => void placeCall(input)}
+        onOpenSipPanel={() => setSipPanelOpen(true)}
+        onShowTranscript={() => setSipPanelOpen(false)}
         onTabChange={setTab}
         onDockToggle={() => setDockOpen((o) => !o)}
-        onStart={startSession}
+        onDockResize={setDockHeight}
+        onStart={() => void startSession()}
         onEnd={endSession}
         onClear={() => setClearOpen(true)}
         onAddEvent={addEvent}
@@ -402,6 +681,7 @@ function AgentConsolePage() {
         onRecordingSaved={recordingSaved}
         onRecordingDeleted={recordingDeleted}
         onTimelineToggle={setTimelineOn}
+        onTranscriptToggle={setTranscriptOn}
         onConfigure={() => setConfigureOpen(true)}
         onAgentChange={(name) => router.push(`/agents/${encodeURIComponent(name)}/console`)}
       />
@@ -453,11 +733,25 @@ function ConsoleShell({
   transcript,
   recordings,
   timelineOn,
+  transcriptOn,
   tab,
   dockOpen,
+  dockHeight,
   joinOptions,
+  talkMode,
+  dialInTargets,
+  outboundTrunks,
+  waitingForCall,
+  sipCall,
+  sipPanelOpen,
+  onTalkModeChange,
+  onWaitForCall,
+  onPlaceCall,
+  onOpenSipPanel,
+  onShowTranscript,
   onTabChange,
   onDockToggle,
+  onDockResize,
   onStart,
   onEnd,
   onClear,
@@ -467,6 +761,7 @@ function ConsoleShell({
   onRecordingSaved,
   onRecordingDeleted,
   onTimelineToggle,
+  onTranscriptToggle,
   onConfigure,
   onAgentChange,
 }: {
@@ -486,11 +781,25 @@ function ConsoleShell({
   transcript: TranscriptLine[];
   recordings: SavedRecording[];
   timelineOn: boolean;
+  transcriptOn: boolean;
   tab: Tab;
   dockOpen: boolean;
+  dockHeight: number;
   joinOptions: JoinOptions;
+  talkMode: TalkMode;
+  dialInTargets: DialInTarget[];
+  outboundTrunks: OutboundTrunk[];
+  waitingForCall: boolean;
+  sipCall: SipCall | null;
+  sipPanelOpen: boolean;
+  onTalkModeChange: (mode: TalkMode) => void;
+  onWaitForCall: () => void;
+  onPlaceCall: (input: { callTo: string; trunkId?: string }) => void;
+  onOpenSipPanel: () => void;
+  onShowTranscript: () => void;
   onTabChange: (t: Tab) => void;
   onDockToggle: () => void;
+  onDockResize: (height: number) => void;
   onStart: () => void;
   onEnd: () => void;
   onClear: () => void;
@@ -500,6 +809,7 @@ function ConsoleShell({
   onRecordingSaved: (recording: SavedRecording) => void;
   onRecordingDeleted: (file: string) => void;
   onTimelineToggle: (on: boolean) => void;
+  onTranscriptToggle: (on: boolean) => void;
   onConfigure: () => void;
   onAgentChange: (name: string) => void;
 }) {
@@ -515,14 +825,29 @@ function ConsoleShell({
   // The hook resets its buffer when the room goes away, so mirror it upwards
   // where it outlives the session.
   const agentIdentity = agent?.identity;
+  // A segment's text keeps growing as it streams, so its timestamp has to be
+  // pinned the first time the segment is seen — otherwise every line would read
+  // as "now" and none of them would line up with the event log or the recording.
+  const spokenAtRef = useRef(new Map<string, number>());
   useEffect(() => {
     if (transcriptions.length === 0) return;
+    const spokenAt = spokenAtRef.current;
     onTranscript(
-      transcriptions.map((t) => ({
-        identity: t.participantInfo.identity,
-        text: t.text,
-        isAgent: !!agentIdentity && t.participantInfo.identity === agentIdentity,
-      }))
+      transcriptions.map((t) => {
+        const id = t.streamInfo.attributes?.[SEGMENT_ID_ATTRIBUTE] ?? t.streamInfo.id;
+        let at = spokenAt.get(id);
+        if (at === undefined) {
+          at = utteranceStart(t.streamInfo.timestamp);
+          spokenAt.set(id, at);
+        }
+        return {
+          id,
+          at,
+          identity: t.participantInfo.identity,
+          text: t.text,
+          isAgent: !!agentIdentity && t.participantInfo.identity === agentIdentity,
+        };
+      })
     );
   }, [transcriptions, agentIdentity, onTranscript]);
 
@@ -530,12 +855,26 @@ function ConsoleShell({
   const agentMediaTrack = audioTrack?.publication?.track?.mediaStreamTrack;
   const micMediaTrack = microphoneTrack?.track?.mediaStreamTrack;
 
+  // A dialled phone is a remote participant that isn't the agent. Its audio is
+  // the user side of the conversation, so scopes and recordings must include it.
+  const remoteMics = useTracks([Track.Source.Microphone], { onlySubscribed: true });
+  const callerRef = remoteMics.find(
+    (t) => !t.participant.isLocal && t.participant.identity !== agentIdentity
+  );
+  const callerMediaTrack = callerRef?.publication?.track?.mediaStreamTrack;
+  const callerIdentity = callerRef?.participant.identity;
+
+  // One player for the whole console: the Events timeline, its log and the
+  // transcript all seek the same recording, and it keeps playing across tabs.
+  const timelineAudio = useTimelineAudio({ agentName, roomName, recordings });
+
   const { recording, uploading, unsupported } = useSessionRecorder({
     agentName,
     roomName,
     live,
     agentTrack: agentMediaTrack,
     micTrack: micMediaTrack,
+    callerTrack: callerMediaTrack,
     onSaved: onRecordingSaved,
     onError: (message) => onAddEvent("recording.error", message, "warn"),
   });
@@ -654,6 +993,28 @@ function ConsoleShell({
     };
   }, [room, connected, roomName]);
 
+  // ── Session history ──
+  // What is on screen is written to /sessions/history when the session ends, so
+  // the call can be replayed later against its recording.
+  useSessionPersistence({
+    agentName,
+    roomName,
+    live,
+    startedAt,
+    endedAt,
+    talkMode,
+    roomSid: roomSid?.room === roomName ? roomSid.sid : null,
+    agentIdentity,
+    participants: participants.length,
+    serverUrl,
+    config,
+    events,
+    metrics,
+    transcript,
+    onSaved: ({ id }) => onAddEvent("session.saved", `history #${id}`),
+    onError: (message) => onAddEvent("session.save_failed", message, "warn"),
+  });
+
   // ── Live duration ──
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
@@ -735,22 +1096,59 @@ function ConsoleShell({
               {status}
             </div>
           </div>
+          {/* How you talk to the agent: browser mic, or your phone over SIP. */}
+          <div className="flex items-center rounded-lg border border-border p-0.5">
+            {(
+              [
+                { key: "browser", label: "Browser", icon: Mic },
+                { key: "sip", label: "SIP", icon: Phone },
+              ] as const
+            ).map((option) => (
+              <button
+                key={option.key}
+                type="button"
+                onClick={() => onTalkModeChange(option.key)}
+                title={
+                  option.key === "browser"
+                    ? "Talk with your microphone in this tab"
+                    : "Ring your phone and talk there — the console stays muted"
+                }
+                className={cn(
+                  "flex items-center gap-1.5 rounded-md px-2 py-1 text-xs transition-colors",
+                  talkMode === option.key
+                    ? "bg-accent text-accent-foreground font-medium"
+                    : "text-muted-foreground hover:text-foreground"
+                )}
+              >
+                <option.icon className="size-3" />
+                {option.label}
+              </button>
+            ))}
+          </div>
           <Button variant="outline" size="sm" onClick={onConfigure}>
             <Settings2 className="size-3.5" />
             Configure
           </Button>
-          {/* Bring a phone or SIP endpoint into the live room, so the agent can
-              be tested over a real audio path rather than the browser mic. */}
-          <SipDialButton
-            roomName={live ? roomName : null}
-            onDialled={({ callTo, sipCallId }) =>
-              onAddEvent("sip.dialled", `${callTo}${sipCallId ? ` (${sipCallId})` : ""}`)
-            }
-          />
           {live ? (
             <Button size="sm" variant="destructive" onClick={onEnd}>
-              <Square className="size-3.5" />
-              End session
+              {sipCall ? <PhoneOff className="size-3.5" /> : <Square className="size-3.5" />}
+              {sipCall ? (sipCall.direction === "out" ? "Hang up" : "Leave call") : "End session"}
+            </Button>
+          ) : talkMode === "sip" ? (
+            <Button
+              size="sm"
+              variant={waitingForCall ? "outline" : "default"}
+              onClick={onWaitForCall}
+              disabled={connecting}
+            >
+              {connecting ? (
+                <Loader2 className="size-3.5 animate-spin" />
+              ) : waitingForCall ? (
+                <Square className="size-3.5" />
+              ) : (
+                <PhoneIncoming className="size-3.5" />
+              )}
+              {waitingForCall ? "Stop waiting" : "Wait for my call"}
             </Button>
           ) : (
             <Button size="sm" onClick={onStart} disabled={connecting}>
@@ -797,6 +1195,13 @@ function ConsoleShell({
                       cause.
                     </p>
                   )}
+                  {sipCall && (
+                    <p className="mt-2 max-w-xs text-center text-xs text-muted-foreground">
+                      {sipCall.direction === "out" ? "Calling " : "On a call from "}
+                      <span className="font-mono text-foreground/80">{sipCall.peer}</span> — the
+                      console is listening, not speaking.
+                    </p>
+                  )}
                   <div className="mt-6">
                     <VoiceAssistantControlBar />
                   </div>
@@ -804,21 +1209,42 @@ function ConsoleShell({
                 {/* Transcript */}
                 <TranscriptPanel lines={transcript} />
               </div>
-            ) : transcript.length > 0 ? (
-              /* The session ended — keep what was said on screen for review. */
+            ) : transcript.length > 0 && !sipPanelOpen ? (
+              /* Ended — what was said stays on screen until you ask for the
+                 dialler again. Hanging up should not wipe the call you just
+                 had off the stage. */
               <div className="flex min-h-0 w-full flex-col">
                 <div className="flex items-center justify-between gap-3 border-b px-3 py-1.5">
                   <span className="text-[10px] font-mono uppercase tracking-wide text-muted-foreground">
-                    Session ended
+                    {talkMode === "sip" ? "Call ended" : "Session ended"}
                     {duration !== null ? ` · ${formatDuration(duration)}` : ""}
                   </span>
-                  <Button size="sm" onClick={onStart} disabled={connecting}>
-                    {connecting && <Loader2 className="size-3.5 animate-spin" />}
-                    Start a session
-                  </Button>
+                  {talkMode === "sip" ? (
+                    <Button size="sm" onClick={onOpenSipPanel}>
+                      <PhoneOutgoing className="size-3.5" />
+                      New call
+                    </Button>
+                  ) : (
+                    <Button size="sm" onClick={onStart} disabled={connecting}>
+                      {connecting && <Loader2 className="size-3.5 animate-spin" />}
+                      Start a session
+                    </Button>
+                  )}
                 </div>
                 <TranscriptPanel lines={transcript} className="w-full" />
               </div>
+            ) : talkMode === "sip" ? (
+              <SipPanel
+                agentName={agentName}
+                targets={dialInTargets}
+                trunks={outboundTrunks}
+                waiting={waitingForCall}
+                connecting={connecting}
+                hasTranscript={transcript.length > 0}
+                onWait={onWaitForCall}
+                onPlaceCall={onPlaceCall}
+                onShowTranscript={onShowTranscript}
+              />
             ) : (
               <div className="flex w-full flex-col items-center justify-center gap-3 p-6 text-center">
                 <div className="text-sm font-semibold text-foreground">Test your agent</div>
@@ -848,6 +1274,19 @@ function ConsoleShell({
         {/* Right rail */}
         <div className="w-[300px] shrink-0 overflow-y-auto border-l p-4">
           <RailSection title="Session">
+            <RailRow
+              label="You talk via"
+              value={
+                talkMode === "sip"
+                  ? sipCall
+                    ? `sip · ${sipCall.peer}`
+                    : waitingForCall
+                      ? "sip · waiting for your call"
+                      : "sip · dial in"
+                  : "browser mic"
+              }
+              mono
+            />
             <RailRow label="Room" value={roomName ?? "—"} mono />
             <RailRow label="Region" value={process.env.NEXT_PUBLIC_LIVEKIT_REGION || "local"} />
             <RailRow label="Duration" value={duration === null ? "—" : formatDuration(duration)} />
@@ -887,6 +1326,7 @@ function ConsoleShell({
 
       {/* Dock */}
       <div className="shrink-0 border-t">
+        {dockOpen && <DockResizeHandle height={dockHeight} onResize={onDockResize} />}
         <div className="flex items-center justify-between border-b bg-muted/30 pr-3">
           <div className="flex items-center overflow-x-auto">
             {TABS.map((t) => (
@@ -925,13 +1365,23 @@ function ConsoleShell({
         </div>
 
         {dockOpen && (
-          <div className="h-[280px] overflow-y-auto">
+          // Events manages its own panes (pinned timeline + scrolling log), so
+          // the dock keeps its scrollbar to itself for the other tabs.
+          <div
+            style={{ height: dockHeight }}
+            className={cn(
+              "flex min-h-0 flex-col",
+              tab === "Events" ? "overflow-hidden" : "overflow-y-auto"
+            )}
+          >
             {tab === "Audio" && (
               <AudioTab
                 live={live}
                 agentName={agentName}
                 agentTrack={agentMediaTrack}
                 micTrack={micMediaTrack}
+                callerTrack={callerMediaTrack}
+                callerIdentity={callerIdentity}
                 micMuted={microphoneTrack?.isMuted ?? !localParticipant?.isMicrophoneEnabled}
                 recordings={recordings}
                 recording={recording}
@@ -941,14 +1391,17 @@ function ConsoleShell({
               />
             )}
             {tab === "Events" && (
-              <EventsTab
+              <EventsPanel
                 events={events}
+                transcript={transcript}
                 live={live}
                 timelineOn={timelineOn}
                 onTimelineToggle={onTimelineToggle}
-                agentName={agentName}
-                roomName={roomName}
+                transcriptOn={transcriptOn}
+                onTranscriptToggle={onTranscriptToggle}
                 recordings={recordings}
+                dockHeight={dockHeight}
+                audio={timelineAudio}
               />
             )}
             {tab === "Session" && (
@@ -969,8 +1422,8 @@ function ConsoleShell({
             {tab === "Participants" && <ParticipantsTab />}
             {tab === "RPC" && <RpcTab agentIdentity={agent?.identity} live={live} />}
             {tab === "DTMF" && <DtmfTab live={live} onAddEvent={onAddEvent} />}
-            {tab === "Metrics" && <MetricsTab metrics={metrics} live={live} />}
-            {tab === "Models" && <ModelsTab metrics={metrics} config={config} />}
+            {tab === "Metrics" && <MetricsPanel metrics={metrics} live={live} />}
+            {tab === "Models" && <ModelsPanel metrics={metrics} config={config} />}
           </div>
         )}
       </div>
@@ -979,89 +1432,215 @@ function ConsoleShell({
 }
 
 /* ────────────────────────────────────
-   Right rail primitives
+   SIP mode: you place the call
    ──────────────────────────────────── */
-function RailSection({ title, children }: { title: string; children: React.ReactNode }) {
+function SipPanel({
+  agentName,
+  targets,
+  trunks,
+  waiting,
+  connecting,
+  hasTranscript,
+  onWait,
+  onPlaceCall,
+  onShowTranscript,
+}: {
+  agentName: string;
+  targets: DialInTarget[];
+  trunks: OutboundTrunk[];
+  waiting: boolean;
+  connecting: boolean;
+  /** A previous call left a transcript worth going back to. */
+  hasTranscript: boolean;
+  onWait: () => void;
+  onPlaceCall: (input: { callTo: string; trunkId?: string }) => void;
+  onShowTranscript: () => void;
+}) {
+  const [callTo, setCallTo] = useState("");
+  const [trunkId, setTrunkId] = useState("");
+
+  // `sip:name@host` rings that device directly; a number needs a trunk.
+  const trimmed = callTo.trim().replace(/^sips?:/i, "");
+  const atIndex = trimmed.lastIndexOf("@");
+  const direct = atIndex > 0 && !!trimmed.slice(atIndex + 1).trim();
+  const selfDialled = targets.find((t) => t.number === callTo.trim());
+  const canCall = !!callTo.trim() && (direct || !!trunkId);
+
   return (
-    <div className="mb-5">
-      <div className="mb-2 flex items-center gap-2">
-        <span className="text-[10px] font-mono uppercase tracking-wide text-muted-foreground">
-          {title}
-        </span>
+    <div className="mx-auto flex w-full max-w-xl flex-col gap-4 overflow-y-auto p-5">
+      {/* Call out — the console dials, the agent is already in the room */}
+      <div className="space-y-2">
+        <div className="flex items-center gap-2">
+          <PhoneOutgoing className="size-4 text-muted-foreground" />
+          <span className="text-sm font-semibold text-foreground">Call out</span>
+          <span className="text-xs text-muted-foreground">
+            {agentName} joins the room, then the phone rings
+          </span>
+          {hasTranscript && (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="ml-auto h-7 text-xs"
+              onClick={onShowTranscript}
+            >
+              <ArrowLeft className="size-3" />
+              Transcript
+            </Button>
+          )}
+        </div>
+
+        <div className="flex gap-2">
+          <Select value={trunkId} onValueChange={setTrunkId} disabled={direct}>
+            <SelectTrigger size="sm" className="w-[190px] shrink-0">
+              <SelectValue placeholder={direct ? "not needed" : "Outbound trunk"} />
+            </SelectTrigger>
+            <SelectContent>
+              {trunks.map((t) => (
+                <SelectItem key={t.trunkId} value={t.trunkId}>
+                  {t.name || t.trunkId}
+                  {t.address ? ` — ${t.address}` : ""}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <Input
+            value={callTo}
+            onChange={(e) => setCallTo(e.target.value)}
+            placeholder="+15551234567 or sip:you@192.168.1.10"
+            className="h-8 font-mono text-sm"
+          />
+          <Button
+            size="sm"
+            className="shrink-0"
+            disabled={!canCall || connecting}
+            onClick={() => onPlaceCall({ callTo: callTo.trim(), trunkId: direct ? undefined : trunkId })}
+          >
+            {connecting ? <Loader2 className="size-3.5 animate-spin" /> : <PhoneOutgoing className="size-3.5" />}
+            Call
+          </Button>
+        </div>
+
+        {targets.length > 0 && (
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="text-xs text-muted-foreground">Your inbound numbers:</span>
+            {targets.map((t) => (
+              <button
+                key={`${t.trunkId}-${t.number}`}
+                type="button"
+                onClick={() => setCallTo(t.number)}
+                className="rounded-full border border-border px-2 py-0.5 font-mono text-xs transition-colors hover:border-primary hover:text-primary"
+              >
+                {t.number}
+              </button>
+            ))}
+          </div>
+        )}
+
+        {selfDialled ? (
+          <p
+            className={
+              selfDialled.agents.length > 0
+                ? "text-xs text-yellow-600 dark:text-yellow-500"
+                : "text-xs text-muted-foreground"
+            }
+          >
+            {selfDialled.agents.length > 0 ? (
+              <>
+                That is your own number: the call comes back in and rule{" "}
+                <span className="font-medium">{selfDialled.ruleName}</span> answers with{" "}
+                <span className="font-medium">{selfDialled.agents.join(", ")}</span>, so the two
+                agents talk to each other. Call a phone or a{" "}
+                <code className="rounded bg-muted px-1 py-0.5">sip:you@host</code> address instead.
+              </>
+            ) : (
+              <>
+                That is your own number, and no rule dispatches an agent to it — the far end is an
+                empty room, so nobody answers.
+              </>
+            )}
+          </p>
+        ) : (
+          <p className="text-xs text-muted-foreground">
+            A number needs a carrier on the trunk. A{" "}
+            <code className="rounded bg-muted px-1 py-0.5">sip:</code> address rings that device
+            directly, with no trunk and no dispatch rule in the way.
+          </p>
+        )}
+      </div>
+
+      <div className="flex items-center gap-3">
+        <span className="h-px flex-1 bg-border" />
+        <span className="text-[10px] font-mono uppercase tracking-wide text-muted-foreground">or</span>
         <span className="h-px flex-1 bg-border" />
       </div>
-      <div className="space-y-1">{children}</div>
-    </div>
-  );
-}
 
-function RailRow({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
-  return (
-    <div className="flex items-start justify-between gap-3 text-xs">
-      <span className="font-mono uppercase tracking-wide text-muted-foreground shrink-0">
-        {label}
-      </span>
-      <span
-        className={cn(
-          "min-w-0 break-all text-right text-foreground/80",
-          mono && "font-mono"
-        )}
-        title={value}
-      >
-        {value}
-      </span>
-    </div>
-  );
-}
+      {/* Call in — you dial, the console attaches to the call that lands */}
+      <div className="space-y-2">
+        <div className="flex items-center gap-2">
+          <PhoneIncoming className="size-4 text-muted-foreground" />
+          <span className="text-sm font-semibold text-foreground">Call in</span>
+          <span className="text-xs text-muted-foreground">
+            you dial, the console attaches to the call
+          </span>
+        </div>
 
-function DockEmpty({ children }: { children: React.ReactNode }) {
-  return (
-    <div className="flex h-full items-center justify-center">
-      <span className="rounded-md bg-muted px-3 py-1.5 text-sm text-muted-foreground">
-        {children}
-      </span>
-    </div>
-  );
-}
-
-/* ────────────────────────────────────
-   Transcript
-   ──────────────────────────────────── */
-function TranscriptPanel({
-  lines,
-  className,
-}: {
-  lines: TranscriptLine[];
-  className?: string;
-}) {
-  const endRef = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    endRef.current?.scrollIntoView({ block: "end" });
-  }, [lines.length]);
-
-  return (
-    <div className={cn("flex min-h-0 flex-col", className ?? "w-1/2")}>
-      <div className="border-b px-3 py-1.5 text-[10px] font-mono uppercase tracking-wide text-muted-foreground">
-        Transcript
-      </div>
-      <div className="min-h-0 flex-1 space-y-2 overflow-y-auto p-3">
-        {lines.length === 0 && (
-          <p className="text-sm text-muted-foreground">Waiting for speech…</p>
-        )}
-        {lines.map((line, i) => (
-          <div key={i} className="text-sm">
-            <span
-              className={cn(
-                "mr-2 font-mono text-xs",
-                line.isAgent ? "text-primary" : "text-muted-foreground"
-              )}
-            >
-              {line.isAgent ? "agent" : line.identity}
-            </span>
-            <span className="text-foreground/90">{line.text}</span>
+        {targets.length === 0 ? (
+          <p className="text-xs text-muted-foreground">
+            No inbound numbers. Add an inbound trunk and a dispatch rule under{" "}
+            <Link href="/telephony/sip-trunks" className="text-primary hover:underline">
+              Telephony
+            </Link>{" "}
+            to receive calls.
+          </p>
+        ) : (
+          <div className="space-y-1">
+            {targets.map((t) => (
+              <div key={`in-${t.trunkId}-${t.number}`} className="flex items-baseline gap-2">
+                <span className="font-mono text-sm text-foreground">{t.number}</span>
+                <span className="text-xs text-muted-foreground">
+                  {t.agents.length > 0 ? (
+                    <>
+                      answered by{" "}
+                      <span
+                        className={
+                          t.agents.includes(agentName) ? "text-foreground" : "text-yellow-500"
+                        }
+                      >
+                        {t.agents.join(", ")}
+                      </span>
+                      {!t.agents.includes(agentName) && " (not this agent)"}
+                    </>
+                  ) : (
+                    <span className="text-yellow-500">
+                      {t.ruleName
+                        ? `rule ${t.ruleName} dispatches no agent — nobody will answer`
+                        : "no dispatch rule matches — the call will be rejected"}
+                    </span>
+                  )}
+                </span>
+              </div>
+            ))}
           </div>
-        ))}
-        <div ref={endRef} />
+        )}
+
+        <Button
+          size="sm"
+          variant={waiting ? "outline" : "secondary"}
+          onClick={onWait}
+          disabled={connecting}
+        >
+          {waiting ? (
+            <>
+              <Loader2 className="size-3.5 animate-spin" />
+              Waiting for your call…
+            </>
+          ) : (
+            <>
+              <PhoneIncoming className="size-3.5" />
+              Wait for my call
+            </>
+          )}
+        </Button>
       </div>
     </div>
   );
@@ -1075,6 +1654,8 @@ function AudioTab({
   agentName,
   agentTrack,
   micTrack,
+  callerTrack,
+  callerIdentity,
   micMuted,
   recordings,
   recording,
@@ -1086,6 +1667,8 @@ function AudioTab({
   agentName: string;
   agentTrack?: MediaStreamTrack;
   micTrack?: MediaStreamTrack;
+  callerTrack?: MediaStreamTrack;
+  callerIdentity?: string;
   micMuted: boolean;
   recordings: SavedRecording[];
   recording: boolean;
@@ -1119,436 +1702,52 @@ function AudioTab({
           </div>
           <AudioScope track={micMuted ? undefined : micTrack} color="#38bdf8" label="you · mic" />
         </div>
-      </div>
-
-      {/* Saved audio */}
-      <div className="space-y-2">
-        <div className="flex items-center gap-2">
-          <span className="text-[10px] font-mono uppercase tracking-wide text-muted-foreground">
-            Saved session audio
-          </span>
-          <span className="h-px flex-1 bg-border" />
-          {recording && (
-            <span className="flex items-center gap-1.5 text-[10px] font-mono uppercase text-red-500">
-              <span className="size-1.5 animate-pulse rounded-full bg-red-500" />
-              recording
-            </span>
-          )}
-          {uploading && (
-            <span className="text-[10px] font-mono uppercase text-muted-foreground">saving…</span>
-          )}
-        </div>
-
-        {unsupported && (
-          <p className="text-xs text-yellow-500">
-            This browser has no MediaRecorder support, so session audio cannot be saved.
-          </p>
-        )}
-
-        {recordings.length === 0 ? (
-          <p className="text-xs text-muted-foreground">
-            {live
-              ? "Recording this session — the agent audio and the mixed conversation are saved when it ends."
-              : "No saved audio yet. Start a session; both the agent output and the mixed conversation are written to disk when it ends."}
-          </p>
-        ) : (
-          <div className="space-y-2">
-            {recordings.map((r) => (
-              <RecordingRow
-                key={r.file}
-                agentName={agentName}
-                recording={r}
-                onDeleted={onDeleted}
-              />
-            ))}
+        {callerTrack && (
+          <div className="rounded-lg border p-3 md:col-span-2">
+            <div className="mb-2 flex items-center justify-between">
+              <span className="text-xs font-mono uppercase tracking-wide text-muted-foreground">
+                Caller
+              </span>
+              <Badge variant="outline" className="text-[10px] text-muted-foreground">
+                {callerIdentity ?? "sip"}
+              </Badge>
+            </div>
+            <AudioScope track={callerTrack} color="#f59e0b" label="caller · sip" />
           </div>
         )}
       </div>
-    </div>
-  );
-}
 
-function RecordingRow({
-  agentName,
-  recording,
-  onDeleted,
-}: {
-  agentName: string;
-  recording: SavedRecording;
-  onDeleted: (file: string) => void;
-}) {
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-  const src = `/api/agents/${encodeURIComponent(agentName)}/recordings/${encodeURIComponent(recording.file)}`;
-
-  const remove = async () => {
-    setBusy(true);
-    setError("");
-    try {
-      const res = await fetch(`/api/agents/${encodeURIComponent(agentName)}/recordings`, {
-        method: "DELETE",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ file: recording.file }),
-      });
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        setError(data.error || "Failed to delete");
-        return;
-      }
-      onDeleted(recording.file);
-    } catch {
-      setError("Failed to delete");
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <div className="rounded-lg border p-2.5">
-      <div className="flex flex-wrap items-center gap-2">
-        <Badge
-          variant={recording.kind === "mixed" ? "outline" : "secondary"}
-          className="text-[10px] uppercase"
-        >
-          {RECORDING_KIND_LABEL[recording.kind] ?? recording.kind}
-        </Badge>
-        <span className="min-w-0 flex-1 truncate font-mono text-xs text-foreground/80" title={recording.room}>
-          {recording.room}
-        </span>
-        <span className="font-mono text-[10px] text-muted-foreground">
-          {formatDuration(recording.durationMs)} · {formatBytes(recording.bytes)} ·{" "}
-          {new Date(recording.createdAt).toLocaleString()}
-        </span>
-        <Button variant="ghost" size="icon-xs" asChild title="Download">
-          <a href={src} download={recording.file}>
-            <Download className="size-3.5" />
-          </a>
-        </Button>
-        <Button
-          variant="ghost"
-          size="icon-xs"
-          className="text-muted-foreground hover:text-destructive"
-          onClick={remove}
-          disabled={busy}
-          title="Delete"
-        >
-          {busy ? <Loader2 className="size-3.5 animate-spin" /> : <Trash2 className="size-3.5" />}
-        </Button>
-      </div>
-      <audio src={src} controls preload="metadata" className="mt-2 h-8 w-full" />
-      {error && <p className="mt-1 text-xs text-destructive">{error}</p>}
-    </div>
-  );
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
-  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
-}
-
-/* ────────────────────────────────────
-   Tab: Events
-   ──────────────────────────────────── */
-function EventsTab({
-  events,
-  live,
-  timelineOn,
-  onTimelineToggle,
-  agentName,
-  roomName,
-  recordings,
-}: {
-  events: ConsoleEvent[];
-  live: boolean;
-  timelineOn: boolean;
-  onTimelineToggle: (on: boolean) => void;
-  agentName: string;
-  roomName: string | null;
-  recordings: SavedRecording[];
-}) {
-  const endRef = useRef<HTMLDivElement>(null);
-  const autoScroll = live;
-  useEffect(() => {
-    if (autoScroll) endRef.current?.scrollIntoView({ block: "end" });
-  }, [events.length, autoScroll]);
-
-  const audio = useTimelineAudio({ agentName, roomName, recordings });
-
-  if (events.length === 0) return <DockEmpty>No events received yet</DockEmpty>;
-
-  return (
-    <div className="p-2 font-mono text-xs">
-      <div className="mb-2 flex flex-wrap items-center gap-2 px-2">
-        {timelineOn && (
-          <TimelineTransport audio={audio} live={live} recordings={recordings} />
-        )}
-        <div className="ml-auto flex items-center gap-2">
-          <Label
-            htmlFor="events-timeline"
-            className="font-mono text-[10px] uppercase tracking-wide text-muted-foreground"
-          >
-            Timeline
-          </Label>
-          <Switch id="events-timeline" checked={timelineOn} onCheckedChange={onTimelineToggle} />
-        </div>
-      </div>
-
-      {timelineOn && (
-        <EventTimeline
-          events={events}
-          live={live}
-          className="mb-3"
-          audioWindow={audio.window}
-          playheadAt={audio.playheadAt}
-          onSeek={audio.selected ? audio.seekTo : undefined}
-        />
+      {unsupported && (
+        <p className="text-xs text-yellow-500">
+          This browser has no MediaRecorder support, so session audio cannot be saved.
+        </p>
       )}
 
-      {events.map((e) => {
-        const active =
-          audio.playheadAt != null &&
-          Math.abs(e.at - audio.playheadAt) <= TIMELINE_ACTIVE_WINDOW_MS;
-        const seekable = audio.canSeekTo(e.at);
-        return (
-          <div
-            key={e.id}
-            role={seekable ? "button" : undefined}
-            tabIndex={seekable ? 0 : undefined}
-            onClick={seekable ? () => audio.seekTo(e.at) : undefined}
-            onKeyDown={
-              seekable
-                ? (ev) => {
-                    if (ev.key === "Enter" || ev.key === " ") {
-                      ev.preventDefault();
-                      audio.seekTo(e.at);
-                    }
-                  }
-                : undefined
-            }
-            className={cn(
-              "flex gap-3 rounded px-2 py-1",
-              active ? "bg-primary/10 ring-1 ring-primary/30" : "hover:bg-muted/40",
-              seekable && "cursor-pointer"
+      <SavedAudioList
+        agentName={agentName}
+        recordings={recordings}
+        onDeleted={onDeleted}
+        emptyMessage={
+          live
+            ? "Recording this session — the agent audio and the mixed conversation are saved when it ends."
+            : "No saved audio yet. Start a session; the agent output, your side and the mix are stored when it ends."
+        }
+        status={
+          <>
+            {recording && (
+              <span className="flex items-center gap-1.5 text-[10px] font-mono uppercase text-red-500">
+                <span className="size-1.5 animate-pulse rounded-full bg-red-500" />
+                recording
+              </span>
             )}
-            title={seekable ? "Play the recording from here" : undefined}
-          >
-            <span className="shrink-0 text-muted-foreground">{formatClock(e.at)}</span>
-            <span
-              className={cn(
-                "w-[190px] shrink-0",
-                e.level === "error"
-                  ? "text-destructive"
-                  : e.level === "warn"
-                    ? "text-yellow-500"
-                    : "text-primary"
-              )}
-            >
-              {e.name}
-            </span>
-            <span className="min-w-0 break-all text-foreground/80">{e.detail}</span>
-          </div>
-        );
-      })}
-      <div ref={endRef} />
+            {uploading && (
+              <span className="text-[10px] font-mono uppercase text-muted-foreground">saving…</span>
+            )}
+          </>
+        }
+      />
     </div>
   );
-}
-
-/* ────────────────────────────────────
-   Events tab: audio synced to the timeline
-   ──────────────────────────────────── */
-type TimelineAudio = ReturnType<typeof useTimelineAudio>;
-
-function useTimelineAudio({
-  agentName,
-  roomName,
-  recordings,
-}: {
-  agentName: string;
-  roomName: string | null;
-  recordings: SavedRecording[];
-}) {
-  const elRef = useRef<HTMLAudioElement | null>(null);
-  const [chosenFile, setChosenFile] = useState<string | null>(null);
-  const [playing, setPlaying] = useState(false);
-  const [positionMs, setPositionMs] = useState(0);
-
-  // Prefer this session's mixed recording, else the newest one on record.
-  const selected = useMemo(() => {
-    if (chosenFile) {
-      const pick = recordings.find((r) => r.file === chosenFile);
-      if (pick) return pick;
-    }
-    const ofRoom = recordings.filter((r) => r.room === roomName);
-    return (
-      ofRoom.find((r) => r.kind === "mixed") ??
-      ofRoom[0] ??
-      recordings.find((r) => r.kind === "mixed") ??
-      recordings[0] ??
-      null
-    );
-  }, [chosenFile, recordings, roomName]);
-
-  const startMs = selected ? new Date(selected.startedAt).getTime() : null;
-  const durationMs = selected?.durationMs ?? 0;
-
-  const src = selected
-    ? `/api/agents/${encodeURIComponent(agentName)}/recordings/${encodeURIComponent(selected.file)}`
-    : null;
-
-  // The player has no UI of its own — the timeline and transport drive it — so
-  // the element is created here instead of rendered.
-  useEffect(() => {
-    if (!src) return;
-    const el = new Audio(src);
-    el.preload = "metadata";
-    elRef.current = el;
-
-    const onPlay = () => setPlaying(true);
-    const onPause = () => setPlaying(false);
-    el.addEventListener("play", onPlay);
-    el.addEventListener("pause", onPause);
-    el.addEventListener("ended", onPause);
-
-    return () => {
-      el.pause();
-      el.removeEventListener("play", onPlay);
-      el.removeEventListener("pause", onPause);
-      el.removeEventListener("ended", onPause);
-      elRef.current = null;
-    };
-  }, [src]);
-
-  // Smooth playhead: `timeupdate` only fires a few times a second.
-  useEffect(() => {
-    if (!playing) return;
-    let raf = 0;
-    const tick = () => {
-      const el = elRef.current;
-      if (el) setPositionMs(el.currentTime * 1000);
-      raf = requestAnimationFrame(tick);
-    };
-    raf = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(raf);
-  }, [playing]);
-
-  const seekMs = useCallback(
-    (ms: number) => {
-      const el = elRef.current;
-      const clamped = Math.min(Math.max(0, ms), durationMs);
-      setPositionMs(clamped);
-      if (el) el.currentTime = clamped / 1000;
-    },
-    [durationMs]
-  );
-
-  /** Seek by wall-clock instant, which is what the timeline and log rows use. */
-  const seekTo = useCallback(
-    (at: number) => {
-      if (startMs === null) return;
-      seekMs(at - startMs);
-    },
-    [seekMs, startMs]
-  );
-
-  const canSeekTo = useCallback(
-    (at: number) =>
-      startMs !== null && at >= startMs - 1000 && at <= startMs + durationMs + 1000,
-    [startMs, durationMs]
-  );
-
-  const toggle = useCallback(() => {
-    const el = elRef.current;
-    if (!el) return;
-    if (el.paused) void el.play().catch(() => {});
-    else el.pause();
-  }, []);
-
-  const nudge = useCallback((deltaMs: number) => {
-    const el = elRef.current;
-    if (!el) return;
-    seekMs(el.currentTime * 1000 + deltaMs);
-  }, [seekMs]);
-
-  return {
-    selected,
-    src,
-    playing,
-    positionMs,
-    durationMs,
-    window: startMs === null ? null : { start: startMs, end: startMs + durationMs },
-    playheadAt: startMs === null ? null : startMs + positionMs,
-    choose: (file: string) => {
-      setChosenFile(file);
-      setPositionMs(0);
-      setPlaying(false);
-    },
-    seekTo,
-    canSeekTo,
-    toggle,
-    nudge,
-  };
-}
-
-function TimelineTransport({
-  audio,
-  live,
-  recordings,
-}: {
-  audio: TimelineAudio;
-  live: boolean;
-  recordings: SavedRecording[];
-}) {
-  if (!audio.selected) {
-    return (
-      <span className="text-[10px] font-mono uppercase tracking-wide text-muted-foreground">
-        {live ? "recording — audio syncs here when the session ends" : "no session audio saved yet"}
-      </span>
-    );
-  }
-
-  return (
-    <div className="flex flex-wrap items-center gap-1.5">
-      <Button variant="outline" size="icon-xs" onClick={() => audio.nudge(-5000)} title="Back 5s">
-        <SkipBack className="size-3.5" />
-      </Button>
-      <Button variant="outline" size="icon-xs" onClick={audio.toggle} title={audio.playing ? "Pause" : "Play"}>
-        {audio.playing ? <Pause className="size-3.5" /> : <Play className="size-3.5" />}
-      </Button>
-      <Button variant="outline" size="icon-xs" onClick={() => audio.nudge(5000)} title="Forward 5s">
-        <SkipForward className="size-3.5" />
-      </Button>
-      <span className="ml-1 font-mono text-[10px] text-muted-foreground">
-        {formatClockMs(audio.positionMs)} / {formatClockMs(audio.durationMs)}
-      </span>
-
-      {recordings.length > 1 && (
-        <Select value={audio.selected.file} onValueChange={audio.choose}>
-          <SelectTrigger size="sm" className="ml-1 h-7 min-w-[220px] text-xs">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            {recordings.map((r) => (
-              <SelectItem key={r.file} value={r.file} className="text-xs">
-                {RECORDING_KIND_LABEL[r.kind] ?? r.kind} · {r.room.slice(-13)} ·{" "}
-                {formatDuration(r.durationMs)}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-      )}
-    </div>
-  );
-}
-
-/** mm:ss.t — a tenth of a second matters when lining up against events. */
-function formatClockMs(ms: number): string {
-  const total = Math.max(0, ms) / 1000;
-  const m = Math.floor(total / 60);
-  const s = Math.floor(total % 60);
-  const tenth = Math.floor((total * 10) % 10);
-  return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}.${tenth}`;
 }
 
 /* ────────────────────────────────────
@@ -1924,281 +2123,6 @@ function DtmfTab({
 }
 
 /* ────────────────────────────────────
-   Tab: Metrics (+ per-turn tracing)
-   ──────────────────────────────────── */
-/** Rendered at once; VAD alone can produce thousands of rows in a few minutes. */
-const METRIC_ROW_LIMIT = 300;
-
-function MetricsTab({ metrics, live }: { metrics: ConsoleMetric[]; live: boolean }) {
-  // VAD is off by default: it fires twice a second and says nothing about a turn.
-  const [hidden, setHidden] = useState<MetricKind[]>(["vad"]);
-
-  const traces = useMemo(() => buildTurnTraces(metrics), [metrics]);
-
-  const presentKinds = useMemo(() => {
-    const counts = new Map<MetricKind, number>();
-    for (const m of metrics) counts.set(m.kind, (counts.get(m.kind) ?? 0) + 1);
-    return counts;
-  }, [metrics]);
-
-  const shown = useMemo(
-    () => metrics.filter((m) => !hidden.includes(m.kind)),
-    [metrics, hidden]
-  );
-
-  const ttfts = metrics
-    .filter((m) => (m.kind === "llm" || m.kind === "realtime") && m.ttft !== undefined)
-    .map((m) => m.ttft!);
-  const ttfbs = metrics.filter((m) => m.kind === "tts" && m.ttfb !== undefined).map((m) => m.ttfb!);
-  const totals = traces.map((t) => t.total).filter((t) => t > 0);
-  // The turn detector's own inference time, else the session's EOU delay.
-  const turnDelays = metrics
-    .filter((m) => m.kind === "eot" && m.detectionDelay !== undefined)
-    .map((m) => m.detectionDelay!);
-  const eouDelays = metrics
-    .filter((m) => m.kind === "eou" && m.endOfUtteranceDelay !== undefined)
-    .map((m) => m.endOfUtteranceDelay!);
-
-  if (metrics.length === 0) {
-    return (
-      <div className="flex h-full flex-col items-center justify-center gap-2 px-6 text-center">
-        <span className="rounded-md bg-muted px-3 py-1.5 text-sm text-muted-foreground">
-          No metrics received yet
-        </span>
-        <p className="max-w-lg text-xs text-muted-foreground">
-          Metrics arrive on the <code className="font-mono">{CONSOLE_METRICS_TOPIC}</code> room
-          topic. An agent deployed before console metrics existed does not publish them —
-          open it in the Builder and deploy again.
-          {live ? " Speak to the agent to produce the first turn." : ""}
-        </p>
-      </div>
-    );
-  }
-
-  return (
-    <div className="space-y-4 p-4">
-      {/* Summary */}
-      <div className="grid grid-cols-2 gap-3 md:grid-cols-5">
-        <StatTile label="LLM TTFT p50" value={formatSeconds(percentile(ttfts, 50))} />
-        <StatTile label="LLM TTFT p90" value={formatSeconds(percentile(ttfts, 90))} />
-        <StatTile label="TTS TTFB p50" value={formatSeconds(percentile(ttfbs, 50))} />
-        <StatTile
-          label={turnDelays.length > 0 ? "Turn detect p50" : "EOU delay p50"}
-          value={formatSeconds(
-            percentile(turnDelays.length > 0 ? turnDelays : eouDelays, 50)
-          )}
-        />
-        <StatTile label="Turn latency p90" value={formatSeconds(percentile(totals, 90))} />
-      </div>
-
-      {/* Tracing */}
-      {traces.length > 0 && (
-        <div>
-          <div className="mb-2 flex items-center gap-3 text-[10px] font-mono uppercase tracking-wide text-muted-foreground">
-            <span>Turn latency</span>
-            <span className="flex items-center gap-1"><span className="size-2 rounded-sm bg-sky-500" /> EOU</span>
-            <span className="flex items-center gap-1"><span className="size-2 rounded-sm bg-violet-500" /> LLM TTFT</span>
-            <span className="flex items-center gap-1"><span className="size-2 rounded-sm bg-amber-500" /> TTS TTFB</span>
-          </div>
-          <div className="space-y-1.5">
-            {traces.map((t) => {
-              const scale = Math.max(...traces.map((x) => x.total), 0.001);
-              const pct = (v?: number) => ((v ?? 0) / scale) * 100;
-              return (
-                <div key={t.speechId} className="flex items-center gap-3">
-                  <span className="w-[92px] shrink-0 truncate font-mono text-xs text-muted-foreground" title={t.speechId}>
-                    {t.speechId.slice(0, 12)}
-                  </span>
-                  <div className="flex h-4 min-w-0 flex-1 overflow-hidden rounded-sm bg-muted">
-                    <div className="bg-sky-500" style={{ width: `${pct(t.eou)}%` }} title={`EOU ${formatSeconds(t.eou)}`} />
-                    <div className="bg-violet-500" style={{ width: `${pct(t.ttft)}%` }} title={`TTFT ${formatSeconds(t.ttft)}`} />
-                    <div className="bg-amber-500" style={{ width: `${pct(t.ttfb)}%` }} title={`TTFB ${formatSeconds(t.ttfb)}`} />
-                  </div>
-                  <span className="w-[72px] shrink-0 text-right font-mono text-xs text-foreground/80">
-                    {formatSeconds(t.total)}
-                  </span>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      )}
-
-      {/* Type filters */}
-      <div className="flex flex-wrap items-center gap-1.5">
-        <span className="mr-1 text-[10px] font-mono uppercase tracking-wide text-muted-foreground">
-          Show
-        </span>
-        {Array.from(presentKinds.entries()).map(([kind, count]) => {
-          const on = !hidden.includes(kind);
-          return (
-            <button
-              key={kind}
-              onClick={() =>
-                setHidden((prev) =>
-                  prev.includes(kind) ? prev.filter((k) => k !== kind) : [...prev, kind]
-                )
-              }
-              title={METRIC_KIND_TITLE[kind]}
-              className={cn(
-                "rounded-full border px-2 py-0.5 font-mono text-[10px] transition-colors",
-                on
-                  ? "border-primary/40 bg-primary/10 text-foreground"
-                  : "border-border text-muted-foreground line-through"
-              )}
-            >
-              {METRIC_KIND_LABEL[kind]} {count}
-            </button>
-          );
-        })}
-      </div>
-
-      {/* Raw rows */}
-      <div className="overflow-x-auto">
-        <table className="w-full text-xs">
-          <thead>
-            <tr className="border-b text-left font-mono uppercase tracking-wide text-muted-foreground">
-              <th className="px-2 py-1.5 font-medium">Time</th>
-              <th className="px-2 py-1.5 font-medium">Type</th>
-              <th className="px-2 py-1.5 font-medium">Label</th>
-              <th className="px-2 py-1.5 font-medium">Latency</th>
-              <th className="px-2 py-1.5 font-medium">Duration</th>
-              <th className="px-2 py-1.5 font-medium">Audio</th>
-              <th className="px-2 py-1.5 font-medium">Tokens</th>
-              <th className="px-2 py-1.5 font-medium">TPS</th>
-            </tr>
-          </thead>
-          <tbody className="font-mono">
-            {shown
-              .slice(-METRIC_ROW_LIMIT)
-              .reverse()
-              .map((m) => {
-                const cells = metricRowCells(m);
-                return (
-                  <tr
-                    key={m.id}
-                    className="border-b last:border-0 hover:bg-muted/40"
-                    title={cells.detail || undefined}
-                  >
-                    <td className="px-2 py-1.5 text-muted-foreground">{formatClock(m.at)}</td>
-                    <td className="px-2 py-1.5">
-                      <Badge variant="outline" className="text-[10px]">
-                        {METRIC_KIND_LABEL[m.kind]}
-                      </Badge>
-                    </td>
-                    <td className="px-2 py-1.5 text-foreground/70">{m.label}</td>
-                    <td className="px-2 py-1.5 text-foreground/80" title={cells.latencyLabel}>
-                      {cells.latency}
-                    </td>
-                    <td className="px-2 py-1.5 text-foreground/70">{cells.duration}</td>
-                    <td className="px-2 py-1.5 text-foreground/70">{cells.audio}</td>
-                    <td className="px-2 py-1.5 text-foreground/70">{cells.tokens}</td>
-                    <td className="px-2 py-1.5 text-foreground/70">{cells.tps}</td>
-                  </tr>
-                );
-              })}
-            {shown.length === 0 && (
-              <tr>
-                <td colSpan={8} className="px-2 py-6 text-center text-muted-foreground">
-                  Every metric type is hidden — turn one back on above.
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
-        {shown.length > METRIC_ROW_LIMIT && (
-          <p className="px-2 py-2 text-[10px] font-mono text-muted-foreground">
-            showing the latest {METRIC_ROW_LIMIT} of {shown.length} rows
-            {hidden.length > 0
-              ? ` · ${metrics.length - shown.length} hidden by filter`
-              : ""}
-          </p>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function StatTile({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="rounded-lg border p-3">
-      <div className="text-[10px] font-mono uppercase tracking-wide text-muted-foreground">
-        {label}
-      </div>
-      <div className="mt-1 font-mono text-lg text-foreground">{value}</div>
-    </div>
-  );
-}
-
-/* ────────────────────────────────────
-   Tab: Models (usage)
-   ──────────────────────────────────── */
-function ModelsTab({
-  metrics,
-  config,
-}: {
-  metrics: ConsoleMetric[];
-  config: AgentConfigView | null;
-}) {
-  const usage = useMemo(() => aggregateUsage(metrics), [metrics]);
-
-  return (
-    <div className="space-y-4 p-4">
-      <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
-        <StatTile label="Configured LLM" value={config?.llmModel ?? "—"} />
-        <StatTile label="Configured TTS" value={config?.ttsModel ?? "—"} />
-        <StatTile label="Configured STT" value={config?.sttModel ?? "—"} />
-      </div>
-
-      {usage.length === 0 ? (
-        <DockEmpty>No usage metrics received yet</DockEmpty>
-      ) : (
-        <div className="overflow-x-auto">
-          <table className="w-full text-xs">
-            <thead>
-              <tr className="border-b text-left font-mono uppercase tracking-wide text-muted-foreground">
-                <th className="px-2 py-1.5 font-medium">Type</th>
-                <th className="px-2 py-1.5 font-medium">Label</th>
-                <th className="px-2 py-1.5 font-medium">Requests</th>
-                <th className="px-2 py-1.5 font-medium">Prompt</th>
-                <th className="px-2 py-1.5 font-medium">Completion</th>
-                <th className="px-2 py-1.5 font-medium">Total tokens</th>
-                <th className="px-2 py-1.5 font-medium">Audio</th>
-                <th className="px-2 py-1.5 font-medium">Chars</th>
-                <th className="px-2 py-1.5 font-medium">Avg latency</th>
-                <th className="px-2 py-1.5 font-medium">Avg TPS</th>
-              </tr>
-            </thead>
-            <tbody className="font-mono">
-              {usage.map((u) => (
-                <tr key={`${u.kind}:${u.label}`} className="border-b last:border-0">
-                  <td className="px-2 py-1.5">
-                    <Badge variant="outline" className="text-[10px]">
-                      {METRIC_KIND_LABEL[u.kind]}
-                    </Badge>
-                  </td>
-                  <td className="px-2 py-1.5 text-foreground/70">{u.label}</td>
-                  <td className="px-2 py-1.5 text-foreground/80">{u.requests}</td>
-                  <td className="px-2 py-1.5 text-foreground/70">{formatCount(u.promptTokens)}</td>
-                  <td className="px-2 py-1.5 text-foreground/70">{formatCount(u.completionTokens)}</td>
-                  <td className="px-2 py-1.5 text-foreground/70">{formatCount(u.totalTokens)}</td>
-                  <td className="px-2 py-1.5 text-foreground/70">{formatSeconds(u.audioSeconds)}</td>
-                  <td className="px-2 py-1.5 text-foreground/70">{formatCount(u.characters)}</td>
-                  <td className="px-2 py-1.5 text-foreground/70">{formatSeconds(u.avgLatency)}</td>
-                  <td className="px-2 py-1.5 text-foreground/70">
-                    {u.avgTokensPerSecond !== undefined ? u.avgTokensPerSecond.toFixed(1) : "—"}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-    </div>
-  );
-}
-
-/* ────────────────────────────────────
    Clear confirmation
    ──────────────────────────────────── */
 function ClearDialog({
@@ -2304,6 +2228,7 @@ function ConfigureDialog({
               A session is running. End it and start a new one for these to take effect.
             </div>
           )}
+
           <div className="space-y-1.5">
             <Label>Your display name</Label>
             <Input

@@ -5,7 +5,8 @@ Self-hosted dashboard for managing [LiveKit](https://livekit.io) infrastructure.
 ## Features
 
 - **Overview** — connection stats, participant minutes, data transfer, room sessions
-- **Sessions** — live room list with participants, status, and duration from the LiveKit server
+- **Sessions** — live room list with participants, status, and duration from the LiveKit server, plus a searchable **History** of finished sessions you can replay; optionally record SIP calls and sandbox sessions server-side, with no browser open
+- **Storage** — keep session audio on the dashboard's disk or in any S3-compatible bucket
 - **Agents** — monitor connected agents, active sessions, historical chart, and deploy new agents via the agent builder
 - **Telephony** — calls, dispatch rules, phone numbers (manual + Twilio/Vonage/Telnyx import), SIP trunks
 - **Egresses / Ingresses** — manage media export and import streams
@@ -204,6 +205,41 @@ It speaks the HTTP+SSE transport the LiveKit agents MCP plugin expects and expos
 **Settings > Secrets** stores project-wide credentials. Every secret is written to each deployed agent's `.env.local` using its name as the environment variable, so a provider's API key reaches the agent process on deploy or restart. Per-agent secrets (agent builder's **Advanced** tab) override project secrets of the same name.
 
 Secret names must be valid environment variable names. Values are masked in the UI and can only be revealed by owners and admins.
+
+## Session history and storage
+
+A console session is recorded in the browser — the agent's audio, your side, and the mix — and uploaded when it ends. Its events, metrics and transcript are saved with it, so **Sessions > History** can replay the whole call: the same timeline, transcript and metrics panels as the live console, driven by the recording instead of a room. Clicking a transcript line or an event seeks the audio to that instant.
+
+**Settings > Storage** decides where the audio goes:
+
+- **Local disk** (default) — `data/console-recordings` on the dashboard host.
+- **S3-compatible** — AWS S3, MinIO, Ceph, R2, Wasabi. Fill in the bucket, region, and credentials; set an endpoint for anything that is not AWS, and leave **force path-style** on for MinIO and most self-hosted gateways. **Test connection** writes, reads back and deletes a probe object before you commit to it.
+
+Credentials are encrypted at rest (`API_KEYS_ENC_KEY`, or `SESSION_SECRET` as the fallback) and never leave the server: the dashboard streams recordings to the browser itself, so the bucket can stay private. Each recording remembers where it was written, so switching backends changes only where the next session goes — older audio still plays.
+
+This is separate from LiveKit's own egress recording, which is configured in `livekit.yaml`.
+
+### Recording sessions no browser was watching
+
+The above needs a console tab open — it is the browser that records. A phone call arriving over SIP, or a sandbox app talking to an agent, leaves no history by default.
+
+**Settings > Project > Session capture** changes that. With it on, the dashboard joins every new room itself as a hidden participant and writes the transcript, event log and a mixed WAV to **Sessions > History**, the same as a console session — those rows are marked *captured*. It needs the webhook receiver, because a room starting is how the dashboard finds out:
+
+```yaml
+# livekit.yaml — and restart the server, which reads this only at boot
+webhook:
+  api_key: devkey
+  urls:
+    - http://localhost:3010/api/webhooks/livekit
+```
+
+Worth knowing before you switch it on:
+
+- **It is off by default and applies to rooms that start after the change.** A call already in progress is not joined.
+- **Every call is recorded, including calls from real phone numbers.** Whether that is legal where you operate, and who you have to tell, is your call to make.
+- **Store the audio** can be turned off on its own, leaving the transcript and event log.
+- A per-session cap (60 minutes by default) stops one forgotten room from filling the disk.
+- A console tab wins: if one is in the room it keeps recording, and the capture keeps only the transcript as a backstop, so you never get two copies of the same call.
 
 ## API Keys
 

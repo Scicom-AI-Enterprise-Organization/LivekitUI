@@ -51,6 +51,10 @@ const navItems: NavItem[] = [
     label: "Sessions",
     href: "/sessions",
     icon: <Users className="size-4" />,
+    children: [
+      { label: "Live rooms", href: "/sessions" },
+      { label: "History", href: "/sessions/history" },
+    ],
   },
   {
     label: "Agents",
@@ -62,11 +66,6 @@ const navItems: NavItem[] = [
     ],
   },
   {
-    label: "Sandboxes",
-    href: "/sandboxes",
-    icon: <Box className="size-4" />,
-  },
-  {
     label: "Telephony",
     href: "/telephony",
     icon: <Phone className="size-4" />,
@@ -76,6 +75,11 @@ const navItems: NavItem[] = [
       { label: "Phone numbers", href: "/telephony/phone-numbers" },
       { label: "SIP trunks", href: "/telephony/sip-trunks" },
     ],
+  },
+  {
+    label: "Sandboxes",
+    href: "/sandboxes",
+    icon: <Box className="size-4" />,
   },
   {
     label: "Egresses",
@@ -97,6 +101,7 @@ const navItems: NavItem[] = [
       { label: "Team members", href: "/settings/team-members" },
       { label: "Providers", href: "/settings/providers" },
       { label: "Secrets", href: "/settings/secrets" },
+      { label: "Storage", href: "/settings/storage" },
       { label: "API keys", href: "/settings/api-keys" },
       { label: "Access tokens", href: "/settings/access-tokens" },
       { label: "API docs", href: "/api-docs" },

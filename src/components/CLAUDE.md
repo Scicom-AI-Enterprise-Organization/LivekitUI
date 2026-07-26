@@ -14,7 +14,8 @@ App-specific, safe to change freely.
 - `top-bar.tsx` — page header: `title`, `breadcrumb`, `actions`, optional refresh/time-range controls.
 - `list-state.tsx` — `ListLoading`, `ListError`, `ServiceNotice`. `ServiceNotice` is the "this LiveKit service isn't deployed" explainer; pair it with the `notice` from `useApiList`.
 - `data-table.tsx`, `stat-card.tsx`, `line-chart.tsx`, `donut-chart.tsx`, `time-range-picker.tsx` — presentational.
-- `console/` — the agent console (live session view).
+- `console/` — the agent console (live session view) **and** the panels shared with the session replay at `/sessions/history/[id]`: `session-primitives.tsx` (rail rows, dock resize, transcript), `events-panel.tsx`, `metrics-panel.tsx`, `recordings-panel.tsx`, `timeline-audio.tsx`. A panel used by both must take its data as props and its audio via the `useTimelineAudio` handle — replay has no room, no tracks and no live clock.
+  `use-session-persistence.ts` is what makes a session replayable: it posts events, metrics and transcript to `/api/sessions` when `live` goes false (and on unmount, for a tab that navigates away mid-call). It upserts on the room, so saving twice is harmless.
 
 ## Theming
 

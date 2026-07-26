@@ -21,7 +21,7 @@ export async function GET(
   }
 
   const { id } = await params;
-  return NextResponse.json({ recordings: listRecordings(decodeURIComponent(id)) });
+  return NextResponse.json({ recordings: await listRecordings(decodeURIComponent(id)) });
 }
 
 export async function POST(
@@ -65,7 +65,7 @@ export async function POST(
   const data = Buffer.from(await audio.arrayBuffer());
 
   try {
-    const meta = saveRecording(agent, {
+    const meta = await saveRecording(agent, {
       room,
       kind: kind as RecordingKind,
       mimeType: audio.type || "audio/webm",
@@ -98,7 +98,7 @@ export async function DELETE(
 
   // `all` backs "Clear events", which resets the console for this agent.
   if (all === true) {
-    const deleted = deleteAgentRecordings(agent);
+    const deleted = await deleteAgentRecordings(agent);
     return NextResponse.json({ success: true, deleted });
   }
 
@@ -107,7 +107,7 @@ export async function DELETE(
   }
 
   try {
-    const removed = deleteRecording(agent, file);
+    const removed = await deleteRecording(agent, file);
     if (!removed) {
       return NextResponse.json({ error: "Recording not found" }, { status: 404 });
     }

@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSession } from "@/lib/auth";
 import { getAgentLogTail, isAgentRunning } from "@/lib/agent-runner";
-import { DEFAULT_TAIL, TAIL_SIZES } from "@/lib/log-tail";
+import { DEFAULT_TAIL, TAIL_SIZES, isTailSize } from "@/lib/log-tail";
 
 /**
  * GET /api/agents/{name}/logs — the tail of an agent's log.
@@ -19,7 +19,7 @@ export async function GET(
   }
 
   const requested = (request.nextUrl.searchParams.get("tail") || DEFAULT_TAIL).toLowerCase();
-  if (!(requested in TAIL_SIZES)) {
+  if (!isTailSize(requested)) {
     return NextResponse.json(
       { error: `tail must be one of ${Object.keys(TAIL_SIZES).join(", ")}` },
       { status: 400 }

@@ -8,7 +8,7 @@ import { DataTable } from "@/components/livekit/data-table";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Info, RefreshCw } from "lucide-react";
+import { Info, RefreshCw, PhoneOff } from "lucide-react";
 import { useApiList } from "@/hooks/use-api-list";
 import { PlaceCallPanel } from "@/components/livekit/place-call-panel";
 import { ListError, ListLoading, ServiceNotice } from "@/components/livekit/list-state";
@@ -33,6 +33,7 @@ const columns = [
   { key: "startedAt", label: "Started At" },
   { key: "duration", label: "Duration" },
   { key: "status", label: "Status" },
+  { key: "actions", label: "" },
 ];
 
 function formatDuration(seconds: number | null) {
@@ -73,6 +74,17 @@ function TelephonyCallsContent() {
   const avgDuration = items.length ? Math.round(totalDuration / items.length) : 0;
   const withIssues = items.filter((c) => /fail|error|busy|no.?answer/i.test(c.status)).length;
 
+  // Ending a call means closing its room: dropping one participant leaves the
+  // rest of the call up.
+  const endCall = async (room: string) => {
+    await fetch("/api/calls/place", {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ room }),
+    }).catch(() => {});
+    reload();
+  };
+
   const rows = items.map((c) => ({
     callId: <span className="font-mono text-xs">{c.callId}</span>,
     from: c.from || "—",
@@ -84,6 +96,17 @@ function TelephonyCallsContent() {
       <Badge variant="outline" className="bg-emerald-500/10 text-emerald-500 border-emerald-500/30">
         {c.status}
       </Badge>
+    ),
+    actions: (
+      <Button
+        variant="ghost"
+        size="icon-xs"
+        className="text-muted-foreground hover:text-destructive"
+        title="End this call"
+        onClick={() => endCall(c.roomName)}
+      >
+        <PhoneOff className="size-3.5" />
+      </Button>
     ),
   }));
 

@@ -1,6 +1,6 @@
 # LiveKit UI
 
-Self-hosted dashboard for managing a LiveKit deployment: rooms, agents, telephony, egress/ingress, sandboxes, model providers, secrets and API keys. Next.js 16 App Router, React 19, Tailwind v4, shadcn/ui.
+Self-hosted dashboard for managing a LiveKit deployment: rooms, agents, telephony, egress/ingress, sandboxes, model providers, secrets, API keys and session history. Next.js 16 App Router, React 19, Tailwind v4, shadcn/ui.
 
 `README.md` is the user-facing setup guide. This file is the working context for editing the code.
 
@@ -27,6 +27,7 @@ The dashboard is a control plane — most pages are only as alive as the service
 | `livekit-sip` (container, `sip.yaml`) | 5060 | telephony pages |
 | Deployed agents (`data/agents/<name>/agent.py`) | — | agent preview, SIP calls reaching an agent |
 | Sandbox apps (`data/sandboxes/<name>`) | 31xx | `/sandbox/<name>` |
+| Session observers (`observer/session-observer.mjs`) | — | history for sessions no browser hosted; one child per live room, only when capture is on |
 
 `livekit-server` reads its config **only at boot**. Editing `livekit.yaml` (adding `redis:`, keys, webhooks) does nothing until it is restarted.
 
@@ -36,15 +37,29 @@ Egress, ingress and SIP register with the server over Redis. Without a `redis:` 
 
 ```
 Browser ──> Next.js (dashboard + /api/*) ──> livekit-server ──> agents / SIP / egress
-                     │
-                     ├── SQLite or Postgres  (src/lib/db.ts)
-                     └── spawns Python agents and sandbox Next apps as child processes
+                     │                             │
+                     │                             └─ room_started webhook
+                     │                                     │
+                     ├── SQLite or Postgres  (src/lib/db.ts)│
+                     └── spawns Python agents, sandbox Next apps, and
+                         session observers as child processes ◄──┘
 ```
 
 Two kinds of state, and the distinction matters constantly:
 
 - **LiveKit-owned** — rooms, participants, SIP trunks, dispatch rules, egress. Read and written through the server SDK. Nothing is mirrored locally; the dashboard is a view.
-- **Dashboard-owned** — users, sessions, agents' saved config, providers, secrets, phone numbers, sandbox apps, webhook log. Lives in our database.
+- **Dashboard-owned** — users, sessions, agents' saved config, providers, secrets, phone numbers, sandbox apps, webhook log, console session history. Lives in our database.
+
+Console session **audio** is the exception to both: the bytes go wherever Settings → Storage points (local disk or an S3-compatible bucket, see `src/lib/storage.ts`), and only the index lives in the database. `/sessions/history/[id]` replays a saved session by joining the two.
+
+### Who writes a session to history
+
+Two writers, and the difference explains most questions about missing sessions:
+
+- **A console tab.** `use-session-persistence.ts` posts what the browser held when the session ends. This is the only writer for sessions the console hosts, and the richer one — it has the local microphone, the config and the agent's metrics stream.
+- **A session observer**, when capture is switched on in Settings → Project. The `room_started` webhook spawns `observer/session-observer.mjs`, which joins the room hidden and drops a capture file that `src/lib/session-capture.ts` adopts. This is what puts an inbound SIP call or a sandbox app into the history at all.
+
+Capture is **off by default** (`capture_config`, one row). With it off, a session nobody had a tab open for leaves no trace — that is the product's default, not a bug. `console_sessions.source` records which writer won; a capture never overwrites a console row (`SESSION_SOURCE_RANK`).
 
 Phone numbers are the confusing one: that page is a *local registry* only. Adding a number provisions nothing and needs no SIP.
 

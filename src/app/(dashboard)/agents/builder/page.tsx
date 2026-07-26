@@ -47,6 +47,8 @@ import {
   Library,
 } from "lucide-react";
 import { ImportToolsDialog } from "@/components/livekit/import-tools-dialog";
+import { AgentLogViewer } from "@/components/livekit/agent-log-viewer";
+import { DEFAULT_TAIL, isTailSize, type TailSize } from "@/lib/log-tail";
 import type { ClientTool, HttpTool, McpServer, ToolKind } from "@/lib/tools";
 import {
   DropdownMenu,
@@ -2782,62 +2784,6 @@ const tabToSlug: Record<Tab, string> = {
   "Advanced": "advanced",
 };
 
-function AgentLogViewer({ name, onClose }: { name: string; onClose: () => void }) {
-  const [logs, setLogs] = useState("");
-  const [fetching, setFetching] = useState(false);
-  const [autoRefresh, setAutoRefresh] = useState(true);
-
-  const fetchLogs = useCallback(() => {
-    setFetching(true);
-    fetch(`/api/agents/${encodeURIComponent(name)}/logs`)
-      .then((res) => res.json())
-      .then((data) => setLogs(data.logs || "No logs yet."))
-      .finally(() => setFetching(false));
-  }, [name]);
-
-  useEffect(() => {
-    fetchLogs();
-    if (!autoRefresh) return;
-    const interval = setInterval(fetchLogs, 3000);
-    return () => clearInterval(interval);
-  }, [fetchLogs, autoRefresh]);
-
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center">
-      <div className="absolute inset-0 bg-black/50" onClick={onClose} />
-      <div className="relative flex h-[80vh] w-[80vw] max-w-4xl flex-col rounded-lg border border-border bg-background shadow-xl">
-        <div className="flex items-center justify-between border-b px-4 py-3">
-          <div className="flex items-center gap-3">
-            <ScrollText className="size-4 text-muted-foreground" />
-            <h3 className="text-sm font-semibold text-foreground">Logs: {name}</h3>
-            {autoRefresh && (
-              <Badge variant="outline" className="text-xs gap-1">
-                <span className="size-1.5 rounded-full bg-green-500 animate-pulse" />
-                Live
-              </Badge>
-            )}
-          </div>
-          <div className="flex items-center gap-2">
-            <Button variant="outline" size="sm" className="h-7 text-xs gap-1" onClick={() => setAutoRefresh(!autoRefresh)}>
-              {autoRefresh ? "Pause" : "Resume"}
-            </Button>
-            <Button variant="outline" size="sm" className="h-7 text-xs gap-1" onClick={fetchLogs} disabled={fetching}>
-              <RefreshCw className={`size-3 ${fetching ? "animate-spin" : ""}`} />
-              Refresh
-            </Button>
-            <button onClick={onClose} className="text-muted-foreground hover:text-foreground">
-              <X className="size-4" />
-            </button>
-          </div>
-        </div>
-        <div className="flex-1 overflow-auto bg-[#0d1117] p-4">
-          <pre className="text-xs font-mono leading-5 text-[#e6edf3] whitespace-pre-wrap break-all">{logs}</pre>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 function AgentBuilderContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -2852,7 +2798,6 @@ function AgentBuilderContent() {
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [deploying, setDeploying] = useState(false);
   const [running, setRunning] = useState<boolean | null>(null);
-  const [logsOpen, setLogsOpen] = useState(false);
   const [restarting, setRestarting] = useState(false);
   const [providers, setProviders] = useState<Provider[]>([]);
 
@@ -2907,6 +2852,25 @@ function AgentBuilderContent() {
     params.set("setting", tabToSlug[tab]);
     router.replace(`/agents/builder?${params.toString()}`, { scroll: false });
   }, [router]);
+
+  /**
+   * The log viewer lives in the URL — `?logs=<tail>` — so a tailed log can be
+   * linked or survive a reload. The value doubles as the tail size, defaulting
+   * to 10kb when absent or unrecognised.
+   */
+  const logsParam = searchParams.get("logs");
+  const logsOpen = logsParam !== null;
+  const logsTail: TailSize = isTailSize(logsParam) ? logsParam : DEFAULT_TAIL;
+
+  const setLogs = useCallback(
+    (tail: TailSize | null) => {
+      const params = new URLSearchParams(window.location.search);
+      if (tail === null) params.delete("logs");
+      else params.set("logs", tail);
+      router.replace(`/agents/builder?${params.toString()}`, { scroll: false });
+    },
+    [router]
+  );
 
   // On mount: if ?agent=... is provided, load that agent's config.
   // Otherwise, generate a new random name and create a draft agent.
@@ -3202,7 +3166,7 @@ function AgentBuilderContent() {
                 } else {
                   toast.success(`Agent "${config.name}" deployed`, {
                     description: data.pid ? `Running as PID ${data.pid}` : undefined,
-                    action: { label: "Logs", onClick: () => setLogsOpen(true) },
+                    action: { label: "Logs", onClick: () => setLogs(DEFAULT_TAIL) },
                   });
                 }
               } finally {
@@ -3226,7 +3190,7 @@ function AgentBuilderContent() {
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="w-56">
-              <DropdownMenuItem onClick={() => setLogsOpen(true)}>
+              <DropdownMenuItem onClick={() => setLogs(DEFAULT_TAIL)}>
                 <ScrollText className="size-4" />
                 View logs
               </DropdownMenuItem>
@@ -3320,7 +3284,14 @@ function AgentBuilderContent() {
       </div>
 
       {/* Logs viewer */}
-      {logsOpen && <AgentLogViewer name={config.name} onClose={() => setLogsOpen(false)} />}
+      {logsOpen && (
+        <AgentLogViewer
+          name={config.name}
+          tail={logsTail}
+          onTailChange={setLogs}
+          onClose={() => setLogs(null)}
+        />
+      )}
 
       {/* Delete agent confirmation dialog */}
       <Dialog open={deleteOpen} onOpenChange={setDeleteOpen}>

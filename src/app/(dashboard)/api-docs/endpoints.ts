@@ -236,9 +236,12 @@ export const ENDPOINTS: Endpoint[] = [
   {
     id: "agent-logs", group: "agents", method: "GET", path: "/api/agents/{name}/logs",
     title: "Agent logs",
-    description: "Tail of the worker's stdout and stderr.",
-    params: [{ name: "lines", in: "query", type: "number", doc: "How many lines to return." }],
-    request: `curl "$BASE/api/agents/support-bot/logs" -H "Authorization: Bearer $TOKEN"`,
+    description: "Tail of the worker's stdout and stderr. Reads only the last window of the file rather than loading all of it, and never opens on a half-written line. Poll it for a live tail.",
+    params: [
+      { name: "tail", in: "query", type: "string", doc: '"10kb" (default), "50kb", "100kb", or "all".' },
+    ],
+    request: `curl "$BASE/api/agents/support-bot/logs?tail=50kb" -H "Authorization: Bearer $TOKEN"`,
+    response: `{ "logs": "…", "running": true, "tail": "50kb",\n  "size": 180471, "truncated": true }`,
   },
   {
     id: "agent-metrics", group: "agents", method: "GET", path: "/api/agents/{name}/metrics",

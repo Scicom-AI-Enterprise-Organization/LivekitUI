@@ -8,8 +8,9 @@ import {
   RoomAudioRenderer,
   useVoiceAssistant,
   useParticipants,
+  useLocalParticipant,
+  useMediaDeviceSelect,
   BarVisualizer,
-  VoiceAssistantControlBar,
 } from "@livekit/components-react";
 import "@livekit/components-styles";
 import { Button } from "@/components/ui/button";
@@ -31,7 +32,12 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Loader2, PhoneOutgoing, PhoneOff } from "lucide-react";
+import { Loader2, PhoneOutgoing, PhoneOff, Mic, MicOff } from "lucide-react";
+import {
+  loopbackOutcome,
+  type DispatchRuleSummary,
+  type InboundNumber,
+} from "@/lib/sip-loopback";
 
 interface OutboundTrunk {
   trunkId: string;
@@ -47,6 +53,46 @@ interface ActiveCall {
   token: string;
   serverUrl: string;
   sipCallId?: string;
+}
+
+/**
+ * Mic mute + input picker. Hand-rolled rather than LiveKit's
+ * VoiceAssistantControlBar, whose device menu renders unstyled over the dark
+ * panel and which ships its own Disconnect button next to our Hang up.
+ */
+function CallControls() {
+  const { localParticipant, isMicrophoneEnabled } = useLocalParticipant();
+  const { devices, activeDeviceId, setActiveMediaDevice } = useMediaDeviceSelect({ kind: "audioinput" });
+
+  return (
+    <div className="flex w-full items-center justify-center gap-2">
+      <Button
+        size="sm"
+        variant={isMicrophoneEnabled ? "secondary" : "destructive"}
+        className="gap-1.5"
+        onClick={() => localParticipant.setMicrophoneEnabled(!isMicrophoneEnabled)}
+      >
+        {isMicrophoneEnabled ? <Mic className="size-3.5" /> : <MicOff className="size-3.5" />}
+        {isMicrophoneEnabled ? "Mute" : "Unmute"}
+      </Button>
+
+      <Select value={activeDeviceId || undefined} onValueChange={(id) => setActiveMediaDevice(id)}>
+        <SelectTrigger
+          size="sm"
+          className="max-w-[220px] border-white/20 bg-white/5 text-xs text-white/80 hover:bg-white/10"
+        >
+          <SelectValue placeholder="Microphone" />
+        </SelectTrigger>
+        <SelectContent>
+          {devices.map((d, i) => (
+            <SelectItem key={d.deviceId || i} value={d.deviceId}>
+              {d.label || `Microphone ${i + 1}`}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+    </div>
+  );
 }
 
 /** Live view of the room the call is placed into. */
@@ -74,7 +120,7 @@ function CallSession({ call, onHangUp }: { call: ActiveCall; onHangUp: () => voi
         <p className="text-[10px] text-white/30 mt-1 font-mono">{call.room}</p>
       </div>
 
-      <VoiceAssistantControlBar />
+      <CallControls />
 
       <Button variant="destructive" size="sm" className="gap-1.5" onClick={onHangUp}>
         <PhoneOff className="size-3.5" />
@@ -104,7 +150,9 @@ export function PlaceCallPanel({
   // Numbers your own inbound trunks answer — dialling one loops the call back
   // through the inbound path (trunk → dispatch rule → agent), which is the
   // quickest way to prove the whole chain without a carrier.
-  const [inboundNumbers, setInboundNumbers] = useState<{ number: string; trunk: string }[]>([]);
+  const [inboundNumbers, setInboundNumbers] = useState<InboundNumber[]>([]);
+  // Dispatch rules decide who answers a loopback call — an agent, or nobody.
+  const [rules, setRules] = useState<DispatchRuleSummary[]>([]);
   const [agents, setAgents] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -127,10 +175,18 @@ export function PlaceCallPanel({
         .then((d) =>
           setInboundNumbers(
             (d.trunks ?? []).flatMap((t: { name: string; trunkId: string; numbers?: string[] }) =>
-              (t.numbers ?? []).map((n: string) => ({ number: n, trunk: t.name || t.trunkId }))
+              (t.numbers ?? []).map((n: string) => ({
+                number: n,
+                trunk: t.name || t.trunkId,
+                trunkId: t.trunkId,
+              }))
             )
           )
         )
+        .catch(() => {}),
+      fetch("/api/dispatch-rules")
+        .then((r) => r.json())
+        .then((d) => setRules(d.rules ?? []))
         .catch(() => {}),
       fetch("/api/agents")
         .then((r) => r.json())
@@ -151,8 +207,8 @@ export function PlaceCallPanel({
 
   const place = async () => {
     setError("");
-    if (!trunkId) return setError("Pick an outbound trunk");
-    if (!callTo.trim()) return setError("Enter a phone number or SIP URI to call");
+    if (!callTo.trim()) return setError("Enter a phone number or SIP address to call");
+    if (!direct && !trunkId) return setError("Pick an outbound trunk to dial a phone number");
 
     setPlacing(true);
     try {
@@ -160,8 +216,13 @@ export function PlaceCallPanel({
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          trunkId,
-          callTo,
+          // An address is dialled directly, so no trunk is involved.
+          trunkId: direct ? undefined : trunkId,
+          callTo: callTo.trim(),
+          // The tone is published into the room. With an agent on the call it
+          // is something for the agent to react to, so only ring when the room
+          // is just you waiting for a pickup.
+          playDialtone: !agentName,
           agentName: agentName || undefined,
           fromNumber: fromNumber || undefined,
         }),
@@ -181,14 +242,44 @@ export function PlaceCallPanel({
     }
   };
 
-  const hangUp = () => {
-    setCall(null);
-    onCallPlaced?.();
-  };
+  // Closing the room, not just leaving it — otherwise the SIP leg and the agent
+  // stay on the line after the browser disconnects.
+  // Dialling one of our own numbers means the far end is governed by a dispatch
+  // rule, not by the agent picked here — worth saying, because an agent then
+  // answers even with "No agent" selected.
+  const selfDialled = inboundNumbers.find((n) => n.number === callTo.trim());
+  const outcome = selfDialled ? loopbackOutcome(rules, selfDialled) : null;
+
+  /**
+   * `sip:name@host` is dialled straight at that device. LiveKit rejects a full
+   * URI in sip_call_to, so the route splits it into an inline outbound config —
+   * which is also why no trunk (and no carrier) is needed for one.
+   */
+  const direct = (() => {
+    const trimmed = callTo.trim().replace(/^sips?:/i, "");
+    const at = trimmed.lastIndexOf("@");
+    return at > 0 && !!trimmed.slice(at + 1).trim();
+  })();
+
+  const hangUp = useCallback(
+    (room?: string) => {
+      const target = room ?? call?.room;
+      setCall(null);
+      if (target) {
+        fetch("/api/calls/place", {
+          method: "DELETE",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ room: target }),
+        }).catch(() => {});
+      }
+      onCallPlaced?.();
+    },
+    [call?.room, onCallPlaced]
+  );
 
   const close = () => {
     onOpenChange(false);
-    setCall(null);
+    if (call) hangUp(call.room);
     setError("");
   };
 
@@ -216,21 +307,13 @@ export function PlaceCallPanel({
               serverUrl={call.serverUrl}
               connect
               audio
-              onDisconnected={hangUp}
+              onDisconnected={() => hangUp()}
             >
-              <CallSession call={call} onHangUp={hangUp} />
+              <CallSession call={call} onHangUp={() => hangUp()} />
             </LiveKitRoom>
           ) : loading ? (
             <div className="flex justify-center py-8">
               <Loader2 className="size-5 animate-spin text-muted-foreground" />
-            </div>
-          ) : trunks.length === 0 ? (
-            <div className="rounded-lg border border-dashed border-border px-4 py-6 text-center text-sm text-muted-foreground">
-              No outbound trunks. Outbound calling needs one —{" "}
-              <Link href="/telephony/sip-trunks/new" className="text-primary hover:underline">
-                create an outbound trunk
-              </Link>{" "}
-              pointed at your provider.
             </div>
           ) : (
             <div className="space-y-4">
@@ -241,20 +324,36 @@ export function PlaceCallPanel({
               )}
 
               <div className="space-y-1.5">
-                <Label>Outbound trunk</Label>
-                <Select value={trunkId} onValueChange={setTrunkId}>
-                  <SelectTrigger className="w-full">
-                    <SelectValue placeholder="Select a trunk" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {trunks.map((t) => (
-                      <SelectItem key={t.trunkId} value={t.trunkId}>
-                        {t.name || t.trunkId}
-                        {t.address ? ` — ${t.address}` : ""}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
+                <Label>
+                  Outbound trunk{" "}
+                  {direct && (
+                    <span className="font-normal text-muted-foreground">(not used for an address)</span>
+                  )}
+                </Label>
+                {/* No trunk is fine: a sip: address is dialled without one. */}
+                {trunks.length === 0 ? (
+                  <div className="rounded-lg border border-dashed border-border px-4 py-3 text-center text-sm text-muted-foreground">
+                    No outbound trunks —{" "}
+                    <Link href="/telephony/sip-trunks/new" className="text-primary hover:underline">
+                      create one
+                    </Link>{" "}
+                    pointed at your provider to dial phone numbers.
+                  </div>
+                ) : (
+                  <Select value={trunkId} onValueChange={setTrunkId} disabled={direct}>
+                    <SelectTrigger className="w-full">
+                      <SelectValue placeholder="Select a trunk" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {trunks.map((t) => (
+                        <SelectItem key={t.trunkId} value={t.trunkId}>
+                          {t.name || t.trunkId}
+                          {t.address ? ` — ${t.address}` : ""}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                )}
               </div>
 
               <div className="space-y-1.5">
@@ -283,9 +382,10 @@ export function PlaceCallPanel({
                 )}
                 <p className="text-xs text-muted-foreground">
                   A phone number needs a carrier on the trunk. A{" "}
-                  <code className="rounded bg-muted px-1 py-0.5 text-xs">sip:</code> URI — your own softphone,
-                  for instance — works without one. Picking one of your own numbers above loops the call back
-                  through your inbound trunk and dispatch rule.
+                  <code className="rounded bg-muted px-1 py-0.5 text-xs">sip:you@host</code> address —
+                  your own softphone, for instance — rings that device directly and needs no trunk at
+                  all. Picking one of your own numbers above loops the call back through your inbound
+                  trunk and dispatch rule, so an agent answers it.
                 </p>
               </div>
 
@@ -309,10 +409,38 @@ export function PlaceCallPanel({
                     ))}
                   </SelectContent>
                 </Select>
-                {agents.length === 0 && (
-                  <p className="text-xs text-muted-foreground">
-                    No running agents. Deploy one to have it answer.
+                {selfDialled && outcome ? (
+                  <p
+                    className={
+                      outcome.kind === "agent"
+                        ? "text-xs text-yellow-600 dark:text-yellow-500"
+                        : "text-xs text-muted-foreground"
+                    }
+                  >
+                    This is your own number on trunk{" "}
+                    <span className="font-medium">{selfDialled.trunk}</span>, so this setting applies
+                    to your side only —{" "}
+                    {outcome.kind === "agent" ? (
+                      <>
+                        the far end is answered by{" "}
+                        <span className="font-medium">{outcome.agents.join(", ")}</span> via rule{" "}
+                        <span className="font-medium">{outcome.ruleName}</span>.
+                      </>
+                    ) : outcome.kind === "empty" ? (
+                      <>
+                        rule <span className="font-medium">{outcome.ruleName}</span> dispatches no
+                        agent, so the far end is an empty room and nothing answers.
+                      </>
+                    ) : (
+                      <>no dispatch rule matches it, so the inbound call is rejected.</>
+                    )}
                   </p>
+                ) : (
+                  agents.length === 0 && (
+                    <p className="text-xs text-muted-foreground">
+                      No running agents. Deploy one to have it answer.
+                    </p>
+                  )
                 )}
               </div>
 
@@ -335,7 +463,7 @@ export function PlaceCallPanel({
               <DialogClose asChild>
                 <Button variant="outline">Cancel</Button>
               </DialogClose>
-              <Button onClick={place} disabled={placing || trunks.length === 0}>
+              <Button onClick={place} disabled={placing || (!direct && trunks.length === 0)}>
                 {placing ? <Loader2 className="size-4 animate-spin" /> : <PhoneOutgoing className="size-4" />}
                 Call
               </Button>

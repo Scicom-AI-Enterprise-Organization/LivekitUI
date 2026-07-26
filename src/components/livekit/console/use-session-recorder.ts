@@ -18,18 +18,12 @@ export type RecordingKind = "mixed" | "agent" | "user";
 
 const RECORDING_KINDS: RecordingKind[] = ["mixed", "agent", "user"];
 
-export interface SavedRecording {
-  file: string;
-  agent: string;
-  room: string;
-  kind: RecordingKind;
-  mimeType: string;
-  bytes: number;
-  durationMs: number;
-  /** Wall clock of the first recorded sample — the Console's audio↔event clock. */
-  startedAt: string;
-  createdAt: string;
-}
+/**
+ * What the upload comes back as. Defined with the other session shapes, since
+ * the replay view reads the same records without ever recording anything.
+ */
+import type { SavedRecording } from "./session-types";
+export type { SavedRecording };
 
 function pickMimeType(): string | undefined {
   if (typeof MediaRecorder === "undefined") return undefined;
@@ -59,6 +53,7 @@ export function useSessionRecorder({
   live,
   agentTrack,
   micTrack,
+  callerTrack,
   onSaved,
   onError,
 }: {
@@ -67,6 +62,12 @@ export function useSessionRecorder({
   live: boolean;
   agentTrack?: MediaStreamTrack;
   micTrack?: MediaStreamTrack;
+  /**
+   * A phone/SIP caller in the room. Counts as the user side, so a dialled test
+   * records the caller rather than an unused browser mic. One caller only —
+   * console tests put a single phone in the room.
+   */
+  callerTrack?: MediaStreamTrack;
   onSaved: (recording: SavedRecording) => void;
   onError?: (message: string) => void;
 }) {
@@ -226,7 +227,8 @@ export function useSessionRecorder({
 
     attach(agentTrack, ["mixed", "agent"]);
     attach(micTrack, ["mixed", "user"]);
-  }, [agentTrack, micTrack, recording]);
+    attach(callerTrack, ["mixed", "user"]);
+  }, [agentTrack, micTrack, callerTrack, recording]);
 
   return { recording, uploading, unsupported };
 }

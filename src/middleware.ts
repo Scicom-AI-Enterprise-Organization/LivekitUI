@@ -7,7 +7,7 @@ const DASHBOARD_PREFIXES = [
   "/api/sandbox-config", "/api/webhooks", "/api/api-keys", "/api/livekit",
   "/api/providers", "/api/secrets", "/api/access-tokens",
   "/api/egresses", "/api/ingresses", "/api/sip-trunks", "/api/dispatch-rules",
-  "/api/calls", "/api/overview", "/api/metrics",
+  "/api/calls", "/api/overview", "/api/metrics", "/api/sessions", "/api/storage",
   "/settings", "/agents", "/sessions", "/telephony", "/egresses", "/ingresses",
   "/billing", "/hub", "/api-docs",
 ];

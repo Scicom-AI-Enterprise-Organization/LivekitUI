@@ -129,6 +129,9 @@ export function serializeDispatchRule(r: SIPDispatchRuleInfo) {
     type: rule?.case ?? null,
     roomName: rule?.case === "dispatchRuleDirect" ? rule.value.roomName : null,
     roomPrefix: rule?.case === "dispatchRuleIndividual" ? rule.value.roomPrefix : null,
+    // Agents dispatched into the room this rule creates. Without one, a caller
+    // reaches an empty room — so the UI needs to show and edit it.
+    agents: r.roomConfig?.agents?.map((a) => a.agentName).filter(Boolean) ?? [],
   };
 }
 
