@@ -9,7 +9,8 @@ import path from "path";
  * listened to after the page is closed.
  */
 
-export type RecordingKind = "mixed" | "agent";
+/** `user` is your microphone alone, `agent` is its TTS alone, `mixed` is both. */
+export type RecordingKind = "mixed" | "agent" | "user";
 
 export interface RecordingMeta {
   /** File name on disk, also the id used by the API. */
@@ -154,8 +155,15 @@ export function deleteRecording(agent: string, file: string): boolean {
   return true;
 }
 
-/** Removes every recording for an agent — used when the agent is deleted. */
-export function deleteAgentRecordings(agent: string): void {
+/**
+ * Removes every recording for an agent. Used when the agent is deleted and when
+ * the Console clears a session. Returns how many audio files went away.
+ */
+export function deleteAgentRecordings(agent: string): number {
   const dir = path.join(getRecordingsRoot(), slug(agent));
-  if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
+  if (!fs.existsSync(dir)) return 0;
+
+  const count = listRecordings(agent).length;
+  fs.rmSync(dir, { recursive: true, force: true });
+  return count;
 }

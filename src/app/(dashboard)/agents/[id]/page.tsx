@@ -367,12 +367,6 @@ export default function AgentDetailPage() {
                 </Button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end" className="w-56">
-                <DropdownMenuItem asChild>
-                  <Link href={`/agents/${encodeURIComponent(id)}/console`}>
-                    <ExternalLink className="size-4" />
-                    Test in Console
-                  </Link>
-                </DropdownMenuItem>
                 <DropdownMenuItem onClick={() => setLogsOpen(true)}>
                   <ScrollText className="size-4" />
                   View logs

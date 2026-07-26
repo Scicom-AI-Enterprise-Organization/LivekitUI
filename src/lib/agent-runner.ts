@@ -328,6 +328,46 @@ export function getAgentMetrics(name: string): AgentMetrics | null {
   };
 }
 
+export interface AgentLogTail {
+  logs: string;
+  /** Size of the whole log file in bytes. */
+  size: number;
+  /** True when the file is longer than the window that was read. */
+  truncated: boolean;
+}
+
+/**
+ * Reads the last `maxBytes` of an agent's log, or the whole file when
+ * `maxBytes` is null.
+ *
+ * Seeks to the tail rather than reading the file into memory: a chatty agent
+ * left running produces logs far larger than the viewer ever shows.
+ */
+export function getAgentLogTail(name: string, maxBytes: number | null): AgentLogTail {
+  const proc = runningAgents.get(name);
+  const logFile = proc?.logFile || path.join(getLogsDir(), `${name}.log`);
+  if (!fs.existsSync(logFile)) return { logs: "", size: 0, truncated: false };
+
+  const { size } = fs.statSync(logFile);
+  if (maxBytes === null || size <= maxBytes) {
+    return { logs: fs.readFileSync(logFile, "utf-8"), size, truncated: false };
+  }
+
+  const fd = fs.openSync(logFile, "r");
+  try {
+    const buffer = Buffer.allocUnsafe(maxBytes);
+    fs.readSync(fd, buffer, 0, maxBytes, size - maxBytes);
+    let text = buffer.toString("utf-8");
+    // The window starts mid-line almost every time; drop the fragment so the
+    // view never opens on half a log entry.
+    const firstBreak = text.indexOf("\n");
+    if (firstBreak !== -1) text = text.slice(firstBreak + 1);
+    return { logs: text, size, truncated: true };
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
 export function getAgentLogs(name: string, tail = 200): string {
   const proc = runningAgents.get(name);
   const logFile = proc?.logFile || path.join(getLogsDir(), `${name}.log`);

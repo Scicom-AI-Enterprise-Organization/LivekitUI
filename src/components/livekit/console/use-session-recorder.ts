@@ -4,16 +4,19 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 /**
  * Records console session audio in the browser and uploads it when the session
- * ends. Two files are produced per session:
+ * ends. Three files are produced per session:
  *
  *  - `agent` — only what the agent generated (its TTS output)
- *  - `mixed` — the agent plus your microphone, i.e. the whole conversation
+ *  - `user`  — only your microphone
+ *  - `mixed` — both, i.e. the whole conversation
  *
- * Both are built with Web Audio destinations so tracks can be attached as they
- * appear (the agent joins a moment after the room connects).
+ * Each is a Web Audio destination, so tracks can be attached as they appear
+ * (the agent joins a moment after the room connects).
  */
 
-export type RecordingKind = "mixed" | "agent";
+export type RecordingKind = "mixed" | "agent" | "user";
+
+const RECORDING_KINDS: RecordingKind[] = ["mixed", "agent", "user"];
 
 export interface SavedRecording {
   file: string;
@@ -172,13 +175,14 @@ export function useSessionRecorder({
       destinations: {
         mixed: ctx.createMediaStreamDestination(),
         agent: ctx.createMediaStreamDestination(),
+        user: ctx.createMediaStreamDestination(),
       },
       recorders: [],
       wired: new Set(),
       sources: [],
     };
 
-    for (const kind of ["mixed", "agent"] as RecordingKind[]) {
+    for (const kind of RECORDING_KINDS) {
       const recorder = new MediaRecorder(session.destinations[kind].stream, { mimeType });
       const chunks: Blob[] = [];
       recorder.ondataavailable = (e) => {
@@ -221,7 +225,7 @@ export function useSessionRecorder({
     };
 
     attach(agentTrack, ["mixed", "agent"]);
-    attach(micTrack, ["mixed"]);
+    attach(micTrack, ["mixed", "user"]);
   }, [agentTrack, micTrack, recording]);
 
   return { recording, uploading, unsupported };

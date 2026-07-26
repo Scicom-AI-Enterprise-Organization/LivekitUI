@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { RoomAgentDispatch, RoomConfiguration } from "@livekit/protocol";
 import { getSipClient } from "@/lib/livekit";
 import { getSession } from "@/lib/auth";
 import { livekitError } from "@/lib/livekit-errors";
@@ -49,6 +50,8 @@ export async function POST(request: NextRequest) {
     pin?: string;
     hidePhoneNumber?: boolean;
     metadata?: string;
+    agentName?: string;
+    agentMetadata?: string;
   };
   try {
     body = await request.json();
@@ -56,7 +59,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
   }
 
-  const { type, name, roomName, roomPrefix, trunkIds, pin, hidePhoneNumber, metadata } = body;
+  const { type, name, roomName, roomPrefix, trunkIds, pin, hidePhoneNumber, metadata, agentName, agentMetadata } = body;
 
   if (type !== "direct" && type !== "individual") {
     return NextResponse.json(
@@ -78,11 +81,20 @@ export async function POST(request: NextRequest) {
         ? { type: "direct" as const, roomName: roomName!, pin: pin || undefined }
         : { type: "individual" as const, roomPrefix: roomPrefix!, pin: pin || undefined };
 
+    // Agents registered with an agent_name only join when dispatched by name.
+    // Without this the caller lands in a room with nobody in it.
+    const roomConfig = agentName
+      ? new RoomConfiguration({
+          agents: [new RoomAgentDispatch({ agentName, metadata: agentMetadata || "" })],
+        })
+      : undefined;
+
     const info = await getSipClient().createSipDispatchRule(rule, {
       name,
       trunkIds,
       hidePhoneNumber,
       metadata,
+      roomConfig,
     });
     return NextResponse.json(serializeDispatchRule(info));
   } catch (error) {

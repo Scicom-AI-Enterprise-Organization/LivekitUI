@@ -2,13 +2,57 @@ services:
   # ── LiveKit Server ──
   livekit:
     image: livekit/livekit-server:latest
-    command: --config /etc/livekit.yaml --dev
+    command: --config /etc/livekit.yaml
     ports:
       - "7880:7880"
       - "7881:7881"
       - "6789:6789"
+      # WebRTC media. Narrow the range in livekit.docker.yaml to publish fewer.
+      - "50000-50100:50000-50100/udp"
+    environment:
+      # Keys live in .env, not in the mounted config.
+      LIVEKIT_KEYS: "${LIVEKIT_API_KEY}: ${LIVEKIT_API_SECRET}"
     volumes:
-      - ./livekit.yaml:/etc/livekit.yaml:ro
+      - ./livekit.docker.yaml:/etc/livekit.yaml:ro
+    depends_on:
+      - redis
+    restart: unless-stopped
+
+  # ── Redis ──
+  # Message bus between livekit-server and its side services (SIP, egress,
+  # ingress). Those register here; without it they are invisible to the server.
+  redis:
+    image: redis:7-alpine
+    ports:
+      # Published so a host-networked SIP service can reach it on 127.0.0.1.
+      - "6379:6379"
+    restart: unless-stopped
+
+  # ── SIP service ──
+  # Powers Telephony: trunks, dispatch rules and calls.
+  #
+  # host networking on purpose, and Linux-only: SIP puts the media address
+  # inside the SDP body, so a bridged container would advertise its private
+  # 172.17.x.x and audio would go nowhere. It also avoids publishing a large RTP
+  # range. On macOS/Windows Docker this does not work — run the binary directly.
+  sip:
+    image: livekit/sip:latest
+    network_mode: host
+    environment:
+      SIP_CONFIG_BODY: |
+        api_key: ${LIVEKIT_API_KEY}
+        api_secret: ${LIVEKIT_API_SECRET}
+        ws_url: ws://127.0.0.1:7880
+        redis:
+          address: 127.0.0.1:6379
+        sip_port: 5060
+        rtp_port: 10000-20000
+        use_external_ip: true
+        logging:
+          level: info
+    depends_on:
+      - redis
+      - livekit
     restart: unless-stopped
 
   # ── PostgreSQL ──
@@ -44,6 +88,12 @@ services:
       - NEXT_PUBLIC_LIVEKIT_GATEWAY_URL=ws://localhost:7885
       # Override the .env value: in compose the dashboard is published on 3000.
       - NEXT_PUBLIC_SANDBOX_DOMAIN=http://localhost:3000
+      # Agents run on the image's system interpreter, which has the plugins.
+      - AGENT_PYTHON_BIN=/usr/bin/python3
+    volumes:
+      # Deployed agent code, generated sandboxes and logs must outlive the
+      # container, or every restart loses them.
+      - appdata:/app/data
     depends_on:
       - livekit
       - postgres
@@ -73,3 +123,4 @@ services:
 
 volumes:
   pgdata:
+  appdata:

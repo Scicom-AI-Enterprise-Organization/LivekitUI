@@ -1,0 +1,36 @@
+# LiveKit SIP service — powers Telephony > SIP trunks, dispatch rules and calls.
+#
+# It is a separate process from livekit-server: both connect to the same Redis,
+# which is how the server discovers it. `livekit.yaml` must carry a matching
+# `redis:` block, otherwise the dashboard reports "SIP not connected".
+#
+#   docker run -d --name livekit-sip --restart unless-stopped \
+#     -p 5060:5060/udp -p 5060:5060/tcp -p 10000-10100:10000-10100/udp \
+#     -v "$PWD/sip.yaml:/etc/sip.yaml:ro" \
+#     livekit/sip:latest --config /etc/sip.yaml
+#
+# Hostnames are written for a container reaching services on the host. Running
+# the binary directly? Swap localhost for localhost.
+
+api_key: devkey
+api_secret: 6adc13c9bccb282e746270d514018a3d59cd50ce6a8e6bdf9970798dcd645e91
+ws_url: ws://localhost:7880
+
+redis:
+  address: localhost:6399
+
+# SIP signalling port. Providers (Twilio, Telnyx, …) send INVITEs here, so it
+# must be reachable from them — port-forwarded or behind a public address.
+sip_port: 5060
+
+# RTP media range. Keep it aligned with the published container ports above;
+# a wider range needs matching -p flags.
+rtp_port: 10000-10100
+
+use_external_ip: false
+
+# The container's own IP would otherwise be advertised in SDP (172.17.x.x),
+# which a softphone on the LAN cannot send RTP to — signalling connects and the
+# call is silent. Announce the host address callers can actually reach.
+logging:
+  level: info

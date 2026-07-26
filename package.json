@@ -8,7 +8,8 @@
     "start": "next start",
     "gateway": "node gateway/server.mjs",
     "test": "node --test \"tests/**/*.test.mjs\"",
-    "lint": "eslint"
+    "lint": "eslint",
+    "mcp:example": "node mcp-example/server.mjs"
   },
   "dependencies": {
     "@livekit/components-react": "^2.9.20",
@@ -23,11 +24,13 @@
     "@radix-ui/react-slot": "^1.2.4",
     "@radix-ui/react-switch": "^1.2.6",
     "@radix-ui/react-tabs": "^1.1.13",
+    "@types/js-yaml": "^4.0.9",
     "bcryptjs": "^3.0.3",
     "better-sqlite3": "^12.8.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "framer-motion": "^12.29.0",
+    "js-yaml": "^5.2.2",
     "livekit-client": "^2.18.1",
     "livekit-server-sdk": "^2.15.1",
     "lucide-react": "^0.563.0",

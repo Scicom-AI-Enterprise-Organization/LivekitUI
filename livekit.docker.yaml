@@ -1,0 +1,35 @@
+# LiveKit server config for the docker compose stack.
+#
+# Kept separate from the local `livekit.yaml` because hostnames differ: inside
+# compose the message bus is `redis`, not `localhost`. Keys are not in here —
+# compose passes them via the LIVEKIT_KEYS env var, so they stay in `.env`.
+
+port: 7880
+bind_addresses:
+  - ""
+
+rtc:
+  tcp_port: 7881
+  port_range_start: 50000
+  port_range_end: 50100
+  # On a server with a public address this must be true, so the SFU advertises
+  # the routable IP in ICE candidates instead of the container's.
+  use_external_ip: true
+
+# Shared with the SIP / egress / ingress services — this is how they register
+# with the server. Without it the telephony pages report "SIP not connected".
+redis:
+  address: redis:6379
+
+# Scraped by the dashboard Overview page.
+prometheus:
+  port: 6789
+
+# The dashboard's webhook receiver (Settings > Webhooks live event log).
+webhook:
+  api_key: ${LIVEKIT_API_KEY}
+  urls:
+    - http://app:3000/api/webhooks/livekit
+
+logging:
+  level: info

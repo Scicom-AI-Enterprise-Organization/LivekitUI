@@ -17,12 +17,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1
 
 # ── Python agent dependencies ──
+# One plugin per provider the code generator can emit (Settings > Providers),
+# plus the voice-pipeline pieces and the MCP extra for tool servers. A missing
+# plugin deploys fine and then the agent process dies on an ImportError.
 RUN python3 -m pip install --no-cache-dir --break-system-packages \
-    "livekit-agents[openai,silero,turn-detector]~=1.5" \
-    "livekit-plugins-noise-cancellation~=0.2" \
-    "livekit-plugins-cartesia~=1.5" \
+    "livekit-agents[mcp]~=1.5" \
+    "livekit-plugins-openai~=1.5" \
+    "livekit-plugins-anthropic~=1.5" \
+    "livekit-plugins-google~=1.5" \
+    "livekit-plugins-groq~=1.5" \
     "livekit-plugins-deepgram~=1.5" \
-    python-dotenv
+    "livekit-plugins-cartesia~=1.5" \
+    "livekit-plugins-elevenlabs~=1.5" \
+    "livekit-plugins-silero~=1.5" \
+    "livekit-plugins-turn-detector~=1.5" \
+    "livekit-plugins-noise-cancellation~=0.2" \
+    python-dotenv aiohttp
 
 WORKDIR /app
 
@@ -54,6 +64,9 @@ ENV LIVEKIT_URL=http://localhost:7880
 ENV LIVEKIT_PROMETHEUS_URL=http://localhost:6789/metrics
 ENV NEXT_PUBLIC_LIVEKIT_URL=ws://localhost:7880
 ENV GATEWAY_PORT=7885
+# No venv in the image — agents run on the system interpreter that got the
+# plugins above. Without this, deploying an agent fails looking for a venv.
+ENV AGENT_PYTHON_BIN=/usr/bin/python3
 
 EXPOSE 3000 7885
 

@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { Suspense, useCallback, useEffect, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import { TopBar } from "@/components/livekit/top-bar";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -60,11 +61,34 @@ interface CurrentUser {
 }
 
 export default function PhoneNumbersPage() {
+  return (
+    <Suspense fallback={null}>
+      <PhoneNumbersContent />
+    </Suspense>
+  );
+}
+
+function PhoneNumbersContent() {
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  // The open dialog lives in the URL so it can be linked and survives a reload.
+  const dialogOpen = searchParams.get("add") === "number";
+
+  const setDialogOpen = useCallback(
+    (open: boolean) => {
+      const params = new URLSearchParams(window.location.search);
+      if (open) params.set("add", "number");
+      else params.delete("add");
+      const qs = params.toString();
+      router.replace(qs ? `/telephony/phone-numbers?${qs}` : "/telephony/phone-numbers", { scroll: false });
+    },
+    [router]
+  );
+
   const [numbers, setNumbers] = useState<PhoneNumber[]>([]);
   const [providers, setProviders] = useState<Provider[]>([]);
   const [loading, setLoading] = useState(true);
   const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
-  const [dialogOpen, setDialogOpen] = useState(false);
 
   // Manual add form
   const [manualNumber, setManualNumber] = useState("");

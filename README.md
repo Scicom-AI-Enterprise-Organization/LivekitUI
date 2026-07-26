@@ -162,6 +162,43 @@ llm=openai.LLM(
 ),
 ```
 
+## Tools
+
+**Agents > Tools** is a library of reusable tool definitions — HTTP tools, client tools, and MCP servers. Define one once and import it into any agent from the builder's **Actions** tab.
+
+Importing copies the definition into the agent's own config. Editing or deleting a library entry therefore never breaks an agent that already uses it — the trade-off is that library edits don't propagate to existing agents.
+
+Every dialog is reflected in the URL, so a form can be linked or bookmarked:
+
+| URL | Opens |
+|---|---|
+| `/agents/tools?kind=http&tool=new` | The new-HTTP-tool form (same for `client`, `mcp`) |
+| `/agents/tools?kind=http&tool=<name>` | That tool's edit form |
+| `/agents/tools?import=openapi` | The OpenAPI importer |
+
+Each new-tool dialog has an **Example** button that fills in a working definition, so a tool can be tried without inventing one.
+
+### Importing from OpenAPI
+
+**Import from OpenAPI** turns an OpenAPI 3.x or Swagger 2.0 document — JSON or YAML, from a URL or pasted — into HTTP tools:
+
+- One tool per operation, named from `operationId` in snake_case (`getPetById` → `get_pet_by_id`), falling back to method and path
+- Path and query parameters, plus top-level request body fields, become tool parameters
+- Header parameters become headers for you to fill in, not something the model invents
+- `$ref`s are resolved, server URL templates are filled from their defaults, and deprecated operations are skipped and reported
+
+The document is fetched server-side, so specs on hosts without CORS headers work. Nothing is saved until you pick which operations to keep.
+
+### Example MCP server
+
+A dependency-free MCP server is included for testing the MCP path end to end:
+
+```bash
+npm run mcp:example      # http://localhost:7900
+```
+
+It speaks the HTTP+SSE transport the LiveKit agents MCP plugin expects and exposes three tools: `get_current_time`, `roll_dice`, and `echo`. Add an MCP server in **Tools** pointing at `http://localhost:7900/sse` — the **Example** button fills that URL in for you.
+
 ## Secrets
 
 **Settings > Secrets** stores project-wide credentials. Every secret is written to each deployed agent's `.env.local` using its name as the environment variable, so a provider's API key reaches the agent process on deploy or restart. Per-agent secrets (agent builder's **Advanced** tab) override project secrets of the same name.
@@ -317,13 +354,54 @@ Tables are auto-created on first run.
 
 ## Telephony Providers
 
-Phone numbers can always be added manually. To import from a provider, add credentials to `.env`:
+**Phone numbers** is a local registry — a label, provider tag and capability flags per number. Adding one provisions nothing, so that page works with no SIP service and no provider account. To import numbers you already own, add credentials to `.env`:
 
 | Provider | Variables |
 |----------|-----------|
 | Twilio   | `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN` |
 | Vonage   | `VONAGE_API_KEY`, `VONAGE_API_SECRET` |
 | Telnyx   | `TELNYX_API_KEY` |
+
+## SIP Service
+
+**SIP trunks**, **dispatch rules** and **calls** are served by `livekit-sip`, a separate process that registers with the server over Redis. A plain `livekit-server --dev` has no Redis, so those pages answer 503 with *"SIP not connected"*. Egress and ingress work the same way.
+
+### 1. Redis
+
+```bash
+docker run -d --name livekit-redis -p 6399:6379 --restart unless-stopped redis:7-alpine
+```
+
+### 2. Point the server at it
+
+`livekit.yaml`:
+
+```yaml
+redis:
+  address: localhost:6399
+```
+
+Restart `livekit-server` — it reads its config only at boot.
+
+### 3. Run the SIP service
+
+`sip.yaml` in the repo root is ready to use; it must carry the same `api_key`/`api_secret` and Redis address as the server.
+
+```bash
+docker run -d --name livekit-sip --restart unless-stopped \
+  -p 5060:5060/udp -p 5060:5060/tcp -p 10000-10100:10000-10100/udp \
+  -v "$PWD/sip.yaml:/etc/sip.yaml:ro" \
+  livekit/sip:latest --config /etc/sip.yaml
+```
+
+`docker logs livekit-sip` should show `connecting to redis` then `sip signaling listening on … port 5060`. The telephony pages go live immediately — no dashboard restart needed.
+
+### Placing a test call
+
+An inbound trunk needs the SIP port reachable **from the provider**, which `localhost` is not. Two ways to test:
+
+- **No provider account** — point a softphone (Linphone, Zoiper, or `sipp`) at `sip:<your-lan-ip>:5060` and let a dispatch rule route it into a room. Fastest way to exercise trunks, rules and the calls page end to end.
+- **Real number** — buy one from any SIP trunking provider and aim its trunk at your public address. Twilio (Elastic SIP Trunking) and Telnyx are the best-documented with LiveKit; Vonage, Plivo, Signalwire and Bandwidth all speak plain SIP and work the same way. The number must be reachable over the public internet, so run the SIP service on a host with a routable address or forward UDP/TCP 5060 plus the RTP range.
 
 ## Roles
 

@@ -150,6 +150,17 @@ export interface DbApiKey {
   revoked_at: string | null;
 }
 
+/** A reusable tool definition from the Tools library. */
+export interface DbAgentTool {
+  id: number;
+  kind: string;
+  name: string;
+  description: string;
+  config: string; // JSON: HttpTool | ClientTool | McpServer
+  created_at: string;
+  updated_at: string;
+}
+
 /** Bearer token for the REST API. Stored hashed; the value is shown once. */
 export interface DbDashboardToken {
   id: number;
@@ -241,6 +252,10 @@ export interface Database {
   getAllSecrets(): Promise<DbSecret[]>;
   findSecret(name: string): Promise<DbSecret | null>;
   deleteSecret(name: string): Promise<void>;
+  upsertAgentTool(kind: string, name: string, description: string, config: string): Promise<DbAgentTool>;
+  getAgentTools(kind?: string): Promise<DbAgentTool[]>;
+  findAgentToolById(id: number): Promise<DbAgentTool | null>;
+  deleteAgentTool(id: number): Promise<void>;
   createDashboardToken(userId: number, name: string, prefix: string, hash: string): Promise<DbDashboardToken>;
   getDashboardTokens(userId?: number): Promise<(DbDashboardToken & { owner_email: string })[]>;
   findDashboardTokenByHash(hash: string): Promise<(DbDashboardToken & { user: DbUser }) | null>;
@@ -399,6 +414,16 @@ function createSqliteDb(): Database {
           enabled INTEGER NOT NULL DEFAULT 1,
           created_at TEXT DEFAULT (datetime('now')),
           updated_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE TABLE IF NOT EXISTS agent_tools (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          kind TEXT NOT NULL,
+          name TEXT NOT NULL,
+          description TEXT NOT NULL DEFAULT '',
+          config TEXT NOT NULL,
+          created_at TEXT DEFAULT (datetime('now')),
+          updated_at TEXT DEFAULT (datetime('now')),
+          UNIQUE(kind, name)
         );
         -- Bearer tokens for the REST API. Only the SHA-256 of the token is
         -- stored: unlike a LiveKit key we never need the value back, just a
@@ -754,6 +779,31 @@ function createSqliteDb(): Database {
       db.prepare("DELETE FROM secrets WHERE name = ?").run(name);
     },
 
+    async upsertAgentTool(kind, name, description, config) {
+      db.prepare(
+        `INSERT INTO agent_tools (kind, name, description, config) VALUES (?, ?, ?, ?)
+         ON CONFLICT(kind, name) DO UPDATE SET
+           description = excluded.description,
+           config = excluded.config,
+           updated_at = datetime('now')`
+      ).run(kind, name, description, config);
+      return db.prepare("SELECT * FROM agent_tools WHERE kind = ? AND name = ?").get(kind, name) as DbAgentTool;
+    },
+
+    async getAgentTools(kind) {
+      return (kind
+        ? db.prepare("SELECT * FROM agent_tools WHERE kind = ? ORDER BY name ASC").all(kind)
+        : db.prepare("SELECT * FROM agent_tools ORDER BY kind ASC, name ASC").all()) as DbAgentTool[];
+    },
+
+    async findAgentToolById(id) {
+      return (db.prepare("SELECT * FROM agent_tools WHERE id = ?").get(id) as DbAgentTool) || null;
+    },
+
+    async deleteAgentTool(id) {
+      db.prepare("DELETE FROM agent_tools WHERE id = ?").run(id);
+    },
+
     async createDashboardToken(userId, name, prefix, hash) {
       const result = db.prepare(
         "INSERT INTO dashboard_tokens (user_id, name, token_prefix, token_hash) VALUES (?, ?, ?, ?)"
@@ -1009,6 +1059,16 @@ function createPostgresDb(): Database {
         -- stored: unlike a LiveKit key we never need the value back, just a
         -- constant-time comparison. Role comes from the owning user at auth
         -- time, so a demotion applies to their tokens immediately.
+        CREATE TABLE IF NOT EXISTS agent_tools (
+          id SERIAL PRIMARY KEY,
+          kind TEXT NOT NULL,
+          name TEXT NOT NULL,
+          description TEXT NOT NULL DEFAULT '',
+          config TEXT NOT NULL,
+          created_at TIMESTAMPTZ DEFAULT NOW(),
+          updated_at TIMESTAMPTZ DEFAULT NOW(),
+          UNIQUE(kind, name)
+        );
         CREATE TABLE IF NOT EXISTS dashboard_tokens (
           id SERIAL PRIMARY KEY,
           user_id INTEGER NOT NULL,
@@ -1368,6 +1428,35 @@ function createPostgresDb(): Database {
 
     async deleteSecret(name) {
       await pool.query("DELETE FROM secrets WHERE name = $1", [name]);
+    },
+
+    async upsertAgentTool(kind, name, description, config) {
+      const { rows } = await pool.query(
+        `INSERT INTO agent_tools (kind, name, description, config) VALUES ($1, $2, $3, $4)
+         ON CONFLICT (kind, name) DO UPDATE SET
+           description = EXCLUDED.description,
+           config = EXCLUDED.config,
+           updated_at = NOW()
+         RETURNING *`,
+        [kind, name, description, config]
+      );
+      return rows[0];
+    },
+
+    async getAgentTools(kind) {
+      const { rows } = kind
+        ? await pool.query("SELECT * FROM agent_tools WHERE kind = $1 ORDER BY name ASC", [kind])
+        : await pool.query("SELECT * FROM agent_tools ORDER BY kind ASC, name ASC");
+      return rows;
+    },
+
+    async findAgentToolById(id) {
+      const { rows } = await pool.query("SELECT * FROM agent_tools WHERE id = $1", [id]);
+      return rows[0] || null;
+    },
+
+    async deleteAgentTool(id) {
+      await pool.query("DELETE FROM agent_tools WHERE id = $1", [id]);
     },
 
     async createDashboardToken(userId, name, prefix, hash) {

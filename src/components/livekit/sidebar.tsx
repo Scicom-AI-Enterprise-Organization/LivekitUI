@@ -24,18 +24,21 @@ import {
   HelpCircle,
   ChevronDown,
   ChevronRight,
-  Plus,
   LogOut,
 } from "lucide-react";
 import { useState, useEffect } from "react";
 import { ThemeToggle } from "@/components/theme-toggle";
 
+interface NavChild {
+  label: string;
+  href: string;
+}
+
 interface NavItem {
   label: string;
   href: string;
   icon: React.ReactNode;
-  children?: { label: string; href: string }[];
-  action?: "add";
+  children?: NavChild[];
 }
 
 const navItems: NavItem[] = [
@@ -53,7 +56,10 @@ const navItems: NavItem[] = [
     label: "Agents",
     href: "/agents",
     icon: <Bot className="size-4" />,
-    action: "add",
+    children: [
+      { label: "Agents", href: "/agents" },
+      { label: "Tools", href: "/agents/tools" },
+    ],
   },
   {
     label: "Sandboxes",
@@ -196,13 +202,6 @@ export function LiveKitSidebar() {
                     {item.icon}
                     <span>{item.label}</span>
                   </Link>
-                )}
-                {item.action === "add" && (
-                  <Button variant="ghost" size="icon-xs" className="ml-0.5 text-muted-foreground" asChild>
-                    <Link href="/agents/builder">
-                      <Plus className="size-3.5" />
-                    </Link>
-                  </Button>
                 )}
               </div>
 

@@ -45,6 +45,7 @@ export const GROUPS: Group[] = [
   { id: "egress", title: "Egress", blurb: "Record or restream a room. Needs the LiveKit egress service; without it these answer 503 with serviceAvailable:false." },
   { id: "ingress", title: "Ingress", blurb: "Publish an external RTMP, WHIP, or pulled stream into a room. Needs the LiveKit ingress service." },
   { id: "telephony", title: "Telephony", blurb: "SIP trunks, dispatch rules, calls, and phone numbers. Trunks and rules need the LiveKit SIP service; calls and numbers do not." },
+  { id: "tools", title: "Tool library", blurb: "Reusable HTTP tools, client tools, and MCP servers that agents import from the builder's Actions tab." },
   { id: "sandboxes", title: "Sandboxes", blurb: "Frontend templates spun up per app and proxied at /sandbox/{name}." },
   { id: "config", title: "Providers and secrets", blurb: "Inference endpoints the agent builder offers, and project-wide secrets injected into agents." },
   { id: "monitoring", title: "Monitoring", blurb: "Aggregate stats, Prometheus-derived metrics, and the webhook event log." },
@@ -478,6 +479,47 @@ export const ENDPOINTS: Endpoint[] = [
     description: "Pulls the number inventory from Twilio, Vonage, or Telnyx.",
     params: [{ name: "provider", in: "body", type: "string", required: true, doc: `"twilio", "vonage", or "telnyx".` }],
     request: `curl -X POST $BASE/api/phone-numbers/import -H "Authorization: Bearer $TOKEN" \\\n  -H 'Content-Type: application/json' -d '{"provider":"twilio"}'`,
+  },
+
+  // ── Tool library ──
+  {
+    id: "list-tools", group: "tools", method: "GET", path: "/api/tools",
+    title: "List library tools",
+    description: "Every reusable tool definition. Agents hold their own copy, so this is the source they were imported from, not a live link.",
+    params: [{ name: "kind", in: "query", type: "string", doc: `"http", "client", or "mcp".` }],
+    request: `curl "$BASE/api/tools?kind=http" -H "Authorization: Bearer $TOKEN"`,
+    response: `{ "tools": [ { "id": 1, "kind": "http", "name": "get_weather",\n      "description": "Look up the weather for a city",\n      "config": { "method": "GET", "url": "https://api.example.com/weather",\n        "params": [ { "name": "city", "type": "string", "required": true } ] } } ],\n  "total": 1 }`,
+  },
+  {
+    id: "save-tool", group: "tools", method: "POST", path: "/api/tools", role: "owner/admin",
+    title: "Create or update a library tool",
+    description: "Upserts on (kind, name). The name becomes a function name for the model, so it must be a valid identifier. Editing here does not change agents that already imported it.",
+    params: [
+      { name: "kind", in: "body", type: "string", required: true, doc: `"http", "client", or "mcp".` },
+      { name: "name", in: "body", type: "string", required: true, doc: "Identifier — letters, digits, underscore, hyphen." },
+      { name: "description", in: "body", type: "string", doc: "When the model should use it." },
+      { name: "config", in: "body", type: "object", required: true, doc: "The tool body: url and method for http, params for http/client, url and headers for mcp." },
+    ],
+    request: `curl -X POST $BASE/api/tools -H "Authorization: Bearer $TOKEN" \\\n  -H 'Content-Type: application/json' \\\n  -d '{"kind":"http","name":"get_weather","config":{"method":"GET","url":"https://api.example.com/weather","params":[],"headers":[]}}'`,
+  },
+  {
+    id: "openapi-import", group: "tools", method: "POST", path: "/api/tools/openapi", role: "owner/admin",
+    title: "Read an OpenAPI spec",
+    description: "Converts an OpenAPI 3.x or Swagger 2.0 document (JSON or YAML) into HTTP tool definitions. Nothing is saved — POST the ones you want to /api/tools. Fetching happens server-side, so specs on hosts without CORS headers work.",
+    params: [
+      { name: "url", in: "body", type: "string", doc: "Spec URL to fetch. Either this or spec." },
+      { name: "spec", in: "body", type: "string", doc: "The document itself, as JSON or YAML text." },
+    ],
+    request: `curl -X POST $BASE/api/tools/openapi -H "Authorization: Bearer $TOKEN" \\\n  -H 'Content-Type: application/json' \\\n  -d '{"url":"https://petstore3.swagger.io/api/v3/openapi.json"}'`,
+    response: `{ "title": "Swagger Petstore", "version": "1.0.0",\n  "baseUrl": "https://petstore3.swagger.io/api/v3",\n  "tools": [ { "name": "get_pet_by_id", "method": "GET",\n      "url": "https://petstore3.swagger.io/api/v3/pet/{petId}",\n      "params": [ { "name": "petId", "type": "integer", "required": true } ],\n      "headers": [] } ],\n  "skipped": [ { "operation": "GET /pet/findByTags", "reason": "deprecated" } ] }`,
+  },
+  {
+    id: "delete-tool", group: "tools", method: "DELETE", path: "/api/tools/{id}", role: "owner/admin",
+    title: "Delete a library tool",
+    description: "Removes the entry. Agents that imported it keep their copy and are unaffected.",
+    params: [{ name: "id", in: "path", type: "number", required: true, doc: "Tool id." }],
+    request: `curl -X DELETE $BASE/api/tools/1 -H "Authorization: Bearer $TOKEN"`,
+    response: `{ "success": true, "deleted": true }`,
   },
 
   // ── Sandboxes ──

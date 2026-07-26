@@ -1,5 +1,7 @@
 "use client";
 
+import { Suspense, useCallback } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import { TopBar } from "@/components/livekit/top-bar";
 import { StatCard } from "@/components/livekit/stat-card";
 import { DataTable } from "@/components/livekit/data-table";
@@ -8,6 +10,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Info, RefreshCw } from "lucide-react";
 import { useApiList } from "@/hooks/use-api-list";
+import { PlaceCallPanel } from "@/components/livekit/place-call-panel";
 import { ListError, ListLoading, ServiceNotice } from "@/components/livekit/list-state";
 
 interface Call {
@@ -40,6 +43,30 @@ function formatDuration(seconds: number | null) {
 }
 
 export default function TelephonyCallsPage() {
+  return (
+    <Suspense fallback={null}>
+      <TelephonyCallsContent />
+    </Suspense>
+  );
+}
+
+function TelephonyCallsContent() {
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  // ?call=new opens the outbound test-call dialog.
+  const placing = searchParams.get("call") === "new";
+
+  const setPlacing = useCallback(
+    (open: boolean) => {
+      const params = new URLSearchParams(window.location.search);
+      if (open) params.set("call", "new");
+      else params.delete("call");
+      const qs = params.toString();
+      router.replace(qs ? `/telephony/calls?${qs}` : "/telephony/calls", { scroll: false });
+    },
+    [router]
+  );
+
   const { items, loading, error, notice, reload } = useApiList<Call>("/api/calls", "calls");
 
   const totalDuration = items.reduce((n, c) => n + (c.durationSeconds || 0), 0);
@@ -67,6 +94,7 @@ export default function TelephonyCallsPage() {
           <RefreshCw className="size-3" />
           Refresh
         </Button>
+        <PlaceCallPanel open={placing} onOpenChange={setPlacing} onCallPlaced={reload} />
       </TopBar>
 
       <div className="flex-1 overflow-auto p-6 space-y-6">

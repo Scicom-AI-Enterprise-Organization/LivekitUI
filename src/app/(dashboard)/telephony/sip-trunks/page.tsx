@@ -3,11 +3,13 @@
 import { TopBar } from "@/components/livekit/top-bar";
 import { StatCard } from "@/components/livekit/stat-card";
 import { DataTable } from "@/components/livekit/data-table";
-import Link from "next/link";
+import { Suspense, useCallback } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { PhoneIncoming, PhoneOutgoing, RefreshCw } from "lucide-react";
 import { useApiList } from "@/hooks/use-api-list";
 import { ListError, ListLoading, ServiceNotice } from "@/components/livekit/list-state";
+import { TrunkDialog } from "@/components/livekit/trunk-dialog";
 
 interface Trunk {
   trunkId: string;
@@ -36,6 +38,30 @@ const outboundColumns = [
 ];
 
 export default function SipTrunksPage() {
+  return (
+    <Suspense fallback={null}>
+      <SipTrunksContent />
+    </Suspense>
+  );
+}
+
+function SipTrunksContent() {
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  // ?trunk=new opens the create dialog, so it can be linked and survives reload.
+  const creating = searchParams.get("trunk") === "new";
+
+  const setCreating = useCallback(
+    (open: boolean) => {
+      const params = new URLSearchParams(window.location.search);
+      if (open) params.set("trunk", "new");
+      else params.delete("trunk");
+      const qs = params.toString();
+      router.replace(qs ? `/telephony/sip-trunks?${qs}` : "/telephony/sip-trunks", { scroll: false });
+    },
+    [router]
+  );
+
   const { items, loading, error, notice, reload } = useApiList<Trunk>("/api/sip-trunks", "trunks");
 
   const inbound = items.filter((t) => t.direction === "inbound");
@@ -61,8 +87,8 @@ export default function SipTrunksPage() {
               <RefreshCw className="size-3" />
               Refresh
             </Button>
-            <Button size="sm" asChild>
-              <Link href="/telephony/sip-trunks/new">Create new trunk</Link>
+            <Button size="sm" onClick={() => setCreating(true)}>
+              Create new trunk
             </Button>
           </div>
         }
@@ -100,6 +126,15 @@ export default function SipTrunksPage() {
           </>
         )}
       </div>
+      {creating && (
+        <TrunkDialog
+          onClose={() => setCreating(false)}
+          onSaved={() => {
+            setCreating(false);
+            reload();
+          }}
+        />
+      )}
     </div>
   );
 }

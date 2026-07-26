@@ -9,9 +9,9 @@
    component so they survive the session ending, until "Clear events".
    ──────────────────────────────────────────────────────────────────────────── */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
-import { useParams, useRouter } from "next/navigation";
+import { useParams, useRouter, useSearchParams } from "next/navigation";
 import {
   LiveKitRoom,
   RoomAudioRenderer,
@@ -49,6 +49,7 @@ import {
   X,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { SipDialButton } from "@/components/livekit/sip-dial-button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -82,15 +83,18 @@ import {
 import {
   CONSOLE_METRICS_TOPIC,
   METRIC_KIND_LABEL,
+  METRIC_KIND_TITLE,
   aggregateUsage,
   buildTurnTraces,
   formatClock,
   formatCount,
   formatDuration,
   formatSeconds,
+  metricRowCells,
   parseConsoleMetric,
   percentile,
   type ConsoleMetric,
+  type MetricKind,
 } from "@/lib/console-metrics";
 
 const TABS = [
@@ -104,6 +108,28 @@ const TABS = [
   "Models",
 ] as const;
 type Tab = (typeof TABS)[number];
+
+/**
+ * Upper bound on what the console keeps in memory. A long call with a chatty
+ * agent can emit metrics continuously; the oldest entries fall off.
+ */
+const BUFFER_LIMIT = 5000;
+
+function capped<T>(items: T[]): T[] {
+  return items.length > BUFFER_LIMIT ? items.slice(-BUFFER_LIMIT) : items;
+}
+
+const RECORDING_KIND_LABEL: Record<string, string> = {
+  mixed: "Mixed",
+  agent: "Agent only",
+  user: "You only",
+};
+
+/** `?tab=metrics` → "Metrics"; anything unknown falls back to the first tab. */
+function parseTab(value: string | null): Tab {
+  const match = TABS.find((t) => t.toLowerCase() === value?.toLowerCase());
+  return match ?? "Audio";
+}
 
 interface ConsoleEvent {
   id: string;
@@ -143,7 +169,16 @@ interface TranscriptLine {
 /* ────────────────────────────────────
    Page
    ──────────────────────────────────── */
-export default function AgentConsolePage() {
+export default function AgentConsolePageRoute() {
+  // useSearchParams (the dock tab) needs a boundary to fall back to.
+  return (
+    <Suspense fallback={null}>
+      <AgentConsolePage />
+    </Suspense>
+  );
+}
+
+function AgentConsolePage() {
   const params = useParams<{ id: string }>();
   const router = useRouter();
   const agentName = decodeURIComponent(params.id);
@@ -167,9 +202,21 @@ export default function AgentConsolePage() {
   const [recordings, setRecordings] = useState<SavedRecording[]>([]);
   const [timelineOn, setTimelineOn] = useState(true);
 
-  const [tab, setTab] = useState<Tab>("Audio");
+  // The dock tab lives in the URL so a view can be linked and survives a reload.
+  const searchParams = useSearchParams();
+  const tab = parseTab(searchParams.get("tab"));
+  const setTab = useCallback(
+    (next: Tab) => {
+      const query = new URLSearchParams(searchParams.toString());
+      query.set("tab", next.toLowerCase());
+      router.replace(`?${query.toString()}`, { scroll: false });
+    },
+    [router, searchParams]
+  );
+
   const [dockOpen, setDockOpen] = useState(true);
   const [configureOpen, setConfigureOpen] = useState(false);
+  const [clearOpen, setClearOpen] = useState(false);
   const [joinOptions, setJoinOptions] = useState<JoinOptions>({
     participantName: "",
     participantMetadata: "",
@@ -204,7 +251,7 @@ export default function AgentConsolePage() {
     (name: string, detail: string, level: ConsoleEvent["level"] = "info") => {
       seqRef.current += 1;
       const id = `${Date.now()}-${seqRef.current}`;
-      setEvents((prev) => [...prev, { id, at: Date.now(), name, detail, level }]);
+      setEvents((prev) => capped([...prev, { id, at: Date.now(), name, detail, level }]));
     },
     []
   );
@@ -212,14 +259,36 @@ export default function AgentConsolePage() {
   const addMetric = useCallback((raw: unknown) => {
     seqRef.current += 1;
     const metric = parseConsoleMetric(raw, Date.now(), seqRef.current);
-    if (metric) setMetrics((prev) => [...prev, metric]);
+    if (metric) setMetrics((prev) => capped([...prev, metric]));
   }, []);
 
-  const clearEvents = useCallback(() => {
+  // "Clear events" resets the whole console for this agent, including the audio
+  // saved on disk — so it asks first, and reports when the files survive.
+  const clearEverything = useCallback(async () => {
     setEvents([]);
     setMetrics([]);
     setTranscript([]);
-  }, []);
+
+    try {
+      const res = await fetch(`/api/agents/${encodeURIComponent(agentName)}/recordings`, {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ all: true }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        setError(
+          data.error === "Insufficient permissions"
+            ? "Events cleared. Saved audio was kept — only an admin or owner can delete recordings."
+            : data.error || "Events cleared, but the saved audio could not be deleted."
+        );
+        return;
+      }
+      setRecordings([]);
+    } catch {
+      setError("Events cleared, but the saved audio could not be deleted.");
+    }
+  }, [agentName]);
 
   const recordingSaved = useCallback((recording: SavedRecording) => {
     setRecordings((prev) => [
@@ -326,7 +395,7 @@ export default function AgentConsolePage() {
         onDockToggle={() => setDockOpen((o) => !o)}
         onStart={startSession}
         onEnd={endSession}
-        onClear={clearEvents}
+        onClear={() => setClearOpen(true)}
         onAddEvent={addEvent}
         onAddMetric={addMetric}
         onTranscript={setTranscript}
@@ -346,6 +415,19 @@ export default function AgentConsolePage() {
         live={live}
         onOpenChange={setConfigureOpen}
         onSave={setJoinOptions}
+      />
+
+      <ClearDialog
+        open={clearOpen}
+        onOpenChange={setClearOpen}
+        events={events.length}
+        metrics={metrics.length}
+        transcript={transcript.length}
+        recordings={recordings}
+        onConfirm={async () => {
+          setClearOpen(false);
+          await clearEverything();
+        }}
       />
     </LiveKitRoom>
   );
@@ -657,6 +739,14 @@ function ConsoleShell({
             <Settings2 className="size-3.5" />
             Configure
           </Button>
+          {/* Bring a phone or SIP endpoint into the live room, so the agent can
+              be tested over a real audio path rather than the browser mic. */}
+          <SipDialButton
+            roomName={live ? roomName : null}
+            onDialled={({ callTo, sipCallId }) =>
+              onAddEvent("sip.dialled", `${callTo}${sipCallId ? ` (${sipCallId})` : ""}`)
+            }
+          />
           {live ? (
             <Button size="sm" variant="destructive" onClick={onEnd}>
               <Square className="size-3.5" />
@@ -1117,10 +1207,10 @@ function RecordingRow({
     <div className="rounded-lg border p-2.5">
       <div className="flex flex-wrap items-center gap-2">
         <Badge
-          variant={recording.kind === "agent" ? "secondary" : "outline"}
+          variant={recording.kind === "mixed" ? "outline" : "secondary"}
           className="text-[10px] uppercase"
         >
-          {recording.kind === "agent" ? "agent only" : "mixed"}
+          {RECORDING_KIND_LABEL[recording.kind] ?? recording.kind}
         </Badge>
         <span className="min-w-0 flex-1 truncate font-mono text-xs text-foreground/80" title={recording.room}>
           {recording.room}
@@ -1441,7 +1531,7 @@ function TimelineTransport({
           <SelectContent>
             {recordings.map((r) => (
               <SelectItem key={r.file} value={r.file} className="text-xs">
-                {r.kind === "agent" ? "Agent only" : "Mixed"} · {r.room.slice(-13)} ·{" "}
+                {RECORDING_KIND_LABEL[r.kind] ?? r.kind} · {r.room.slice(-13)} ·{" "}
                 {formatDuration(r.durationMs)}
               </SelectItem>
             ))}
@@ -1836,12 +1926,38 @@ function DtmfTab({
 /* ────────────────────────────────────
    Tab: Metrics (+ per-turn tracing)
    ──────────────────────────────────── */
+/** Rendered at once; VAD alone can produce thousands of rows in a few minutes. */
+const METRIC_ROW_LIMIT = 300;
+
 function MetricsTab({ metrics, live }: { metrics: ConsoleMetric[]; live: boolean }) {
+  // VAD is off by default: it fires twice a second and says nothing about a turn.
+  const [hidden, setHidden] = useState<MetricKind[]>(["vad"]);
+
   const traces = useMemo(() => buildTurnTraces(metrics), [metrics]);
 
-  const ttfts = metrics.filter((m) => m.kind === "llm" && m.ttft !== undefined).map((m) => m.ttft!);
+  const presentKinds = useMemo(() => {
+    const counts = new Map<MetricKind, number>();
+    for (const m of metrics) counts.set(m.kind, (counts.get(m.kind) ?? 0) + 1);
+    return counts;
+  }, [metrics]);
+
+  const shown = useMemo(
+    () => metrics.filter((m) => !hidden.includes(m.kind)),
+    [metrics, hidden]
+  );
+
+  const ttfts = metrics
+    .filter((m) => (m.kind === "llm" || m.kind === "realtime") && m.ttft !== undefined)
+    .map((m) => m.ttft!);
   const ttfbs = metrics.filter((m) => m.kind === "tts" && m.ttfb !== undefined).map((m) => m.ttfb!);
   const totals = traces.map((t) => t.total).filter((t) => t > 0);
+  // The turn detector's own inference time, else the session's EOU delay.
+  const turnDelays = metrics
+    .filter((m) => m.kind === "eot" && m.detectionDelay !== undefined)
+    .map((m) => m.detectionDelay!);
+  const eouDelays = metrics
+    .filter((m) => m.kind === "eou" && m.endOfUtteranceDelay !== undefined)
+    .map((m) => m.endOfUtteranceDelay!);
 
   if (metrics.length === 0) {
     return (
@@ -1862,10 +1978,16 @@ function MetricsTab({ metrics, live }: { metrics: ConsoleMetric[]; live: boolean
   return (
     <div className="space-y-4 p-4">
       {/* Summary */}
-      <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+      <div className="grid grid-cols-2 gap-3 md:grid-cols-5">
         <StatTile label="LLM TTFT p50" value={formatSeconds(percentile(ttfts, 50))} />
         <StatTile label="LLM TTFT p90" value={formatSeconds(percentile(ttfts, 90))} />
         <StatTile label="TTS TTFB p50" value={formatSeconds(percentile(ttfbs, 50))} />
+        <StatTile
+          label={turnDelays.length > 0 ? "Turn detect p50" : "EOU delay p50"}
+          value={formatSeconds(
+            percentile(turnDelays.length > 0 ? turnDelays : eouDelays, 50)
+          )}
+        />
         <StatTile label="Turn latency p90" value={formatSeconds(percentile(totals, 90))} />
       </div>
 
@@ -1902,6 +2024,35 @@ function MetricsTab({ metrics, live }: { metrics: ConsoleMetric[]; live: boolean
         </div>
       )}
 
+      {/* Type filters */}
+      <div className="flex flex-wrap items-center gap-1.5">
+        <span className="mr-1 text-[10px] font-mono uppercase tracking-wide text-muted-foreground">
+          Show
+        </span>
+        {Array.from(presentKinds.entries()).map(([kind, count]) => {
+          const on = !hidden.includes(kind);
+          return (
+            <button
+              key={kind}
+              onClick={() =>
+                setHidden((prev) =>
+                  prev.includes(kind) ? prev.filter((k) => k !== kind) : [...prev, kind]
+                )
+              }
+              title={METRIC_KIND_TITLE[kind]}
+              className={cn(
+                "rounded-full border px-2 py-0.5 font-mono text-[10px] transition-colors",
+                on
+                  ? "border-primary/40 bg-primary/10 text-foreground"
+                  : "border-border text-muted-foreground line-through"
+              )}
+            >
+              {METRIC_KIND_LABEL[kind]} {count}
+            </button>
+          );
+        })}
+      </div>
+
       {/* Raw rows */}
       <div className="overflow-x-auto">
         <table className="w-full text-xs">
@@ -1910,7 +2061,7 @@ function MetricsTab({ metrics, live }: { metrics: ConsoleMetric[]; live: boolean
               <th className="px-2 py-1.5 font-medium">Time</th>
               <th className="px-2 py-1.5 font-medium">Type</th>
               <th className="px-2 py-1.5 font-medium">Label</th>
-              <th className="px-2 py-1.5 font-medium">TTFT / TTFB</th>
+              <th className="px-2 py-1.5 font-medium">Latency</th>
               <th className="px-2 py-1.5 font-medium">Duration</th>
               <th className="px-2 py-1.5 font-medium">Audio</th>
               <th className="px-2 py-1.5 font-medium">Tokens</th>
@@ -1918,38 +2069,51 @@ function MetricsTab({ metrics, live }: { metrics: ConsoleMetric[]; live: boolean
             </tr>
           </thead>
           <tbody className="font-mono">
-            {[...metrics].reverse().map((m) => (
-              <tr key={m.id} className="border-b last:border-0 hover:bg-muted/40">
-                <td className="px-2 py-1.5 text-muted-foreground">{formatClock(m.at)}</td>
-                <td className="px-2 py-1.5">
-                  <Badge variant="outline" className="text-[10px]">
-                    {METRIC_KIND_LABEL[m.kind]}
-                  </Badge>
-                </td>
-                <td className="px-2 py-1.5 text-foreground/70">{m.label}</td>
-                <td className="px-2 py-1.5 text-foreground/80">
-                  {m.kind === "llm"
-                    ? formatSeconds(m.ttft)
-                    : m.kind === "tts"
-                      ? formatSeconds(m.ttfb)
-                      : m.kind === "eou"
-                        ? formatSeconds(m.endOfUtteranceDelay)
-                        : "—"}
-                </td>
-                <td className="px-2 py-1.5 text-foreground/70">{formatSeconds(m.duration)}</td>
-                <td className="px-2 py-1.5 text-foreground/70">{formatSeconds(m.audioDuration)}</td>
-                <td className="px-2 py-1.5 text-foreground/70">
-                  {m.promptTokens !== undefined || m.completionTokens !== undefined
-                    ? `${formatCount(m.promptTokens)} → ${formatCount(m.completionTokens)}`
-                    : "—"}
-                </td>
-                <td className="px-2 py-1.5 text-foreground/70">
-                  {m.tokensPerSecond !== undefined ? m.tokensPerSecond.toFixed(1) : "—"}
+            {shown
+              .slice(-METRIC_ROW_LIMIT)
+              .reverse()
+              .map((m) => {
+                const cells = metricRowCells(m);
+                return (
+                  <tr
+                    key={m.id}
+                    className="border-b last:border-0 hover:bg-muted/40"
+                    title={cells.detail || undefined}
+                  >
+                    <td className="px-2 py-1.5 text-muted-foreground">{formatClock(m.at)}</td>
+                    <td className="px-2 py-1.5">
+                      <Badge variant="outline" className="text-[10px]">
+                        {METRIC_KIND_LABEL[m.kind]}
+                      </Badge>
+                    </td>
+                    <td className="px-2 py-1.5 text-foreground/70">{m.label}</td>
+                    <td className="px-2 py-1.5 text-foreground/80" title={cells.latencyLabel}>
+                      {cells.latency}
+                    </td>
+                    <td className="px-2 py-1.5 text-foreground/70">{cells.duration}</td>
+                    <td className="px-2 py-1.5 text-foreground/70">{cells.audio}</td>
+                    <td className="px-2 py-1.5 text-foreground/70">{cells.tokens}</td>
+                    <td className="px-2 py-1.5 text-foreground/70">{cells.tps}</td>
+                  </tr>
+                );
+              })}
+            {shown.length === 0 && (
+              <tr>
+                <td colSpan={8} className="px-2 py-6 text-center text-muted-foreground">
+                  Every metric type is hidden — turn one back on above.
                 </td>
               </tr>
-            ))}
+            )}
           </tbody>
         </table>
+        {shown.length > METRIC_ROW_LIMIT && (
+          <p className="px-2 py-2 text-[10px] font-mono text-muted-foreground">
+            showing the latest {METRIC_ROW_LIMIT} of {shown.length} rows
+            {hidden.length > 0
+              ? ` · ${metrics.length - shown.length} hidden by filter`
+              : ""}
+          </p>
+        )}
       </div>
     </div>
   );
@@ -2031,6 +2195,77 @@ function ModelsTab({
         </div>
       )}
     </div>
+  );
+}
+
+/* ────────────────────────────────────
+   Clear confirmation
+   ──────────────────────────────────── */
+function ClearDialog({
+  open,
+  onOpenChange,
+  events,
+  metrics,
+  transcript,
+  recordings,
+  onConfirm,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  events: number;
+  metrics: number;
+  transcript: number;
+  recordings: SavedRecording[];
+  onConfirm: () => void;
+}) {
+  const bytes = recordings.reduce((sum, r) => sum + r.bytes, 0);
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Clear console session data?</DialogTitle>
+          <DialogDescription>
+            This resets the console for this agent. Saved audio is deleted from disk and
+            cannot be recovered.
+          </DialogDescription>
+        </DialogHeader>
+
+        <ul className="space-y-1 text-sm text-foreground/80">
+          <li className="flex justify-between gap-4">
+            <span>Events</span>
+            <span className="font-mono text-muted-foreground">{events}</span>
+          </li>
+          <li className="flex justify-between gap-4">
+            <span>Metrics</span>
+            <span className="font-mono text-muted-foreground">{metrics}</span>
+          </li>
+          <li className="flex justify-between gap-4">
+            <span>Transcript lines</span>
+            <span className="font-mono text-muted-foreground">{transcript}</span>
+          </li>
+          <li className="flex justify-between gap-4">
+            <span className={recordings.length > 0 ? "text-destructive" : undefined}>
+              Saved recordings (deleted from disk)
+            </span>
+            <span className="font-mono text-muted-foreground">
+              {recordings.length}
+              {recordings.length > 0 ? ` · ${formatBytes(bytes)}` : ""}
+            </span>
+          </li>
+        </ul>
+
+        <DialogFooter>
+          <DialogClose asChild>
+            <Button variant="outline">Cancel</Button>
+          </DialogClose>
+          <Button variant="destructive" onClick={onConfirm}>
+            <Trash2 className="size-4" />
+            Clear{recordings.length > 0 ? " and delete audio" : ""}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 

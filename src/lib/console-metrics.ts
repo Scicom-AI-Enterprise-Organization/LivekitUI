@@ -9,7 +9,21 @@
 /** Room data topic used by both the generated agent and the Console UI. */
 export const CONSOLE_METRICS_TOPIC = "lk.metrics";
 
-export type MetricKind = "stt" | "llm" | "tts" | "eou" | "vad" | "unknown";
+/**
+ * Every metric livekit-agents 1.x emits. `eot` is the turn detector's own
+ * inference metric, distinct from `eou` (the end-of-utterance delay the session
+ * measures around it).
+ */
+export type MetricKind =
+  | "stt"
+  | "llm"
+  | "tts"
+  | "eou"
+  | "eot"
+  | "interrupt"
+  | "realtime"
+  | "vad"
+  | "unknown";
 
 export interface ConsoleMetric {
   /** Local id — metrics carry no stable id of their own. */
@@ -32,6 +46,15 @@ export interface ConsoleMetric {
   audioDuration?: number;
   endOfUtteranceDelay?: number;
   transcriptionDelay?: number;
+  onUserTurnCompletedDelay?: number;
+
+  // Turn detector / interruption detector
+  detectionDelay?: number;
+  predictionDuration?: number;
+  totalDuration?: number;
+  numRequests?: number;
+  numInterruptions?: number;
+  numBackchannels?: number;
 
   // Usage
   promptTokens?: number;
@@ -56,6 +79,10 @@ function str(v: unknown): string | undefined {
 /** Maps a class name ("LLMMetrics") or type tag ("llm_metrics") to a kind. */
 export function metricKindOf(raw: Record<string, unknown>): MetricKind {
   const hint = `${str(raw.kind) ?? ""} ${str(raw.type) ?? ""}`.toLowerCase();
+  // "eot" before "eou": both start with "eo" but mean different things.
+  if (hint.includes("eot") || hint.includes("end_of_turn")) return "eot";
+  if (hint.includes("interruption")) return "interrupt";
+  if (hint.includes("realtime")) return "realtime";
   if (hint.includes("eou") || hint.includes("end_of_utterance")) return "eou";
   if (hint.includes("vad")) return "vad";
   if (hint.includes("stt")) return "stt";
@@ -69,7 +96,23 @@ export const METRIC_KIND_LABEL: Record<MetricKind, string> = {
   llm: "LLM",
   tts: "TTS",
   eou: "EOU",
+  eot: "TURN",
+  interrupt: "INTR",
+  realtime: "RT",
   vad: "VAD",
+  unknown: "Other",
+};
+
+/** Longer names, for filters and tooltips. */
+export const METRIC_KIND_TITLE: Record<MetricKind, string> = {
+  stt: "Speech to text",
+  llm: "LLM",
+  tts: "Text to speech",
+  eou: "End of utterance",
+  eot: "Turn detector",
+  interrupt: "Interruptions",
+  realtime: "Realtime model",
+  vad: "Voice activity (high volume)",
   unknown: "Other",
 };
 
@@ -83,14 +126,13 @@ export function parseConsoleMetric(
   const raw = payload as Record<string, unknown>;
 
   const kind = metricKindOf(raw);
-  if (kind === "unknown" && raw.ttft === undefined && raw.ttfb === undefined) {
-    return null;
-  }
+  // A payload with neither a type tag nor any timing isn't a metric at all.
+  if (kind === "unknown" && raw.timestamp === undefined) return null;
 
   return {
     id: `${at}-${seq}`,
     kind,
-    label: str(raw.label) ?? METRIC_KIND_LABEL[kind],
+    label: str(raw.label) ?? METRIC_KIND_TITLE[kind],
     at,
     timestamp: num(raw.timestamp),
     speechId: str(raw.speech_id) ?? str(raw.speechId),
@@ -101,8 +143,18 @@ export function parseConsoleMetric(
     audioDuration: num(raw.audio_duration) ?? num(raw.audioDuration),
     endOfUtteranceDelay: num(raw.end_of_utterance_delay) ?? num(raw.endOfUtteranceDelay),
     transcriptionDelay: num(raw.transcription_delay) ?? num(raw.transcriptionDelay),
-    promptTokens: num(raw.prompt_tokens) ?? num(raw.promptTokens),
-    completionTokens: num(raw.completion_tokens) ?? num(raw.completionTokens),
+    onUserTurnCompletedDelay:
+      num(raw.on_user_turn_completed_delay) ?? num(raw.onUserTurnCompletedDelay),
+    detectionDelay: num(raw.detection_delay) ?? num(raw.detectionDelay),
+    predictionDuration: num(raw.prediction_duration) ?? num(raw.predictionDuration),
+    totalDuration: num(raw.total_duration) ?? num(raw.totalDuration),
+    numRequests: num(raw.num_requests) ?? num(raw.numRequests),
+    numInterruptions: num(raw.num_interruptions) ?? num(raw.numInterruptions),
+    numBackchannels: num(raw.num_backchannels) ?? num(raw.numBackchannels),
+    // Realtime and STT/TTS report input/output tokens instead of prompt/completion.
+    promptTokens: num(raw.prompt_tokens) ?? num(raw.promptTokens) ?? num(raw.input_tokens),
+    completionTokens:
+      num(raw.completion_tokens) ?? num(raw.completionTokens) ?? num(raw.output_tokens),
     cachedTokens: num(raw.prompt_cached_tokens) ?? num(raw.cachedTokens),
     totalTokens: num(raw.total_tokens) ?? num(raw.totalTokens),
     tokensPerSecond: num(raw.tokens_per_second) ?? num(raw.tokensPerSecond),
@@ -154,7 +206,7 @@ export function buildTurnTraces(metrics: ConsoleMetric[]): TurnTrace[] {
     if (m.kind === "eou") {
       turn.eou = m.endOfUtteranceDelay ?? turn.eou;
       turn.transcription = m.transcriptionDelay ?? turn.transcription;
-    } else if (m.kind === "llm") {
+    } else if (m.kind === "llm" || m.kind === "realtime") {
       turn.ttft = m.ttft ?? turn.ttft;
       turn.llmLabel = m.label;
     } else if (m.kind === "tts") {
@@ -191,11 +243,14 @@ export interface ModelUsage {
   avgTokensPerSecond?: number;
 }
 
+const USAGE_KINDS: MetricKind[] = ["stt", "llm", "tts", "realtime"];
+
 export function aggregateUsage(metrics: ConsoleMetric[]): ModelUsage[] {
   const rows = new Map<string, ModelUsage & { _lat: number[]; _tps: number[] }>();
 
   for (const m of metrics) {
-    if (m.kind === "eou" || m.kind === "vad") continue;
+    // Only the model calls have usage; the detectors just report timings.
+    if (!USAGE_KINDS.includes(m.kind)) continue;
     const key = `${m.kind}:${m.label}`;
     const row =
       rows.get(key) ??
@@ -219,7 +274,8 @@ export function aggregateUsage(metrics: ConsoleMetric[]): ModelUsage[] {
     row.audioSeconds += m.audioDuration ?? 0;
     row.characters += m.charactersCount ?? 0;
 
-    const latency = m.kind === "llm" ? m.ttft : m.kind === "tts" ? m.ttfb : undefined;
+    const latency =
+      m.kind === "llm" || m.kind === "realtime" ? m.ttft : m.kind === "tts" ? m.ttfb : undefined;
     if (latency !== undefined) row._lat.push(latency);
     if (m.tokensPerSecond !== undefined) row._tps.push(m.tokensPerSecond);
 
@@ -243,6 +299,114 @@ export function percentile(values: number[], p: number): number | undefined {
   const sorted = [...values].sort((a, b) => a - b);
   const idx = Math.min(sorted.length - 1, Math.floor((p / 100) * sorted.length));
   return sorted[idx];
+}
+
+// ---------------------------------------------------------------------------
+// Table cells
+// ---------------------------------------------------------------------------
+
+export interface MetricRowCells {
+  /** The headline latency for this kind of metric. */
+  latency: string;
+  latencyLabel: string;
+  duration: string;
+  audio: string;
+  tokens: string;
+  tps: string;
+  /** Everything the columns can't hold, for the row tooltip. */
+  detail: string;
+}
+
+/**
+ * Each metric kind means something different by "latency" and "duration", so
+ * the table asks here rather than showing STT a TTFT column it never fills.
+ */
+export function metricRowCells(m: ConsoleMetric): MetricRowCells {
+  // STT/TTS report input/output token fields that stay at zero for most
+  // providers — showing "— → —" there is just noise.
+  const tokenTotal = (m.promptTokens ?? 0) + (m.completionTokens ?? 0);
+  const tokens =
+    tokenTotal > 0
+      ? `${formatCount(m.promptTokens)} → ${formatCount(m.completionTokens)}`
+      : "—";
+  const tps = m.tokensPerSecond !== undefined ? m.tokensPerSecond.toFixed(1) : "—";
+
+  switch (m.kind) {
+    case "llm":
+    case "realtime":
+      return {
+        latency: formatSeconds(m.ttft),
+        latencyLabel: "TTFT",
+        duration: formatSeconds(m.duration),
+        audio: formatSeconds(m.audioDuration),
+        tokens,
+        tps,
+        detail: m.cancelled ? "cancelled" : "",
+      };
+    case "tts":
+      return {
+        latency: formatSeconds(m.ttfb),
+        latencyLabel: "TTFB",
+        duration: formatSeconds(m.duration),
+        audio: formatSeconds(m.audioDuration),
+        tokens: m.charactersCount !== undefined ? `${formatCount(m.charactersCount)} chars` : tokens,
+        tps,
+        detail: m.cancelled ? "cancelled" : "",
+      };
+    case "stt":
+      return {
+        latency: "—",
+        latencyLabel: "—",
+        duration: formatSeconds(m.duration),
+        audio: formatSeconds(m.audioDuration),
+        tokens,
+        tps,
+        detail: "",
+      };
+    case "eou":
+      return {
+        latency: formatSeconds(m.endOfUtteranceDelay),
+        latencyLabel: "EOU delay",
+        duration: formatSeconds(m.transcriptionDelay),
+        audio: "—",
+        tokens: "—",
+        tps: "—",
+        detail: `transcription ${formatSeconds(m.transcriptionDelay)} · on_user_turn_completed ${formatSeconds(m.onUserTurnCompletedDelay)}`,
+      };
+    case "eot":
+      return {
+        latency: formatSeconds(m.detectionDelay),
+        latencyLabel: "detection",
+        duration: formatSeconds(m.predictionDuration),
+        audio: "—",
+        tokens: m.numRequests !== undefined ? `${formatCount(m.numRequests)} runs` : "—",
+        tps: "—",
+        detail: `total ${formatSeconds(m.totalDuration)} · prediction ${formatSeconds(m.predictionDuration)}`,
+      };
+    case "interrupt":
+      return {
+        latency: formatSeconds(m.detectionDelay),
+        latencyLabel: "detection",
+        duration: formatSeconds(m.predictionDuration),
+        audio: "—",
+        tokens:
+          m.numInterruptions !== undefined
+            ? `${formatCount(m.numInterruptions)} intr`
+            : "—",
+        tps: "—",
+        detail: `interruptions ${m.numInterruptions ?? 0} · backchannels ${m.numBackchannels ?? 0} · runs ${m.numRequests ?? 0}`,
+      };
+    default:
+      return {
+        latency: "—",
+        latencyLabel: "—",
+        duration: formatSeconds(m.duration),
+        audio: formatSeconds(m.audioDuration),
+        tokens,
+        tps,
+        detail: "",
+      };
+  }
 }
 
 // ---------------------------------------------------------------------------

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSession } from "@/lib/auth";
 import {
+  deleteAgentRecordings,
   deleteRecording,
   listRecordings,
   saveRecording,
@@ -48,8 +49,11 @@ export async function POST(
   if (typeof room !== "string" || !room) {
     return NextResponse.json({ error: "room is required" }, { status: 400 });
   }
-  if (kind !== "mixed" && kind !== "agent") {
-    return NextResponse.json({ error: "kind must be 'mixed' or 'agent'" }, { status: 400 });
+  if (kind !== "mixed" && kind !== "agent" && kind !== "user") {
+    return NextResponse.json(
+      { error: "kind must be 'mixed', 'agent' or 'user'" },
+      { status: 400 }
+    );
   }
   if (audio.size === 0) {
     return NextResponse.json({ error: "recording is empty" }, { status: 400 });
@@ -89,17 +93,25 @@ export async function DELETE(
   }
 
   const { id } = await params;
-  const { file } = await request.json();
+  const { file, all } = await request.json();
+  const agent = decodeURIComponent(id);
+
+  // `all` backs "Clear events", which resets the console for this agent.
+  if (all === true) {
+    const deleted = deleteAgentRecordings(agent);
+    return NextResponse.json({ success: true, deleted });
+  }
+
   if (typeof file !== "string" || !file) {
     return NextResponse.json({ error: "file is required" }, { status: 400 });
   }
 
   try {
-    const removed = deleteRecording(decodeURIComponent(id), file);
+    const removed = deleteRecording(agent, file);
     if (!removed) {
       return NextResponse.json({ error: "Recording not found" }, { status: 404 });
     }
-    return NextResponse.json({ success: true });
+    return NextResponse.json({ success: true, deleted: 1 });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     return NextResponse.json({ error: message }, { status: 400 });
