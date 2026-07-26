@@ -348,9 +348,11 @@ export default function AgentDetailPage() {
                 OFFLINE
               </Badge>
             )}
-            <Button variant="outline" size="sm">
-              <ExternalLink className="size-3" />
-              Open in Console
+            <Button variant="outline" size="sm" asChild>
+              <Link href={`/agents/${encodeURIComponent(id)}/console`}>
+                <ExternalLink className="size-3" />
+                Test in Console
+              </Link>
             </Button>
             <Button size="sm" asChild>
               <Link href={`/agents/builder?agent=${encodeURIComponent(id)}`}>
@@ -365,6 +367,12 @@ export default function AgentDetailPage() {
                 </Button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end" className="w-56">
+                <DropdownMenuItem asChild>
+                  <Link href={`/agents/${encodeURIComponent(id)}/console`}>
+                    <ExternalLink className="size-4" />
+                    Test in Console
+                  </Link>
+                </DropdownMenuItem>
                 <DropdownMenuItem onClick={() => setLogsOpen(true)}>
                   <ScrollText className="size-4" />
                   View logs

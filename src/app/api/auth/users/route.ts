@@ -19,6 +19,7 @@ export async function GET() {
       lastName: u.last_name,
       company: u.company,
       role: u.role,
+      authProvider: u.auth_provider ?? "local",
       createdAt: u.created_at,
     })),
   });

@@ -5,9 +5,11 @@ const PUBLIC_PATHS = ["/login", "/register", "/api/auth", "/api/sandbox-apps", "
 const DASHBOARD_PREFIXES = [
   "/api/agents", "/api/rooms", "/api/phone-numbers",
   "/api/sandbox-config", "/api/webhooks", "/api/api-keys", "/api/livekit",
-  "/api/providers", "/api/secrets",
+  "/api/providers", "/api/secrets", "/api/access-tokens",
+  "/api/egresses", "/api/ingresses", "/api/sip-trunks", "/api/dispatch-rules",
+  "/api/calls", "/api/overview", "/api/metrics",
   "/settings", "/agents", "/sessions", "/telephony", "/egresses", "/ingresses",
-  "/billing", "/hub",
+  "/billing", "/hub", "/api-docs",
 ];
 
 async function resolveSandboxPort(origin: string, name: string): Promise<number | null> {
@@ -77,6 +79,16 @@ export async function middleware(request: NextRequest) {
 
   const session = request.cookies.get("lk_session");
   if (!session) {
+    // REST clients get a JSON 401, not a redirect to an HTML login page. A
+    // Bearer token is validated by the route itself (middleware has no DB
+    // access), so its presence is enough to pass through here.
+    if (pathname.startsWith("/api/")) {
+      if (request.headers.get("authorization")) return NextResponse.next();
+      return NextResponse.json(
+        { error: "Unauthorized. Send a session cookie or an Authorization: Bearer lkui_… token." },
+        { status: 401 }
+      );
+    }
     return NextResponse.redirect(new URL("/login", request.url));
   }
 

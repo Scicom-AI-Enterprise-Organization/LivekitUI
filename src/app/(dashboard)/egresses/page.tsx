@@ -1,16 +1,26 @@
 "use client";
 
-import { useState } from "react";
 import { TopBar } from "@/components/livekit/top-bar";
 import { DataTable } from "@/components/livekit/data-table";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { cn } from "@/lib/utils";
-import { Filter, Search, LayoutGrid, List } from "lucide-react";
+import { RefreshCw } from "lucide-react";
+import { useApiList } from "@/hooks/use-api-list";
+import { ListError, ListLoading, ServiceNotice } from "@/components/livekit/list-state";
 
-const egressColumns = [
-  { key: "id", label: "ID", sortable: true },
-  { key: "startedAt", label: "Started At", sortable: true },
+interface Egress {
+  egressId: string;
+  roomName: string;
+  status: string;
+  type: string | null;
+  startedAt: string | null;
+  durationSeconds: number | null;
+  destinations: { kind: string; location: string }[];
+}
+
+const columns = [
+  { key: "id", label: "ID" },
+  { key: "startedAt", label: "Started At" },
   { key: "duration", label: "Duration" },
   { key: "status", label: "Status" },
   { key: "type", label: "Type" },
@@ -18,60 +28,59 @@ const egressColumns = [
   { key: "destination", label: "Destination" },
 ];
 
+function statusVariant(status: string) {
+  if (status === "active" || status === "starting") return "bg-emerald-500/10 text-emerald-500 border-emerald-500/30";
+  if (status === "failed" || status === "aborted") return "bg-red-500/10 text-red-500 border-red-500/30";
+  return "text-muted-foreground";
+}
+
+function formatDuration(seconds: number | null) {
+  if (seconds === null) return "—";
+  if (seconds < 60) return `${seconds}s`;
+  const m = Math.floor(seconds / 60);
+  return m < 60 ? `${m}m ${seconds % 60}s` : `${Math.floor(m / 60)}h ${m % 60}m`;
+}
+
 export default function EgressesPage() {
-  const [viewMode, setViewMode] = useState<"list" | "grid">("list");
+  const { items, loading, error, notice, reload } = useApiList<Egress>("/api/egresses", "egresses");
+
+  const rows = items.map((e) => ({
+    id: <span className="font-mono text-xs">{e.egressId}</span>,
+    startedAt: e.startedAt ? new Date(e.startedAt).toLocaleString() : "—",
+    duration: formatDuration(e.durationSeconds),
+    status: <Badge variant="outline" className={statusVariant(e.status)}>{e.status}</Badge>,
+    type: e.type?.replace(/Request$|^([a-z])/g, (m, p1) => (p1 ? p1.toUpperCase() : "")) || "—",
+    source: e.roomName || "—",
+    destination: e.destinations.length
+      ? <span className="font-mono text-xs">{e.destinations.map((d) => d.location).join(", ")}</span>
+      : "—",
+  }));
 
   return (
     <div className="flex flex-col h-full">
-      <TopBar title="Egresses" showRefresh showTimeRange>
-        <span className="text-xs text-muted-foreground whitespace-nowrap">Last updated 4 min ago</span>
+      <TopBar title="Egresses" showTimeRange>
+        <Button variant="outline" size="sm" className="gap-1.5 text-xs" onClick={reload}>
+          <RefreshCw className="size-3" />
+          Refresh
+        </Button>
       </TopBar>
 
       <div className="flex-1 overflow-auto p-6 space-y-4">
-        {/* Section header with filter bar */}
         <div className="flex items-center justify-between">
           <h2 className="text-sm font-semibold text-foreground">Egresses</h2>
-          <div className="flex items-center gap-2">
-            <Button variant="outline" size="sm" className="gap-1.5 text-xs">
-              <Filter className="size-3" />
-              <span>Filters</span>
-            </Button>
-            <Button variant="outline" size="icon" className="h-8 w-8">
-              <Search className="size-3.5" />
-            </Button>
-            <div className="flex items-center rounded-md border bg-card overflow-hidden">
-              <button
-                onClick={() => setViewMode("grid")}
-                className={cn(
-                  "flex items-center justify-center p-1.5 transition-colors",
-                  viewMode === "grid"
-                    ? "bg-muted text-foreground"
-                    : "text-muted-foreground hover:bg-muted/50"
-                )}
-              >
-                <LayoutGrid className="size-3.5" />
-              </button>
-              <button
-                onClick={() => setViewMode("list")}
-                className={cn(
-                  "flex items-center justify-center p-1.5 transition-colors",
-                  viewMode === "list"
-                    ? "bg-muted text-foreground"
-                    : "text-muted-foreground hover:bg-muted/50"
-                )}
-              >
-                <List className="size-3.5" />
-              </button>
-            </div>
-          </div>
+          {!loading && !notice && (
+            <span className="text-xs text-muted-foreground">{items.length} total</span>
+          )}
         </div>
 
-        {/* Data table */}
-        <DataTable
-          columns={egressColumns}
-          data={[]}
-          emptyMessage="No results."
-        />
+        {error && <ListError message={error} />}
+        {notice && <ServiceNotice message={notice.message} reason={notice.reason} />}
+
+        {loading ? (
+          <ListLoading />
+        ) : notice ? null : (
+          <DataTable columns={columns} data={rows} emptyMessage="No egresses." />
+        )}
       </div>
     </div>
   );

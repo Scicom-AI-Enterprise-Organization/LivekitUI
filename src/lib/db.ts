@@ -8,6 +8,9 @@ import { DEFAULT_PROVIDERS } from "./providers";
 
 export type UserRole = "owner" | "admin" | "member";
 
+/** How the account signs in. Only "local" issues a password we control. */
+export type AuthProvider = "local" | "keycloak" | "github";
+
 export interface DbUser {
   id: number;
   email: string;
@@ -16,6 +19,7 @@ export interface DbUser {
   last_name: string;
   company: string | null;
   role: UserRole;
+  auth_provider: AuthProvider;
   created_at: string;
 }
 
@@ -146,6 +150,19 @@ export interface DbApiKey {
   revoked_at: string | null;
 }
 
+/** Bearer token for the REST API. Stored hashed; the value is shown once. */
+export interface DbDashboardToken {
+  id: number;
+  user_id: number;
+  name: string;
+  /** First few characters, for identifying a token in the UI. */
+  token_prefix: string;
+  token_hash: string;
+  created_at: string;
+  last_used_at: string | null;
+  revoked_at: string | null;
+}
+
 export interface DbAgentSnapshot {
   id: number;
   sessions: number;
@@ -174,10 +191,14 @@ export interface Database {
     company?: string
   ): Promise<DbUser>;
   updateUserRole(id: number, role: UserRole): Promise<void>;
+  updateUserPassword(id: number, passwordHash: string): Promise<void>;
+  updateUserProfile(id: number, firstName: string, lastName: string, company: string | null): Promise<void>;
   deleteUser(id: number): Promise<void>;
   createSession(token: string, userId: number, expiresAt: Date): Promise<void>;
   findSession(token: string): Promise<(DbSession & { user: DbUser }) | null>;
   deleteSession(token: string): Promise<void>;
+  /** Signs every other device out — used after a password change. */
+  deleteUserSessionsExcept(userId: number, keepToken: string): Promise<void>;
   deleteExpiredSessions(): Promise<void>;
   getAllUsers(): Promise<DbUser[]>;
   createInvite(token: string, email: string, role: UserRole, expiresAt: Date): Promise<void>;
@@ -220,6 +241,13 @@ export interface Database {
   getAllSecrets(): Promise<DbSecret[]>;
   findSecret(name: string): Promise<DbSecret | null>;
   deleteSecret(name: string): Promise<void>;
+  createDashboardToken(userId: number, name: string, prefix: string, hash: string): Promise<DbDashboardToken>;
+  getDashboardTokens(userId?: number): Promise<(DbDashboardToken & { owner_email: string })[]>;
+  findDashboardTokenByHash(hash: string): Promise<(DbDashboardToken & { user: DbUser }) | null>;
+  touchDashboardToken(id: number): Promise<void>;
+  revokeDashboardToken(id: number): Promise<void>;
+  deleteDashboardToken(id: number): Promise<void>;
+  findDashboardTokenById(id: number): Promise<DbDashboardToken | null>;
   createProvider(input: ProviderInput): Promise<DbProvider>;
   updateProvider(id: number, input: ProviderInput): Promise<void>;
   getAllProviders(): Promise<DbProvider[]>;
@@ -254,6 +282,7 @@ function createSqliteDb(): Database {
           last_name TEXT NOT NULL,
           company TEXT,
           role TEXT NOT NULL DEFAULT 'member',
+          auth_provider TEXT NOT NULL DEFAULT 'local',
           created_at TEXT DEFAULT (datetime('now'))
         );
         CREATE TABLE IF NOT EXISTS sessions (
@@ -371,10 +400,32 @@ function createSqliteDb(): Database {
           created_at TEXT DEFAULT (datetime('now')),
           updated_at TEXT DEFAULT (datetime('now'))
         );
+        -- Bearer tokens for the REST API. Only the SHA-256 of the token is
+        -- stored: unlike a LiveKit key we never need the value back, just a
+        -- constant-time comparison. Role comes from the owning user at auth
+        -- time, so a demotion applies to their tokens immediately.
+        CREATE TABLE IF NOT EXISTS dashboard_tokens (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          user_id INTEGER NOT NULL,
+          name TEXT NOT NULL,
+          token_prefix TEXT NOT NULL,
+          token_hash TEXT UNIQUE NOT NULL,
+          created_at TEXT DEFAULT (datetime('now')),
+          last_used_at TEXT,
+          revoked_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_dashboard_tokens_hash ON dashboard_tokens(token_hash);
       `);
 
       // ── Migrations for databases created before a column existed ──
       // SQLite has no ADD COLUMN IF NOT EXISTS, so check the table first.
+      const userCols = (
+        db.prepare("PRAGMA table_info(users)").all() as { name: string }[]
+      ).map((c) => c.name);
+      if (!userCols.includes("auth_provider")) {
+        db.exec("ALTER TABLE users ADD COLUMN auth_provider TEXT NOT NULL DEFAULT 'local'");
+      }
+
       const apiKeyCols = (
         db.prepare("PRAGMA table_info(api_keys)").all() as { name: string }[]
       ).map((c) => c.name);
@@ -425,6 +476,16 @@ function createSqliteDb(): Database {
       db.prepare("UPDATE users SET role = ? WHERE id = ?").run(role, id);
     },
 
+    async updateUserPassword(id, passwordHash) {
+      db.prepare("UPDATE users SET password_hash = ? WHERE id = ?").run(passwordHash, id);
+    },
+
+    async updateUserProfile(id, firstName, lastName, company) {
+      db.prepare(
+        "UPDATE users SET first_name = ?, last_name = ?, company = ? WHERE id = ?"
+      ).run(firstName, lastName, company, id);
+    },
+
     async deleteUser(id) {
       db.prepare("DELETE FROM users WHERE id = ?").run(id);
     },
@@ -438,7 +499,7 @@ function createSqliteDb(): Database {
     async findSession(token) {
       const row = db
         .prepare(
-          `SELECT s.*, u.id as u_id, u.email, u.password_hash, u.first_name, u.last_name, u.company, u.role, u.created_at as u_created_at
+          `SELECT s.*, u.id as u_id, u.email, u.password_hash, u.first_name, u.last_name, u.company, u.role, u.auth_provider, u.created_at as u_created_at
            FROM sessions s JOIN users u ON s.user_id = u.id
            WHERE s.token = ? AND s.expires_at > datetime('now')`
         )
@@ -459,6 +520,7 @@ function createSqliteDb(): Database {
           last_name: row.last_name as string,
           company: row.company as string | null,
           role: row.role as UserRole,
+          auth_provider: (row.auth_provider as AuthProvider) || "local",
           created_at: row.u_created_at as string,
         },
       };
@@ -466,6 +528,10 @@ function createSqliteDb(): Database {
 
     async deleteSession(token) {
       db.prepare("DELETE FROM sessions WHERE token = ?").run(token);
+    },
+
+    async deleteUserSessionsExcept(userId, keepToken) {
+      db.prepare("DELETE FROM sessions WHERE user_id = ? AND token != ?").run(userId, keepToken);
     },
 
     async deleteExpiredSessions() {
@@ -688,6 +754,47 @@ function createSqliteDb(): Database {
       db.prepare("DELETE FROM secrets WHERE name = ?").run(name);
     },
 
+    async createDashboardToken(userId, name, prefix, hash) {
+      const result = db.prepare(
+        "INSERT INTO dashboard_tokens (user_id, name, token_prefix, token_hash) VALUES (?, ?, ?, ?)"
+      ).run(userId, name, prefix, hash);
+      return db.prepare("SELECT * FROM dashboard_tokens WHERE id = ?").get(result.lastInsertRowid) as DbDashboardToken;
+    },
+
+    async getDashboardTokens(userId) {
+      const sql = `SELECT t.*, u.email as owner_email FROM dashboard_tokens t
+                   JOIN users u ON u.id = t.user_id
+                   ${userId ? "WHERE t.user_id = ?" : ""}
+                   ORDER BY t.created_at DESC`;
+      const stmt = db.prepare(sql);
+      return (userId ? stmt.all(userId) : stmt.all()) as (DbDashboardToken & { owner_email: string })[];
+    },
+
+    async findDashboardTokenByHash(hash) {
+      const row = db.prepare("SELECT * FROM dashboard_tokens WHERE token_hash = ?").get(hash) as DbDashboardToken | undefined;
+      if (!row) return null;
+      const user = db.prepare("SELECT * FROM users WHERE id = ?").get(row.user_id) as DbUser | undefined;
+      if (!user) return null;
+      return { ...row, user };
+    },
+
+    async findDashboardTokenById(id) {
+      const row = db.prepare("SELECT * FROM dashboard_tokens WHERE id = ?").get(id) as DbDashboardToken | undefined;
+      return row || null;
+    },
+
+    async touchDashboardToken(id) {
+      db.prepare("UPDATE dashboard_tokens SET last_used_at = datetime('now') WHERE id = ?").run(id);
+    },
+
+    async revokeDashboardToken(id) {
+      db.prepare("UPDATE dashboard_tokens SET revoked_at = datetime('now') WHERE id = ? AND revoked_at IS NULL").run(id);
+    },
+
+    async deleteDashboardToken(id) {
+      db.prepare("DELETE FROM dashboard_tokens WHERE id = ?").run(id);
+    },
+
     async createProvider(input) {
       const result = db.prepare(
         `INSERT INTO providers (slug, name, plugin, base_url, api_key_secret, audio_format, models, voices, enabled)
@@ -776,8 +883,10 @@ function createPostgresDb(): Database {
           last_name TEXT NOT NULL,
           company TEXT,
           role TEXT NOT NULL DEFAULT 'member',
+          auth_provider TEXT NOT NULL DEFAULT 'local',
           created_at TIMESTAMPTZ DEFAULT NOW()
         );
+        ALTER TABLE users ADD COLUMN IF NOT EXISTS auth_provider TEXT NOT NULL DEFAULT 'local';
         CREATE TABLE IF NOT EXISTS sessions (
           token TEXT PRIMARY KEY,
           user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -896,6 +1005,21 @@ function createPostgresDb(): Database {
           created_at TIMESTAMPTZ DEFAULT NOW(),
           updated_at TIMESTAMPTZ DEFAULT NOW()
         );
+        -- Bearer tokens for the REST API. Only the SHA-256 of the token is
+        -- stored: unlike a LiveKit key we never need the value back, just a
+        -- constant-time comparison. Role comes from the owning user at auth
+        -- time, so a demotion applies to their tokens immediately.
+        CREATE TABLE IF NOT EXISTS dashboard_tokens (
+          id SERIAL PRIMARY KEY,
+          user_id INTEGER NOT NULL,
+          name TEXT NOT NULL,
+          token_prefix TEXT NOT NULL,
+          token_hash TEXT UNIQUE NOT NULL,
+          created_at TIMESTAMPTZ DEFAULT NOW(),
+          last_used_at TIMESTAMPTZ,
+          revoked_at TIMESTAMPTZ
+        );
+        CREATE INDEX IF NOT EXISTS idx_dashboard_tokens_hash ON dashboard_tokens(token_hash);
         ALTER TABLE providers ADD COLUMN IF NOT EXISTS audio_format TEXT;
       `);
 
@@ -934,6 +1058,17 @@ function createPostgresDb(): Database {
       await pool.query("UPDATE users SET role = $1 WHERE id = $2", [role, id]);
     },
 
+    async updateUserPassword(id, passwordHash) {
+      await pool.query("UPDATE users SET password_hash = $1 WHERE id = $2", [passwordHash, id]);
+    },
+
+    async updateUserProfile(id, firstName, lastName, company) {
+      await pool.query(
+        "UPDATE users SET first_name = $1, last_name = $2, company = $3 WHERE id = $4",
+        [firstName, lastName, company, id]
+      );
+    },
+
     async deleteUser(id) {
       await pool.query("DELETE FROM users WHERE id = $1", [id]);
     },
@@ -948,7 +1083,7 @@ function createPostgresDb(): Database {
     async findSession(token) {
       const { rows } = await pool.query(
         `SELECT s.token, s.user_id, s.expires_at, s.created_at,
-                u.id as u_id, u.email, u.password_hash, u.first_name, u.last_name, u.company, u.role, u.created_at as u_created_at
+                u.id as u_id, u.email, u.password_hash, u.first_name, u.last_name, u.company, u.role, u.auth_provider, u.created_at as u_created_at
          FROM sessions s JOIN users u ON s.user_id = u.id
          WHERE s.token = $1 AND s.expires_at > NOW()`,
         [token]
@@ -970,6 +1105,7 @@ function createPostgresDb(): Database {
           last_name: row.last_name,
           company: row.company,
           role: row.role,
+          auth_provider: row.auth_provider || "local",
           created_at: row.u_created_at,
         },
       };
@@ -977,6 +1113,10 @@ function createPostgresDb(): Database {
 
     async deleteSession(token) {
       await pool.query("DELETE FROM sessions WHERE token = $1", [token]);
+    },
+
+    async deleteUserSessionsExcept(userId, keepToken) {
+      await pool.query("DELETE FROM sessions WHERE user_id = $1 AND token <> $2", [userId, keepToken]);
     },
 
     async deleteExpiredSessions() {
@@ -1228,6 +1368,48 @@ function createPostgresDb(): Database {
 
     async deleteSecret(name) {
       await pool.query("DELETE FROM secrets WHERE name = $1", [name]);
+    },
+
+    async createDashboardToken(userId, name, prefix, hash) {
+      const { rows } = await pool.query(
+        "INSERT INTO dashboard_tokens (user_id, name, token_prefix, token_hash) VALUES ($1, $2, $3, $4) RETURNING *",
+        [userId, name, prefix, hash]
+      );
+      return rows[0];
+    },
+
+    async getDashboardTokens(userId) {
+      const sql = `SELECT t.*, u.email as owner_email FROM dashboard_tokens t
+                   JOIN users u ON u.id = t.user_id
+                   ${userId ? "WHERE t.user_id = $1" : ""}
+                   ORDER BY t.created_at DESC`;
+      const { rows } = await pool.query(sql, userId ? [userId] : []);
+      return rows;
+    },
+
+    async findDashboardTokenByHash(hash) {
+      const { rows } = await pool.query("SELECT * FROM dashboard_tokens WHERE token_hash = $1", [hash]);
+      if (!rows[0]) return null;
+      const { rows: users } = await pool.query("SELECT * FROM users WHERE id = $1", [rows[0].user_id]);
+      if (!users[0]) return null;
+      return { ...rows[0], user: users[0] };
+    },
+
+    async findDashboardTokenById(id) {
+      const { rows } = await pool.query("SELECT * FROM dashboard_tokens WHERE id = $1", [id]);
+      return rows[0] || null;
+    },
+
+    async touchDashboardToken(id) {
+      await pool.query("UPDATE dashboard_tokens SET last_used_at = NOW() WHERE id = $1", [id]);
+    },
+
+    async revokeDashboardToken(id) {
+      await pool.query("UPDATE dashboard_tokens SET revoked_at = NOW() WHERE id = $1 AND revoked_at IS NULL", [id]);
+    },
+
+    async deleteDashboardToken(id) {
+      await pool.query("DELETE FROM dashboard_tokens WHERE id = $1", [id]);
     },
 
     async createProvider(input) {

@@ -1,6 +1,7 @@
-import { cookies } from "next/headers";
+import { cookies, headers } from "next/headers";
 import bcrypt from "bcryptjs";
-import { ensureDb, type UserRole } from "./db";
+import { ensureDb, type AuthProvider, type DbUser, type UserRole } from "./db";
+import { bearerFromHeader, hashApiToken } from "./api-tokens";
 
 export interface User {
   id?: number;
@@ -9,7 +10,13 @@ export interface User {
   lastName: string;
   company?: string;
   role: UserRole;
+  /** "local" accounts have a password here; anything else is managed by an IdP. */
+  authProvider?: AuthProvider;
+  createdAt?: string;
 }
+
+/** Minimum length enforced on any password we store ourselves. */
+export const MIN_PASSWORD_LENGTH = 8;
 
 const SESSION_COOKIE = "lk_session";
 const SESSION_MAX_AGE = 60 * 60 * 24 * 7; // 7 days
@@ -39,7 +46,49 @@ export async function createSession(user: User): Promise<string> {
   return token;
 }
 
+function toUser(row: DbUser): User {
+  return {
+    id: row.id,
+    email: row.email,
+    firstName: row.first_name,
+    lastName: row.last_name,
+    company: row.company ?? undefined,
+    role: row.role,
+    authProvider: row.auth_provider ?? "local",
+    createdAt: row.created_at,
+  };
+}
+
+/**
+ * Resolves the caller from an `Authorization: Bearer lkui_…` header.
+ * The role is read from the owning user, so revoking or demoting them takes
+ * effect on their tokens immediately.
+ */
+async function getBearerUser(): Promise<User | null> {
+  const headerStore = await headers();
+  const token = bearerFromHeader(headerStore.get("authorization"));
+  if (!token) return null;
+
+  const db = await ensureDb();
+  const row = await db.findDashboardTokenByHash(hashApiToken(token));
+  if (!row || row.revoked_at) return null;
+
+  // Best-effort: a failed timestamp write must not fail the request.
+  try {
+    await db.touchDashboardToken(row.id);
+  } catch {}
+
+  return toUser(row.user);
+}
+
+/**
+ * The caller, whether they came from the browser (session cookie) or a script
+ * (Bearer token). Every route that calls this accepts both automatically.
+ */
 export async function getSession(): Promise<User | null> {
+  const bearer = await getBearerUser();
+  if (bearer) return bearer;
+
   const cookieStore = await cookies();
   const token = cookieStore.get(SESSION_COOKIE)?.value;
   if (!token) return null;
@@ -48,14 +97,7 @@ export async function getSession(): Promise<User | null> {
   const session = await db.findSession(token);
   if (!session) return null;
 
-  return {
-    id: session.user.id,
-    email: session.user.email,
-    firstName: session.user.first_name,
-    lastName: session.user.last_name,
-    company: session.user.company ?? undefined,
-    role: session.user.role,
-  };
+  return toUser(session.user);
 }
 
 export async function destroySession(): Promise<void> {
@@ -95,6 +137,7 @@ export async function registerUser(
       lastName: dbUser.last_name,
       company: dbUser.company ?? undefined,
       role: dbUser.role,
+      authProvider: dbUser.auth_provider ?? "local",
     },
   };
 }
@@ -161,6 +204,7 @@ export async function registerWithInvite(
       lastName: dbUser.last_name,
       company: dbUser.company ?? undefined,
       role: dbUser.role,
+      authProvider: dbUser.auth_provider ?? "local",
     },
   };
 }
@@ -190,8 +234,77 @@ export async function validateCredentials(
       lastName: dbUser.last_name,
       company: dbUser.company ?? undefined,
       role: dbUser.role,
+      authProvider: dbUser.auth_provider ?? "local",
     },
   };
+}
+
+/**
+ * Change the password of a local account. Requires the current password, and
+ * signs every other session out so a leaked cookie stops working.
+ */
+export async function changePassword(
+  userId: number,
+  currentPassword: string,
+  newPassword: string
+): Promise<{ success: boolean; error?: string }> {
+  const db = await ensureDb();
+
+  const dbUser = await db.findUserById(userId);
+  if (!dbUser) {
+    return { success: false, error: "Account not found" };
+  }
+
+  const provider = dbUser.auth_provider ?? "local";
+  if (provider !== "local") {
+    return {
+      success: false,
+      error: `This account signs in with ${provider}. Change the password with that provider instead.`,
+    };
+  }
+
+  if (newPassword.length < MIN_PASSWORD_LENGTH) {
+    return {
+      success: false,
+      error: `Password must be at least ${MIN_PASSWORD_LENGTH} characters`,
+    };
+  }
+
+  const valid = await bcrypt.compare(currentPassword, dbUser.password_hash);
+  if (!valid) {
+    return { success: false, error: "Current password is incorrect" };
+  }
+
+  if (await bcrypt.compare(newPassword, dbUser.password_hash)) {
+    return { success: false, error: "New password must be different from the current one" };
+  }
+
+  await db.updateUserPassword(userId, await bcrypt.hash(newPassword, 10));
+
+  // Keep this tab signed in, drop everything else.
+  const cookieStore = await cookies();
+  const token = cookieStore.get(SESSION_COOKIE)?.value;
+  if (token) {
+    await db.deleteUserSessionsExcept(userId, token);
+  }
+
+  return { success: true };
+}
+
+/** Update the signed-in user's own name / company. */
+export async function updateProfile(
+  userId: number,
+  firstName: string,
+  lastName: string,
+  company: string | null
+): Promise<{ success: boolean; error?: string }> {
+  if (!firstName.trim() || !lastName.trim()) {
+    return { success: false, error: "First and last name are required" };
+  }
+
+  const db = await ensureDb();
+  await db.updateUserProfile(userId, firstName.trim(), lastName.trim(), company?.trim() || null);
+  return { success: true };
 }
 
 // ---------------------------------------------------------------------------

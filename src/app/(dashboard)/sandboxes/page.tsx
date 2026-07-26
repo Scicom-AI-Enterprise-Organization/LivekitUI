@@ -209,7 +209,9 @@ function EditSandboxDialog({
                 ))}
               </select>
               <p className="text-xs text-muted-foreground">
-                Choose a specific agent or leave as auto-dispatch.
+                Pick the agent by name. Agents deployed from the builder register for explicit dispatch, so
+                auto-dispatch never matches them — the sandbox connects but no agent joins, leaving the send
+                button disabled and no transcription.
               </p>
             </div>
 
@@ -569,7 +571,7 @@ export default function SandboxPage() {
               <Link key={t.name} href={t.href}>
                 <Card className="group relative hover:border-primary/40 transition-colors cursor-pointer">
                   <CardContent className="p-5">
-                    <div className="mb-4 flex h-20 items-center justify-center rounded-md bg-muted">
+                    <div className="mb-4 flex h-20 items-center justify-center rounded-md">
                       <t.icon className="size-10 text-muted-foreground" />
                     </div>
                     <h3 className="text-sm font-semibold text-foreground mb-1">

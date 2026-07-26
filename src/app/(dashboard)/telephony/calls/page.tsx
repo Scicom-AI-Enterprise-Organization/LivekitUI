@@ -4,75 +4,116 @@ import { TopBar } from "@/components/livekit/top-bar";
 import { StatCard } from "@/components/livekit/stat-card";
 import { DataTable } from "@/components/livekit/data-table";
 import { Card, CardContent } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Info, Filter, Search } from "lucide-react";
+import { Info, RefreshCw } from "lucide-react";
+import { useApiList } from "@/hooks/use-api-list";
+import { ListError, ListLoading, ServiceNotice } from "@/components/livekit/list-state";
+
+interface Call {
+  callId: string;
+  roomName: string;
+  participantIdentity: string;
+  from: string | null;
+  to: string | null;
+  direction: string | null;
+  status: string;
+  startedAt: string | null;
+  durationSeconds: number | null;
+}
+
+const columns = [
+  { key: "callId", label: "Call ID" },
+  { key: "from", label: "From" },
+  { key: "to", label: "To" },
+  { key: "room", label: "Room" },
+  { key: "startedAt", label: "Started At" },
+  { key: "duration", label: "Duration" },
+  { key: "status", label: "Status" },
+];
+
+function formatDuration(seconds: number | null) {
+  if (seconds === null) return "—";
+  if (seconds < 60) return `${seconds}s`;
+  const m = Math.floor(seconds / 60);
+  return `${m}m ${seconds % 60}s`;
+}
 
 export default function TelephonyCallsPage() {
+  const { items, loading, error, notice, reload } = useApiList<Call>("/api/calls", "calls");
+
+  const totalDuration = items.reduce((n, c) => n + (c.durationSeconds || 0), 0);
+  const avgDuration = items.length ? Math.round(totalDuration / items.length) : 0;
+  const withIssues = items.filter((c) => /fail|error|busy|no.?answer/i.test(c.status)).length;
+
+  const rows = items.map((c) => ({
+    callId: <span className="font-mono text-xs">{c.callId}</span>,
+    from: c.from || "—",
+    to: c.to || "—",
+    room: c.roomName,
+    startedAt: c.startedAt ? new Date(c.startedAt).toLocaleString() : "—",
+    duration: formatDuration(c.durationSeconds),
+    status: (
+      <Badge variant="outline" className="bg-emerald-500/10 text-emerald-500 border-emerald-500/30">
+        {c.status}
+      </Badge>
+    ),
+  }));
+
   return (
     <div className="flex flex-col h-full">
-      <TopBar title="Telephony" showRefresh showTimeRange />
+      <TopBar title="Telephony" showTimeRange>
+        <Button variant="outline" size="sm" className="gap-1.5 text-xs" onClick={reload}>
+          <RefreshCw className="size-3" />
+          Refresh
+        </Button>
+      </TopBar>
 
       <div className="flex-1 overflow-auto p-6 space-y-6">
-        {/* Top 3 stat cards */}
-        <div className="grid grid-cols-3 gap-4">
-          <StatCard label="Total Calls" value="-" />
-          <StatCard label="Total Call Duration" value="0" unit="sec" />
-          <StatCard label="Average Call Duration" value="0" unit="sec" />
-        </div>
+        {error && <ListError message={error} />}
+        {notice && <ServiceNotice message={notice.message} reason={notice.reason} />}
 
-        {/* Active calls + Issues */}
-        <div className="grid grid-cols-2 gap-4">
-          <Card className="py-4">
-            <CardContent className="px-5 py-0">
-              <div className="flex items-center gap-1.5 mb-2">
-                <span className="text-sm text-muted-foreground">Active Calls</span>
-                <Info className="size-3 text-muted-foreground" />
-              </div>
-              <span className="text-2xl font-semibold text-primary">0</span>
-            </CardContent>
-          </Card>
-          <Card className="py-4">
-            <CardContent className="px-5 py-0">
-              <div className="flex items-center gap-1.5 mb-2">
-                <span className="text-sm text-muted-foreground">Calls with Issues</span>
-                <Info className="size-3 text-muted-foreground" />
-              </div>
-              <span className="text-2xl font-semibold text-primary">0</span>
-            </CardContent>
-          </Card>
-        </div>
-
-        {/* Calls table */}
-        <div className="space-y-3">
-          <div className="flex items-center justify-between">
-            <h2 className="text-sm font-semibold text-foreground">Calls</h2>
-            <div className="flex items-center gap-2">
-              <Button variant="outline" size="sm">
-                <Filter className="size-3" />
-                Filters
-              </Button>
-              <Button variant="outline" size="icon-sm">
-                <Search className="size-3.5" />
-              </Button>
+        {loading ? (
+          <ListLoading />
+        ) : notice ? null : (
+          <>
+            <div className="grid grid-cols-3 gap-4">
+              <StatCard label="Active Calls" value={items.length} />
+              <StatCard label="Total Call Duration" value={String(totalDuration)} unit="sec" />
+              <StatCard label="Average Call Duration" value={String(avgDuration)} unit="sec" />
             </div>
-          </div>
 
-          <DataTable
-            columns={[
-              { key: "id", label: "ID" },
-              { key: "from", label: "From" },
-              { key: "to", label: "To" },
-              { key: "direction", label: "Direction" },
-              { key: "startedBy", label: "Started By" },
-              { key: "endedBy", label: "Ended By" },
-              { key: "duration", label: "Duration" },
-              { key: "session", label: "Session" },
-              { key: "status", label: "Status" },
-            ]}
-            data={[]}
-            emptyMessage="No results."
-          />
-        </div>
+            <div className="grid grid-cols-2 gap-4">
+              <Card className="py-4">
+                <CardContent className="px-5 py-0">
+                  <div className="flex items-center gap-1.5 mb-2">
+                    <span className="text-sm text-muted-foreground">Active Calls</span>
+                    <Info className="size-3 text-muted-foreground" />
+                  </div>
+                  <span className="text-2xl font-semibold text-primary">{items.length}</span>
+                </CardContent>
+              </Card>
+              <Card className="py-4">
+                <CardContent className="px-5 py-0">
+                  <div className="flex items-center gap-1.5 mb-2">
+                    <span className="text-sm text-muted-foreground">Calls with Issues</span>
+                    <Info className="size-3 text-muted-foreground" />
+                  </div>
+                  <span className="text-2xl font-semibold text-primary">{withIssues}</span>
+                </CardContent>
+              </Card>
+            </div>
+
+            <div className="space-y-3">
+              <h2 className="text-sm font-semibold text-foreground">Calls</h2>
+              <DataTable
+                columns={columns}
+                data={rows}
+                emptyMessage="No active calls. A call appears here while a SIP participant is in a room."
+              />
+            </div>
+          </>
+        )}
       </div>
     </div>
   );

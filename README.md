@@ -246,6 +246,60 @@ If you already have a suitable interpreter elsewhere, point the dashboard at it 
 AGENT_PYTHON_BIN=/path/to/python3
 ```
 
+## REST API
+
+Every dashboard feature is reachable over REST — 70 endpoints, documented in-app at **/api-docs** with a curl sample per endpoint.
+
+### Authentication
+
+Two credentials work on every route:
+
+| Credential | For | How |
+|---|---|---|
+| `lk_session` cookie | The browser | Set by `POST /api/auth/login` |
+| `lkui_…` Bearer token | Scripts, CI, agents | Created under **Settings → Access tokens** |
+
+```bash
+export BASE=http://localhost:3000
+export TOKEN=lkui_your_token_here
+curl $BASE/api/auth/me -H "Authorization: Bearer $TOKEN"
+```
+
+A token carries the role of whoever created it, so demoting or removing that account applies to its tokens at once. Revoking takes effect on the next request — tokens are looked up per call with no cache. Unauthenticated API calls get a JSON `401`, never a redirect to the login page.
+
+These are **not** the same as the LiveKit keys under Settings → API keys: a token here calls the dashboard, a LiveKit key connects to the media server. Keeping them separate means an agent holding a LiveKit key cannot reach dashboard endpoints.
+
+### Services that need more than the dev server
+
+Egress, ingress, and SIP each run as their own LiveKit process and register over Redis. A single-node `livekit-server --dev` has none of them, so those endpoints answer:
+
+```json
+{ "error": "The egress service is not available on this LiveKit deployment",
+  "serviceAvailable": false, "reason": "…" }
+```
+
+with status `503`, and the matching pages explain the gap instead of showing an error. `/api/calls` and `/api/phone-numbers` work without any of it.
+
+## Tests
+
+```bash
+npm run dev          # in one terminal
+TEST_EMAIL=you@example.com TEST_PASSWORD=… npm test
+```
+
+Integration tests over the real API — actual routes, database, and LiveKit server, no mocks. The suite mints its own Bearer token, cleans up everything it creates, and revokes the token at the end. Set `TEST_API_TOKEN` instead of the credentials to reuse an existing token, or `TEST_BASE_URL` / `TEST_GATEWAY_URL` for a non-default host.
+
+| File | Covers |
+|---|---|
+| `tests/authz.test.mjs` | Every protected endpoint rejects both no credentials and a forged token, and the public ones stay reachable |
+| `tests/auth.test.mjs` | Login, session cookie, Bearer parity, JSON 401s |
+| `tests/access-tokens.test.mjs` | Create, list, use, revoke, `lastUsedAt` |
+| `tests/livekit-keys.test.mjs` | Issued keys, the key crypto, gateway translation |
+| `tests/core.test.mjs` | Agents, rooms, overview, metrics, secrets, providers, sandboxes, webhooks |
+| `tests/media.test.mjs` | Egress, ingress, telephony — validation always, data when the services are up |
+
+Tests that need the gateway or an unavailable LiveKit service skip themselves rather than fail.
+
 ## Database
 
 SQLite by default (zero config, stored at `./data/livekit.db`). Switch to PostgreSQL:

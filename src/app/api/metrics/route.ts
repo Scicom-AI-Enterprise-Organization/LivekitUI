@@ -4,6 +4,7 @@ import {
   recordBandwidthSnapshot,
   getBandwidthChart,
 } from "@/lib/prometheus";
+import { getSession } from "@/lib/auth";
 
 function formatBytes(bytes: number): { value: string; unit: string } {
   if (bytes >= 1e9) return { value: (bytes / 1e9).toFixed(2), unit: "GB" };
@@ -14,6 +15,11 @@ function formatBytes(bytes: number): { value: string; unit: string } {
 
 export async function GET() {
   try {
+    const session = await getSession();
+    if (!session) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
     const metrics = await scrapeLiveKitMetrics();
     recordBandwidthSnapshot(metrics);
 

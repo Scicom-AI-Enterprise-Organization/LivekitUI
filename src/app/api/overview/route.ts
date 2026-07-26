@@ -1,9 +1,15 @@
 import { NextResponse } from "next/server";
 import { getRoomServiceClient } from "@/lib/livekit";
 import { ParticipantInfo_Kind } from "@livekit/protocol";
+import { getSession } from "@/lib/auth";
 
 export async function GET() {
   try {
+    const session = await getSession();
+    if (!session) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
     const client = getRoomServiceClient();
     const rooms = await client.listRooms();
 

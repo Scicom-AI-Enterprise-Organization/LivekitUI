@@ -4,9 +4,15 @@ import { ParticipantInfo_Kind } from "@livekit/protocol";
 import { ensureDb } from "@/lib/db";
 import { getSession } from "@/lib/auth";
 import { stopAgent, deleteAgentFiles, isAgentRunning, getAgentPid, getAgentWorkerId } from "@/lib/agent-runner";
+import { deleteAgentRecordings } from "@/lib/console-recordings";
 
 export async function GET(request: NextRequest) {
   try {
+    const session = await getSession();
+    if (!session) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
     const roomClient = getRoomServiceClient();
     const dispatchClient = getAgentDispatchClient();
     const db = await ensureDb();
@@ -77,7 +83,16 @@ export async function GET(request: NextRequest) {
       try {
         const dispatches = await dispatchClient.listDispatch(room.name);
         for (const dispatch of dispatches) {
-          const name = resolveName(dispatch.agentName || "agent (auto-dispatch)");
+          // A nameless dispatch is auto-dispatch: it requests "any available
+          // worker" rather than naming one, so there is no worker to list. Keep
+          // an empty slot so the participant cursor below stays aligned with
+          // dispatch order, and let the agent that actually joins identify
+          // itself.
+          if (!dispatch.agentName) {
+            dispatchedNames.push("");
+            continue;
+          }
+          const name = resolveName(dispatch.agentName);
           dispatchedNames.push(name);
           if (!agentWorkers.has(name)) {
             const running = isAgentRunning(name);
@@ -97,11 +112,13 @@ export async function GET(request: NextRequest) {
             let name: string;
             if (p.name && !p.name.startsWith("agent-")) {
               name = resolveName(p.name);
-            } else if (dispatchCursor < dispatchedNames.length) {
-              name = dispatchedNames[dispatchCursor++];
             } else {
-              name = resolveName(p.name || p.identity || "agent (auto-dispatch)");
+              // An empty queue slot means that dispatch was auto-dispatch, so
+              // fall back to the participant's own identity.
+              const queued = dispatchCursor < dispatchedNames.length ? dispatchedNames[dispatchCursor++] : "";
+              name = queued || resolveName(p.name || p.identity);
             }
+            if (!name) continue;
             agentSessions.push({
               agentName: name,
               roomName: room.name,
@@ -218,6 +235,7 @@ export async function DELETE(request: NextRequest) {
   // Stop running process and remove generated files
   stopAgent(name);
   deleteAgentFiles(name);
+  deleteAgentRecordings(name);
 
   // Remove any lingering LiveKit dispatches so the agent stops reappearing
   // in the list (the /api/agents GET merges dispatch-derived entries with

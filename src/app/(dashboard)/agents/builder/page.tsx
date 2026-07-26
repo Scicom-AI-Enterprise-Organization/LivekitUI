@@ -4,6 +4,7 @@ import { useState, useRef, useEffect, useCallback, Suspense } from "react";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { CONSOLE_METRICS_TOPIC } from "@/lib/console-metrics";
 import {
   LiveKitRoom,
   RoomAudioRenderer,
@@ -2339,11 +2340,12 @@ ${payloadCode}
   if (hasAnyOptional) topImportLines.push("from typing import Optional");
   if (hasHttpTools || hasCallSummary) {
     topImportLines.push("import aiohttp");
-    topImportLines.push("import asyncio");
   }
-  if (hasClientTools) {
-    topImportLines.push("import json");
-  }
+  // asyncio and json are always needed: the console bridge below publishes
+  // metrics as JSON from a background task.
+  topImportLines.push("import asyncio");
+  topImportLines.push("import json");
+  topImportLines.push("from dataclasses import asdict, is_dataclass");
   if (hasCallSummary) {
     topImportLines.push("from datetime import UTC, datetime");
   }
@@ -2546,6 +2548,43 @@ logger = logging.getLogger("agent-${agentSlug}")
 
 load_dotenv(".env.local")
 
+# ── Console metrics bridge ───────────────────────────────────────────────────
+# Every metrics event is mirrored onto a room data topic so the dashboard
+# Console can show STT / LLM / TTS latency (TTFT, TTFB, tokens per second) for
+# the session it is attached to. Logging alone can't do that: log lines are
+# per-process, not per-room.
+CONSOLE_METRICS_TOPIC = "${CONSOLE_METRICS_TOPIC}"
+
+
+def _metrics_to_dict(m: object) -> dict:
+    """Best-effort dict for a metrics object across livekit-agents versions."""
+    if is_dataclass(m) and not isinstance(m, type):
+        data = asdict(m)
+    elif hasattr(m, "model_dump"):
+        data = m.model_dump()
+    else:
+        data = {k: v for k, v in vars(m).items() if not k.startswith("_")}
+    data["kind"] = type(m).__name__
+    return data
+
+
+def publish_console_metrics(ctx: JobContext, m: object) -> None:
+    payload = json.dumps(_metrics_to_dict(m), default=str).encode()
+
+    async def _send() -> None:
+        try:
+            await ctx.room.local_participant.publish_data(
+                payload, topic=CONSOLE_METRICS_TOPIC, reliable=True
+            )
+        except Exception:
+            # Never let telemetry break the call.
+            logger.debug("console metrics publish failed", exc_info=True)
+
+    try:
+        asyncio.get_running_loop().create_task(_send())
+    except RuntimeError:
+        logger.debug("console metrics dropped: no running event loop")
+
 
 class DefaultAgent(Agent):
     def __init__(self) -> None:
@@ -2574,6 +2613,7 @@ ${sessionBlock}
     @session.on("metrics_collected")
     def _on_metrics_collected(ev: MetricsCollectedEvent) -> None:
         metrics.log_metrics(ev.metrics)
+        publish_console_metrics(ctx, ev.metrics)
 
     await session.start(
         agent=DefaultAgent(),

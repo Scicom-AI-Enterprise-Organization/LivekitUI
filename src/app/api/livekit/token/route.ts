@@ -18,7 +18,19 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const { agentName } = await req.json();
+  const {
+    agentName,
+    mode,
+    participantName,
+    participantMetadata,
+    roomMetadata,
+  }: {
+    agentName?: string;
+    mode?: "preview" | "console";
+    participantName?: string;
+    participantMetadata?: string;
+    roomMetadata?: string;
+  } = await req.json();
 
   if (!agentName) {
     return NextResponse.json({ error: "agentName is required" }, { status: 400 });
@@ -50,12 +62,18 @@ export async function POST(req: NextRequest) {
   // The agent registers under its slug, which is how the builder writes
   // agent_name into the generated code.
   const dispatchName = agentName.replace(/\s+/g, "-");
-  const roomName = `agent-preview-${dispatchName}-${Date.now()}`;
-  const participantName = `user-${Math.random().toString(36).slice(2, 8)}`;
+  const prefix = mode === "console" ? "agent-console" : "agent-preview";
+  const roomName = `${prefix}-${dispatchName}-${Date.now()}`;
+  const identity = `user-${Math.random().toString(36).slice(2, 8)}`;
+  const displayName = participantName?.trim() || identity;
 
   try {
     // Empty rooms are reaped shortly after the preview ends.
-    await getRoomServiceClient().createRoom({ name: roomName, emptyTimeout: 120 });
+    await getRoomServiceClient().createRoom({
+      name: roomName,
+      emptyTimeout: 120,
+      ...(roomMetadata ? { metadata: roomMetadata } : {}),
+    });
     await getAgentDispatchClient().createDispatch(roomName, dispatchName);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -66,8 +84,9 @@ export async function POST(req: NextRequest) {
   }
 
   const at = new AccessToken(apiKey, apiSecret, {
-    identity: participantName,
-    name: participantName,
+    identity,
+    name: displayName,
+    ...(participantMetadata ? { metadata: participantMetadata } : {}),
   });
 
   at.addGrant({
@@ -75,6 +94,8 @@ export async function POST(req: NextRequest) {
     roomJoin: true,
     canPublish: true,
     canSubscribe: true,
+    canPublishData: true,
+    canUpdateOwnMetadata: true,
   });
 
   const token = await at.toJwt();
@@ -83,6 +104,8 @@ export async function POST(req: NextRequest) {
     token,
     room: roomName,
     agent: dispatchName,
+    identity,
+    participantName: displayName,
     serverUrl: process.env.LIVEKIT_URL || "ws://localhost:7880",
   });
 }

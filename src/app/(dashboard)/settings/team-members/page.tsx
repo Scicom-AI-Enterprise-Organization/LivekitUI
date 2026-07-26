@@ -25,6 +25,7 @@ import {
   DialogClose,
 } from "@/components/ui/dialog";
 import { Loader2, UserPlus, Copy, Check, Trash2 } from "lucide-react";
+import { LoginTypeBadge } from "@/components/livekit/login-type-badge";
 
 interface Member {
   id: number;
@@ -33,6 +34,7 @@ interface Member {
   lastName: string;
   company: string | null;
   role: string;
+  authProvider: string;
   createdAt: string;
 }
 
@@ -204,6 +206,7 @@ export default function TeamMembersPage() {
                       <th className="px-4 py-2.5 font-medium">Name</th>
                       <th className="px-4 py-2.5 font-medium">Email</th>
                       <th className="px-4 py-2.5 font-medium">Role</th>
+                      <th className="px-4 py-2.5 font-medium">Login</th>
                       <th className="px-4 py-2.5 font-medium">Joined</th>
                       <th className="px-4 py-2.5 font-medium w-16"></th>
                     </tr>
@@ -231,6 +234,9 @@ export default function TeamMembersPage() {
                             {m.role.charAt(0).toUpperCase() + m.role.slice(1)}
                           </Badge>
                         </td>
+                        <td className="px-4 py-2.5">
+                          <LoginTypeBadge type={m.authProvider ?? "local"} />
+                        </td>
                         <td className="px-4 py-2.5 text-muted-foreground">
                           {formatDate(m.createdAt)}
                         </td>
@@ -250,7 +256,7 @@ export default function TeamMembersPage() {
                     ))}
                     {members.length === 0 && (
                       <tr>
-                        <td colSpan={5} className="px-4 py-8 text-center text-muted-foreground">
+                        <td colSpan={6} className="px-4 py-8 text-center text-muted-foreground">
                           No members found.
                         </td>
                       </tr>

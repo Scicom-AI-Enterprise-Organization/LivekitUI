@@ -87,10 +87,13 @@ const navItems: NavItem[] = [
     icon: <Settings className="size-4" />,
     children: [
       { label: "Project", href: "/settings/project" },
+      { label: "Profile", href: "/settings/profile" },
       { label: "Team members", href: "/settings/team-members" },
       { label: "Providers", href: "/settings/providers" },
       { label: "Secrets", href: "/settings/secrets" },
       { label: "API keys", href: "/settings/api-keys" },
+      { label: "Access tokens", href: "/settings/access-tokens" },
+      { label: "API docs", href: "/api-docs" },
       { label: "Webhooks", href: "/settings/webhooks" },
     ],
   },
