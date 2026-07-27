@@ -1,0 +1,138 @@
+# CI — build the LivekitUI image (multi-arch) and push to ECR.
+#
+# Pattern follows Serverless-GPU's ci.yml (org convention):
+#   - Native runners per architecture (ubuntu-latest for amd64,
+#     ubuntu-24.04-arm for arm64) — no QEMU emulation. This image installs
+#     Node deps AND a Python venv with livekit plugins; under QEMU the arm64
+#     leg would take 40+ minutes, natively both legs run in parallel.
+#   - Each leg pushes a per-platform tag (<tag>-amd64 / <tag>-arm64); the
+#     merge job stitches them into one multi-arch manifest.
+#   - GitHub OIDC -> IAM role. NO long-lived AWS keys in secrets.
+#   - GHA layer cache, scoped per arch so the legs don't evict each other.
+#
+# Tags pushed on main:  main-<sha7> (immutable, for argocd-image-updater
+# allowTags ^main-[a-f0-9]{7}$) and latest (convenience).
+# PR builds compile both arches but never push.
+#
+# Setup required before first push (see PR description / runbook):
+#   - IAM role with ECR push policy + OIDC trust for this repo; its ARN in
+#     the repo VARIABLE ECR_ROLE_ARN.
+#   - Repo VARIABLE ENABLE_ECR_PUSH=true (kill-switch, same as sgpu).
+#   - ECR repository scicom/livekitui must exist.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  id-token: write # OIDC federation to AWS — this replaces AWS keys
+
+env:
+  AWS_REGION: ap-southeast-5
+  ECR_REGISTRY: 865626945255.dkr.ecr.ap-southeast-5.amazonaws.com
+  ECR_REPO: scicom/livekitui
+
+jobs:
+  # ── Decide once whether this run pushes, and compute the tag ──────────────
+  meta:
+    runs-on: ubuntu-latest
+    outputs:
+      push: ${{ steps.d.outputs.push }}
+      sha_short: ${{ steps.d.outputs.sha_short }}
+    steps:
+      - id: d
+        run: |
+          echo "sha_short=$(echo '${{ github.sha }}' | cut -c1-7)" >> "$GITHUB_OUTPUT"
+          if [ "${{ github.event_name }}" = "push" ] && [ "${{ github.ref }}" = "refs/heads/main" ] && [ "${{ vars.ENABLE_ECR_PUSH }}" = "true" ]; then
+            echo "push=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "push=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  # ── Build one image per architecture on its native runner ─────────────────
+  build:
+    name: build (${{ matrix.suffix }})
+    needs: [meta]
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+            suffix: amd64
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            suffix: arm64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Configure AWS credentials (GitHub OIDC)
+        if: needs.meta.outputs.push == 'true'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.ECR_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: GitHubActions-LivekitUI
+
+      - name: Login to ECR (private)
+        if: needs.meta.outputs.push == 'true'
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build & maybe push (${{ matrix.platform }})
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: ${{ matrix.platform }}
+          # PRs: build-only (validates the Dockerfile on both arches).
+          push: ${{ needs.meta.outputs.push == 'true' }}
+          tags: ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPO }}:main-${{ needs.meta.outputs.sha_short }}-${{ matrix.suffix }}
+          # Layer cache in the GHA cache backend, one scope per arch. The
+          # pip-install and npm layers dominate build time; warm-cache runs
+          # skip both unless the corresponding layer inputs changed.
+          cache-from: type=gha,scope=livekitui-${{ matrix.suffix }}
+          cache-to: type=gha,scope=livekitui-${{ matrix.suffix }},mode=max
+          provenance: false
+
+  # ── Stitch the per-arch images into one multi-arch manifest ───────────────
+  merge:
+    name: merge manifest
+    needs: [meta, build]
+    if: needs.meta.outputs.push == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure AWS credentials (GitHub OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.ECR_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: GitHubActions-LivekitUI
+
+      - name: Login to ECR (private)
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Create and push multi-arch manifest
+        run: |
+          IMAGE="${ECR_REGISTRY}/${ECR_REPO}"
+          TAG="main-${{ needs.meta.outputs.sha_short }}"
+          docker buildx imagetools create \
+            --tag "${IMAGE}:${TAG}" \
+            --tag "${IMAGE}:latest" \
+            "${IMAGE}:${TAG}-amd64" \
+            "${IMAGE}:${TAG}-arm64"
+          docker buildx imagetools inspect "${IMAGE}:${TAG}"
