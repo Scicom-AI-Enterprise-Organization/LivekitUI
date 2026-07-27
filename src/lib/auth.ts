@@ -131,7 +131,10 @@ export async function addGithubMember(
 ): Promise<{ success: boolean; user?: User; error?: string }> {
   const db = await ensureDb();
 
-  if (!/^[a-zA-Z0-9](?:[a-zA-Z0-9]|-(?=[a-zA-Z0-9])){0,38}$/.test(githubLogin)) {
+  // Loose on purpose: public GitHub forbids underscores, but Enterprise
+  // Managed Users are `name_shortcode` (e.g. someone_tmberhad) and this org
+  // uses them. Just block whitespace/@/URL junk, not legitimate names.
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,58}$/.test(githubLogin)) {
     return { success: false, error: "Not a valid GitHub username" };
   }
   if (role === "owner") {
