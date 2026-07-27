@@ -51,19 +51,12 @@ RUN cd example/meet && (npm ci || npm install)
 # ── Copy source and build ──
 COPY . .
 
-# NEXT_PUBLIC_* are inlined into the client bundles by `next build`, not read at
-# runtime — they are used from client components (agents/[id]/console,
-# agents/builder, sandboxes). Setting them as ENV below the build would leave the
-# browser dialling ws://localhost:7880. They must be present here, as build args.
-ARG NEXT_PUBLIC_LIVEKIT_URL=ws://localhost:7880
-ARG NEXT_PUBLIC_LIVEKIT_GATEWAY_URL=ws://localhost:7885
-ARG NEXT_PUBLIC_SANDBOX_DOMAIN=http://localhost:3000
-ARG NEXT_PUBLIC_LIVEKIT_REGION=local
-ENV NEXT_PUBLIC_LIVEKIT_URL=$NEXT_PUBLIC_LIVEKIT_URL
-ENV NEXT_PUBLIC_LIVEKIT_GATEWAY_URL=$NEXT_PUBLIC_LIVEKIT_GATEWAY_URL
-ENV NEXT_PUBLIC_SANDBOX_DOMAIN=$NEXT_PUBLIC_SANDBOX_DOMAIN
-ENV NEXT_PUBLIC_LIVEKIT_REGION=$NEXT_PUBLIC_LIVEKIT_REGION
-
+# No NEXT_PUBLIC_* build args. The browser-facing addresses used to be inlined
+# into the client bundles here, which froze them at image-build time: an image
+# built without the right build arg shipped a bundle that dialled
+# ws://localhost:7880 from a public hostname, and the resulting failure surfaced
+# as a misleading "invalid API key". They are runtime env now — see
+# src/lib/runtime-config.ts — so one image works for every deployment.
 RUN npm run build
 
 # ── Data directories ──
@@ -77,6 +70,14 @@ ENV DB_TYPE=postgres
 ENV LIVEKIT_URL=http://localhost:7880
 ENV LIVEKIT_PROMETHEUS_URL=http://localhost:6789/metrics
 ENV GATEWAY_PORT=7885
+# Browser-facing addresses. LIVEKIT_URL above is the server-to-server one and
+# is usually an internal hostname, so the browser needs its own. Override these
+# on the running container — behind TLS they must be wss://, because an https
+# page cannot open a ws:// socket.
+ENV LIVEKIT_PUBLIC_URL=ws://localhost:7880
+ENV LIVEKIT_GATEWAY_PUBLIC_URL=ws://localhost:7885
+ENV SANDBOX_DOMAIN=http://localhost:3000
+ENV LIVEKIT_REGION=local
 # No venv in the image — agents run on the system interpreter that got the
 # plugins above. Without this, deploying an agent fails looking for a venv.
 ENV AGENT_PYTHON_BIN=/usr/bin/python3

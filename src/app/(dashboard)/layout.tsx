@@ -1,6 +1,8 @@
 import { redirect } from "next/navigation";
 import { LiveKitSidebar } from "@/components/livekit/sidebar";
+import { RuntimeConfigProvider } from "@/components/runtime-config-provider";
 import { getSession } from "@/lib/auth";
+import { getRuntimeConfig } from "@/lib/runtime-config";
 
 export const metadata = {
   title: "LiveKit Cloud",
@@ -21,10 +23,14 @@ export default async function LiveKitLayout({
     redirect("/login");
   }
 
+  // Resolved here, on the server, so the browser gets this deployment's values
+  // instead of whatever was inlined when the image was built.
   return (
-    <div className="flex h-screen overflow-hidden">
-      <LiveKitSidebar />
-      <main className="flex-1 overflow-y-auto">{children}</main>
-    </div>
+    <RuntimeConfigProvider config={getRuntimeConfig()}>
+      <div className="flex h-screen overflow-hidden">
+        <LiveKitSidebar />
+        <main className="flex-1 overflow-y-auto">{children}</main>
+      </div>
+    </RuntimeConfigProvider>
   );
 }

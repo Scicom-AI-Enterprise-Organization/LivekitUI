@@ -88,6 +88,7 @@ import {
 } from "@/components/livekit/console/use-session-recorder";
 import { useSessionPersistence } from "@/components/livekit/console/use-session-persistence";
 import { EventsPanel } from "@/components/livekit/console/events-panel";
+import { useRuntimeConfig } from "@/components/runtime-config-provider";
 import { MetricsPanel, ModelsPanel } from "@/components/livekit/console/metrics-panel";
 import { SavedAudioList } from "@/components/livekit/console/recordings-panel";
 import {
@@ -302,7 +303,7 @@ function AgentConsolePage() {
 
   const seqRef = useRef(0);
 
-  const serverUrl = process.env.NEXT_PUBLIC_LIVEKIT_URL || "ws://localhost:7880";
+  const { livekitUrl: serverUrl } = useRuntimeConfig();
 
   // ── Agent metadata ──
   useEffect(() => {
@@ -810,6 +811,7 @@ function ConsoleShell({
   onConfigure: () => void;
   onAgentChange: (name: string) => void;
 }) {
+  const { livekitRegion } = useRuntimeConfig();
   const room = useRoomContext();
   const { state: agentState, agent, audioTrack } = useVoiceAssistant();
   const participants = useParticipants();
@@ -1330,7 +1332,7 @@ function ConsoleShell({
               mono
             />
             <RailRow label="Room" value={roomName ?? "—"} mono />
-            <RailRow label="Region" value={process.env.NEXT_PUBLIC_LIVEKIT_REGION || "local"} />
+            <RailRow label="Region" value={livekitRegion} />
             <RailRow label="Duration" value={duration === null ? "—" : formatDuration(duration)} />
             <RailRow label="Participants" value={String(participants.length)} />
           </RailSection>

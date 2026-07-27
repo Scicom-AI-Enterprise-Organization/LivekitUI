@@ -1,5 +1,7 @@
 /* eslint-disable @typescript-eslint/no-require-imports, @typescript-eslint/no-explicit-any */
 
+import { getRuntimeConfig } from "./runtime-config";
+
 const childProcess: any = require("child_process");
 const fs: any = require("fs");
 const path: any = require("path");
@@ -199,11 +201,10 @@ export async function deploySandbox(
   const base = sandboxDomain || "http://localhost:3000";
   const url = `${base.replace(/\/$/, "")}/sandbox/${name}`;
 
-  // Write .env.local for THIS sandbox
-  const livekitWsUrl =
-    process.env.NEXT_PUBLIC_LIVEKIT_URL ||
-    process.env.LIVEKIT_URL ||
-    "ws://localhost:7880";
+  // Write .env.local for THIS sandbox. The templates hand this straight to the
+  // browser from their /api/connection-details route, so it has to be the
+  // public URL — not `LIVEKIT_URL`, which under Docker is an internal hostname.
+  const livekitWsUrl = getRuntimeConfig().livekitUrl;
 
   const envContent = [
     `LIVEKIT_API_KEY=${livekitApiKey}`,

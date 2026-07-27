@@ -10,6 +10,7 @@ import { Label } from "@/components/ui/label";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Switch } from "@/components/ui/switch";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
+import { useRuntimeConfig } from "@/components/runtime-config-provider";
 
 function CopyField({ label, value }: { label: string; value: string }) {
   return (
@@ -214,6 +215,7 @@ function SessionCaptureCard() {
 }
 
 export default function ProjectSettingsPage() {
+  const { sandboxDomain } = useRuntimeConfig();
   const [projectName, setProjectName] = useState("husein");
   const [codecState, setCodecState] = useState(
     codecs.map((c) => ({ ...c }))
@@ -261,7 +263,7 @@ export default function ProjectSettingsPage() {
 
             <CopyField
               label="Project URL"
-              value={process.env.NEXT_PUBLIC_SANDBOX_DOMAIN || "http://localhost:3000"}
+              value={sandboxDomain}
             />
             <CopyField
               label="SIP URI"

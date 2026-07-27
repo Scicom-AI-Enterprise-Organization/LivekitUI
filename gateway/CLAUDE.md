@@ -19,6 +19,6 @@ Only signalling passes through. Media never does — so the gateway is not on th
 ## Constraints
 
 - Issued key secrets must be **recoverable**, not just hashed, because the gateway needs the plaintext to verify a client signature. They are AES-256-GCM encrypted at rest (`src/lib/api-keys.ts`, `API_KEYS_ENC_KEY`, falling back to a key derived from `SESSION_SECRET`). Changing either value makes existing issued keys unreadable.
-- `NEXT_PUBLIC_LIVEKIT_GATEWAY_URL` is what gets handed out alongside a generated key. It must point at the gateway, not at `livekit-server`, or generated keys are rejected.
+- `LIVEKIT_GATEWAY_PUBLIC_URL` is what gets handed out alongside a generated key. It must point at the gateway, not at `livekit-server`, or generated keys are rejected.
 - Plain `.mjs` on purpose — no build step, so it can run from the same image as the dashboard with a different command.
 - Revocation is a database check per request; there is no cache to invalidate.

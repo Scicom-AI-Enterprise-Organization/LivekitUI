@@ -33,6 +33,14 @@ The dashboard is a control plane — most pages are only as alive as the service
 
 Egress, ingress and SIP register with the server over Redis. Without a `redis:` block the server answers `"sip not connected (redis required)"` — `src/lib/livekit-errors.ts` maps that to a 503 with `serviceAvailable: false` so pages explain themselves instead of showing a raw error. That is a deployment gap, not a bug.
 
+### Two addresses for one server
+
+`LIVEKIT_URL` is the **server-to-server** address (`src/lib/livekit.ts` builds the SDK clients from it). Under Docker it is an internal hostname like `http://livekit:7880`, which a browser cannot resolve.
+
+`LIVEKIT_PUBLIC_URL` is the **browser-facing** one — what the console, the agent preview and generated sandboxes dial. It is resolved per request in `src/lib/runtime-config.ts` and handed to client pages through `RuntimeConfigProvider`, mounted in the dashboard layout. Nothing browser-facing may read `process.env.NEXT_PUBLIC_*` from a client component: `next build` inlines those, so the value freezes at image-build time and one image stops working for a second deployment. `useRuntimeConfig()` throws outside the provider rather than falling back to localhost.
+
+Behind TLS this must be `wss://` — an `https` page cannot open a `ws://` socket. Getting it wrong does not read as a URL problem: the browser reaches whatever LiveKit *is* at that address, shows it a token signed by a key it doesn't have, and the console reports `invalid API key`.
+
 ## Architecture
 
 ```

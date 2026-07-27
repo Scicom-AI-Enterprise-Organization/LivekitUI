@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSession } from "@/lib/auth";
+import { getRuntimeConfig } from "@/lib/runtime-config";
 import { ensureDb } from "@/lib/db";
 import { deploySandbox, stopSandbox, isRunning, deleteSandboxDir } from "@/lib/sandbox";
 
@@ -46,7 +47,7 @@ export async function POST(request: NextRequest) {
       template,
       process.env.LIVEKIT_API_KEY || "",
       process.env.LIVEKIT_API_SECRET || "",
-      process.env.NEXT_PUBLIC_SANDBOX_DOMAIN,
+      getRuntimeConfig().sandboxDomain,
       agentName || ""
     );
 

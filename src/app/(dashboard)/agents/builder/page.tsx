@@ -48,6 +48,7 @@ import {
 } from "lucide-react";
 import { ImportToolsDialog } from "@/components/livekit/import-tools-dialog";
 import { AgentLogViewer } from "@/components/livekit/agent-log-viewer";
+import { useRuntimeConfig } from "@/components/runtime-config-provider";
 import { DEFAULT_TAIL, isTailSize, type TailSize } from "@/lib/log-tail";
 import type { ClientTool, HttpTool, McpServer, ToolKind } from "@/lib/tools";
 import {
@@ -2005,6 +2006,7 @@ function AgentSession({ onTimeout }: { onTimeout: () => void }) {
 }
 
 function PreviewPanel({ config, running }: { config: AgentConfig; running: boolean | null }) {
+  const { livekitUrl } = useRuntimeConfig();
   const [token, setToken] = useState<string | null>(null);
   const [connecting, setConnecting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -2038,7 +2040,7 @@ function PreviewPanel({ config, running }: { config: AgentConfig; running: boole
       <div className="lk-agent-preview flex h-full w-full flex-col">
         <LiveKitRoom
           token={token}
-          serverUrl={process.env.NEXT_PUBLIC_LIVEKIT_URL || "ws://localhost:7880"}
+          serverUrl={livekitUrl}
           connectOptions={{ autoSubscribe: true }}
           onDisconnected={() => setToken(null)}
           className="flex h-full w-full flex-col bg-[#0d1117]"
@@ -2845,6 +2847,47 @@ function AgentBuilderContent() {
 
   const originalNameRef = useRef<string>("");
 
+  /**
+   * Push a pending name change to the DB and adopt it as the baseline name.
+   * Returns false only when the new name is unusable (already taken), in which
+   * case the caller must not write the config — the old row still owns it.
+   * A 404 is fine: a draft that was never saved has no row to rename, and the
+   * config POST will create it under the new name.
+   */
+  const commitRename = useCallback(async (rawName: string): Promise<boolean> => {
+    const newName = rawName.trim();
+    const oldName = originalNameRef.current;
+    if (!newName || newName === oldName) return true;
+    if (!oldName) {
+      originalNameRef.current = newName;
+      return true;
+    }
+    try {
+      const res = await fetch("/api/agents/rename", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ oldName, newName }),
+      });
+      if (!res.ok && res.status !== 404) {
+        const data = await res.json().catch(() => ({}));
+        toast.error("Rename failed", { description: data.error || `HTTP ${res.status}` });
+        return false;
+      }
+    } catch (e) {
+      toast.error("Rename failed", { description: String(e) });
+      return false;
+    }
+    originalNameRef.current = newName;
+    // `?agent=` still points at the old name, so a reload would find nothing.
+    // The load effect no-ops on this because the ref already matches.
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("agent")) {
+      params.set("agent", newName);
+      router.replace(`/agents/builder?${params.toString()}`, { scroll: false });
+    }
+    return true;
+  }, [router]);
+
   // Update tab state AND URL when user clicks a tab
   const handleTabChange = useCallback((tab: Tab) => {
     setActiveTab(tab);
@@ -2876,6 +2919,10 @@ function AgentBuilderContent() {
   // Otherwise, generate a new random name and create a draft agent.
   useEffect(() => {
     if (editingAgentName) {
+      // A rename rewrites `?agent=`, which re-runs this effect. Re-fetching
+      // there would overwrite the edits still waiting to be saved, so skip the
+      // load once the name is already the one we hold.
+      if (editingAgentName === originalNameRef.current) return;
       // Load existing agent
       fetch(`/api/agents/by-name?name=${encodeURIComponent(editingAgentName)}`)
         .then((r) => r.json())
@@ -3005,11 +3052,16 @@ function AgentBuilderContent() {
   const saveAgent = useCallback(async () => {
     const name = config.name?.trim();
     if (!name) return;
-    // If the name was just edited in the input, defer saving until the
-    // rename endpoint updates originalNameRef. Otherwise we'd POST with the
-    // new name and create a duplicate DB row alongside the old one.
-    if (originalNameRef.current && name !== originalNameRef.current) return;
     setSaveState("saving");
+    // A pending rename has to land first: the POST below upserts by name, so
+    // writing under the new name before the row is renamed would leave a
+    // duplicate alongside the old one. Saving owns this rather than waiting on
+    // the input's blur — clicking Save blurs and posts in the same tick, and
+    // Enter/Escape unmount the input without firing blur at all.
+    if (!(await commitRename(name))) {
+      setSaveState("error");
+      return;
+    }
     try {
       const res = await fetch("/api/agents", {
         method: "POST",
@@ -3034,7 +3086,7 @@ function AgentBuilderContent() {
     } catch {
       setSaveState("error");
     }
-  }, [config, httpTools, clientTools, mcpServers, endCall, callSummary, variables]);
+  }, [config, httpTools, clientTools, mcpServers, endCall, callSummary, variables, commitRename]);
 
   // Warn before leaving with edits that were never saved. Without auto-save,
   // closing the tab is the one way to lose work.
@@ -3060,21 +3112,20 @@ function AgentBuilderContent() {
               autoFocus
               value={config.name}
               onChange={(e) => updateConfig({ name: e.target.value })}
-              onBlur={async () => {
+              onBlur={() => {
                 setEditingName(false);
-                const newName = config.name.trim();
-                const oldName = originalNameRef.current;
-                if (newName && newName !== oldName) {
-                  await fetch("/api/agents/rename", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ oldName, newName }),
-                  }).catch(() => {});
-                  originalNameRef.current = newName;
-                }
+                void commitRename(config.name);
               }}
               onKeyDown={(e) => {
-                if (e.key === "Enter" || e.key === "Escape") setEditingName(false);
+                // Enter commits here rather than leaning on blur: unmounting the
+                // focused input does not fire it. Escape puts the old name back.
+                if (e.key === "Enter") {
+                  setEditingName(false);
+                  void commitRename(config.name);
+                } else if (e.key === "Escape") {
+                  if (originalNameRef.current) updateConfig({ name: originalNameRef.current });
+                  setEditingName(false);
+                }
               }}
               className="rounded-md border border-primary bg-card px-2 py-1 text-base font-semibold outline-none focus:ring-1 focus:ring-primary/30"
             />

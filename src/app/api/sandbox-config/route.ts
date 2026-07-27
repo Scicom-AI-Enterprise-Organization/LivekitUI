@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { getSession } from "@/lib/auth";
+import { getRuntimeConfig } from "@/lib/runtime-config";
 
 export async function GET() {
   const session = await getSession();
@@ -7,8 +8,7 @@ export async function GET() {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const domain = process.env.NEXT_PUBLIC_SANDBOX_DOMAIN || "http://localhost:3000";
-  const base = domain.replace(/\/$/, "");
+  const base = getRuntimeConfig().sandboxDomain;
 
   return NextResponse.json({ domain: base, prefix: `${base}/sandbox/` });
 }

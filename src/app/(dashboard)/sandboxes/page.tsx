@@ -23,6 +23,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Alert, AlertTitle, AlertDescription } from "@/components/ui/alert";
+import { useRuntimeConfig } from "@/components/runtime-config-provider";
 import {
   Collapsible,
   CollapsibleTrigger,
@@ -555,7 +556,7 @@ export default function SandboxPage() {
     fetchApps();
   };
 
-  const domain = process.env.NEXT_PUBLIC_SANDBOX_DOMAIN || "sandbox.example.com";
+  const { sandboxDomain: domain } = useRuntimeConfig();
 
   return (
     <div className="flex flex-col h-full">
