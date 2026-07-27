@@ -54,11 +54,16 @@ export default function TeamMembersPage() {
   const [loading, setLoading] = useState(true);
   const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
+  // "github" adds the account immediately (they sign in via SSO);
+  // "email" generates a shareable invite link, as before.
+  const [inviteMode, setInviteMode] = useState<"github" | "email">("github");
   const [inviteEmail, setInviteEmail] = useState("");
+  const [githubLogin, setGithubLogin] = useState("");
   const [inviteRole, setInviteRole] = useState("member");
   const [inviteError, setInviteError] = useState("");
   const [inviteLoading, setInviteLoading] = useState(false);
   const [inviteUrl, setInviteUrl] = useState("");
+  const [githubAdded, setGithubAdded] = useState("");
   const [copied, setCopied] = useState(false);
 
   const [loadError, setLoadError] = useState("");
@@ -93,6 +98,21 @@ export default function TeamMembersPage() {
     setInviteLoading(true);
 
     try {
+      if (inviteMode === "github") {
+        const res = await fetch("/api/auth/users", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ githubLogin, role: inviteRole }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          setInviteError(data.error || "Failed to add member");
+          return;
+        }
+        setGithubAdded(githubLogin);
+        return;
+      }
+
       const res = await fetch("/api/auth/invite", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -149,10 +169,13 @@ export default function TeamMembersPage() {
   };
 
   const resetDialog = () => {
+    setInviteMode("github");
     setInviteEmail("");
+    setGithubLogin("");
     setInviteRole("member");
     setInviteError("");
     setInviteUrl("");
+    setGithubAdded("");
     setCopied(false);
   };
 
@@ -273,15 +296,31 @@ export default function TeamMembersPage() {
       <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Invite a team member</DialogTitle>
+            <DialogTitle>Add a team member</DialogTitle>
             <DialogDescription>
-              {inviteUrl
-                ? "Share this invite link with your team member. It expires in 7 days."
-                : "Enter the email and select a role. An invite link will be generated for the user to register."}
+              {githubAdded
+                ? "Done — no link needed."
+                : inviteUrl
+                  ? "Share this invite link with your team member. It expires in 7 days."
+                  : inviteMode === "github"
+                    ? "Add them by GitHub username — they sign in with the GitHub button on the login page. Nothing to send."
+                    : "Enter the email and select a role. An invite link will be generated for the user to register."}
             </DialogDescription>
           </DialogHeader>
 
-          {inviteUrl ? (
+          {githubAdded ? (
+            <div className="space-y-4">
+              <div className="rounded-lg border border-border bg-muted/40 px-3 py-2 text-sm">
+                <span className="font-medium">@{githubAdded}</span> can now sign
+                in at the login page with &ldquo;Continue with GitHub&rdquo;.
+              </div>
+              <DialogFooter>
+                <Button onClick={() => { setDialogOpen(false); fetchMembers(); }}>
+                  Done
+                </Button>
+              </DialogFooter>
+            </div>
+          ) : inviteUrl ? (
             <div className="space-y-4">
               <div className="space-y-1.5">
                 <Label>Invite link</Label>
@@ -311,16 +350,48 @@ export default function TeamMembersPage() {
                 </div>
               )}
 
-              <div className="space-y-1.5">
-                <Label>Email</Label>
-                <Input
-                  type="email"
-                  required
-                  value={inviteEmail}
-                  onChange={(e) => setInviteEmail(e.target.value)}
-                  placeholder="john@company.com"
-                />
+              {/* Mode switch: GitHub SSO add (default) vs email invite link */}
+              <div className="flex gap-2">
+                <Button
+                  type="button"
+                  size="sm"
+                  variant={inviteMode === "github" ? "default" : "outline"}
+                  onClick={() => { setInviteMode("github"); setInviteError(""); }}
+                >
+                  GitHub username
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant={inviteMode === "email" ? "default" : "outline"}
+                  onClick={() => { setInviteMode("email"); setInviteError(""); }}
+                >
+                  Email invite
+                </Button>
               </div>
+
+              {inviteMode === "github" ? (
+                <div className="space-y-1.5">
+                  <Label>GitHub username</Label>
+                  <Input
+                    required
+                    value={githubLogin}
+                    onChange={(e) => setGithubLogin(e.target.value.replace(/^@/, ""))}
+                    placeholder="octocat"
+                  />
+                </div>
+              ) : (
+                <div className="space-y-1.5">
+                  <Label>Email</Label>
+                  <Input
+                    type="email"
+                    required
+                    value={inviteEmail}
+                    onChange={(e) => setInviteEmail(e.target.value)}
+                    placeholder="john@company.com"
+                  />
+                </div>
+              )}
 
               <div className="space-y-1.5">
                 <Label>Role</Label>
@@ -345,7 +416,7 @@ export default function TeamMembersPage() {
                 </DialogClose>
                 <Button type="submit" disabled={inviteLoading}>
                   {inviteLoading && <Loader2 className="size-4 animate-spin" />}
-                  Generate invite link
+                  {inviteMode === "github" ? "Add member" : "Generate invite link"}
                 </Button>
               </DialogFooter>
             </form>

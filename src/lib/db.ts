@@ -20,6 +20,8 @@ export interface DbUser {
   company: string | null;
   role: UserRole;
   auth_provider: AuthProvider;
+  /** GitHub username for SSO sign-in; null for accounts without GitHub. */
+  github_login: string | null;
   created_at: string;
 }
 
@@ -386,6 +388,20 @@ export interface Database {
     role: UserRole,
     company?: string
   ): Promise<DbUser>;
+  /** Case-insensitive lookup by GitHub username (SSO callback). */
+  findUserByGithubLogin(login: string): Promise<DbUser | null>;
+  /** Pre-provision a member who signs in only via GitHub SSO (no password). */
+  createGithubUser(
+    email: string,
+    firstName: string,
+    lastName: string,
+    role: UserRole,
+    githubLogin: string
+  ): Promise<DbUser>;
+  /** Attach a GitHub username to an existing account (first SSO sign-in). */
+  linkGithubLogin(id: number, githubLogin: string): Promise<void>;
+  /** Replace a placeholder email once GitHub reveals the real verified one. */
+  updateUserEmail(id: number, email: string): Promise<void>;
   updateUserRole(id: number, role: UserRole): Promise<void>;
   updateUserPassword(id: number, passwordHash: string): Promise<void>;
   updateUserProfile(id: number, firstName: string, lastName: string, company: string | null): Promise<void>;
@@ -545,6 +561,7 @@ function createSqliteDb(): Database {
           company TEXT,
           role TEXT NOT NULL DEFAULT 'member',
           auth_provider TEXT NOT NULL DEFAULT 'local',
+          github_login TEXT,
           created_at TEXT DEFAULT (datetime('now'))
         );
         CREATE TABLE IF NOT EXISTS sessions (
@@ -811,6 +828,9 @@ function createSqliteDb(): Database {
       if (!userCols.includes("auth_provider")) {
         db.exec("ALTER TABLE users ADD COLUMN auth_provider TEXT NOT NULL DEFAULT 'local'");
       }
+      if (!userCols.includes("github_login")) {
+        db.exec("ALTER TABLE users ADD COLUMN github_login TEXT");
+      }
 
       const apiKeyCols = (
         db.prepare("PRAGMA table_info(api_keys)").all() as { name: string }[]
@@ -868,6 +888,31 @@ function createSqliteDb(): Database {
       return db.prepare("SELECT * FROM users WHERE id = ?").get(result.lastInsertRowid) as DbUser;
     },
 
+    async findUserByGithubLogin(login) {
+      return db
+        .prepare("SELECT * FROM users WHERE LOWER(github_login) = LOWER(?)")
+        .get(login) as DbUser | null;
+    },
+
+    async createGithubUser(email, firstName, lastName, role, githubLogin) {
+      // Empty password_hash: bcrypt.compare never matches it, so the account
+      // cannot sign in with a password — GitHub SSO is the only door.
+      const result = db
+        .prepare(
+          "INSERT INTO users (email, password_hash, first_name, last_name, role, auth_provider, github_login) VALUES (?, '', ?, ?, ?, 'github', ?)"
+        )
+        .run(email, firstName, lastName, role, githubLogin);
+      return db.prepare("SELECT * FROM users WHERE id = ?").get(result.lastInsertRowid) as DbUser;
+    },
+
+    async linkGithubLogin(id, githubLogin) {
+      db.prepare("UPDATE users SET github_login = ? WHERE id = ?").run(githubLogin, id);
+    },
+
+    async updateUserEmail(id, email) {
+      db.prepare("UPDATE users SET email = ? WHERE id = ?").run(email, id);
+    },
+
     async updateUserRole(id, role) {
       db.prepare("UPDATE users SET role = ? WHERE id = ?").run(role, id);
     },
@@ -895,7 +940,7 @@ function createSqliteDb(): Database {
     async findSession(token) {
       const row = db
         .prepare(
-          `SELECT s.*, u.id as u_id, u.email, u.password_hash, u.first_name, u.last_name, u.company, u.role, u.auth_provider, u.created_at as u_created_at
+          `SELECT s.*, u.id as u_id, u.email, u.password_hash, u.first_name, u.last_name, u.company, u.role, u.auth_provider, u.github_login, u.created_at as u_created_at
            FROM sessions s JOIN users u ON s.user_id = u.id
            WHERE s.token = ? AND s.expires_at > datetime('now')`
         )
@@ -917,6 +962,7 @@ function createSqliteDb(): Database {
           company: row.company as string | null,
           role: row.role as UserRole,
           auth_provider: (row.auth_provider as AuthProvider) || "local",
+          github_login: (row.github_login as string | null) ?? null,
           created_at: row.u_created_at as string,
         },
       };
@@ -1657,9 +1703,11 @@ function createPostgresDb(): Database {
           company TEXT,
           role TEXT NOT NULL DEFAULT 'member',
           auth_provider TEXT NOT NULL DEFAULT 'local',
+          github_login TEXT,
           created_at TIMESTAMPTZ DEFAULT NOW()
         );
         ALTER TABLE users ADD COLUMN IF NOT EXISTS auth_provider TEXT NOT NULL DEFAULT 'local';
+        ALTER TABLE users ADD COLUMN IF NOT EXISTS github_login TEXT;
         CREATE TABLE IF NOT EXISTS sessions (
           token TEXT PRIMARY KEY,
           user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -1954,6 +2002,32 @@ function createPostgresDb(): Database {
       return rows[0];
     },
 
+    async findUserByGithubLogin(login) {
+      const { rows } = await pool.query(
+        "SELECT * FROM users WHERE LOWER(github_login) = LOWER($1)",
+        [login]
+      );
+      return rows[0] || null;
+    },
+
+    async createGithubUser(email, firstName, lastName, role, githubLogin) {
+      // Empty password_hash: bcrypt.compare never matches it, so the account
+      // cannot sign in with a password — GitHub SSO is the only door.
+      const { rows } = await pool.query(
+        "INSERT INTO users (email, password_hash, first_name, last_name, role, auth_provider, github_login) VALUES ($1, '', $2, $3, $4, 'github', $5) RETURNING *",
+        [email, firstName, lastName, role, githubLogin]
+      );
+      return rows[0];
+    },
+
+    async linkGithubLogin(id, githubLogin) {
+      await pool.query("UPDATE users SET github_login = $1 WHERE id = $2", [githubLogin, id]);
+    },
+
+    async updateUserEmail(id, email) {
+      await pool.query("UPDATE users SET email = $1 WHERE id = $2", [email, id]);
+    },
+
     async updateUserRole(id, role) {
       await pool.query("UPDATE users SET role = $1 WHERE id = $2", [role, id]);
     },
@@ -1983,7 +2057,7 @@ function createPostgresDb(): Database {
     async findSession(token) {
       const { rows } = await pool.query(
         `SELECT s.token, s.user_id, s.expires_at, s.created_at,
-                u.id as u_id, u.email, u.password_hash, u.first_name, u.last_name, u.company, u.role, u.auth_provider, u.created_at as u_created_at
+                u.id as u_id, u.email, u.password_hash, u.first_name, u.last_name, u.company, u.role, u.auth_provider, u.github_login, u.created_at as u_created_at
          FROM sessions s JOIN users u ON s.user_id = u.id
          WHERE s.token = $1 AND s.expires_at > NOW()`,
         [token]
@@ -2006,6 +2080,7 @@ function createPostgresDb(): Database {
           company: row.company,
           role: row.role,
           auth_provider: row.auth_provider || "local",
+          github_login: row.github_login ?? null,
           created_at: row.u_created_at,
         },
       };
