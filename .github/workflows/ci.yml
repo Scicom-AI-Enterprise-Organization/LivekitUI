@@ -16,7 +16,7 @@
 #
 # Setup required before first push (see PR description / runbook):
 #   - IAM role with ECR push policy + OIDC trust for this repo; its ARN in
-#     the repo VARIABLE ECR_ROLE_ARN.
+#     the repo SECRET ECR_ROLE_ARN.
 #   - Repo VARIABLE ENABLE_ECR_PUSH=true (kill-switch, same as sgpu).
 #   - ECR repository scicom/livekitui must exist.
 name: CI
@@ -90,7 +90,7 @@ jobs:
         if: needs.meta.outputs.push == 'true'
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ vars.ECR_ROLE_ARN }}
+          role-to-assume: ${{ secrets.ECR_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
           role-session-name: GitHubActions-LivekitUI
 
@@ -124,7 +124,7 @@ jobs:
       - name: Configure AWS credentials (GitHub OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ vars.ECR_ROLE_ARN }}
+          role-to-assume: ${{ secrets.ECR_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
           role-session-name: GitHubActions-LivekitUI
 
