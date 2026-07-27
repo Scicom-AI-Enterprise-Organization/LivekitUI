@@ -38,6 +38,16 @@ export function useTimelineAudio({
   autoSelectKind?: string;
 }) {
   const elRef = useRef<HTMLAudioElement | null>(null);
+  /**
+   * A seek the element could not take yet, in seconds.
+   *
+   * `currentTime` is only honoured once the element has metadata; assigning it
+   * before that is dropped, and the element then starts from zero. The target
+   * is parked here and applied on `loadedmetadata`.
+   */
+  const pendingSeekRef = useRef<number | null>(null);
+  /** Latest position, readable from callbacks that must not re-create on it. */
+  const positionRef = useRef(0);
   const [chosenFile, setChosenFile] = useState<string | null>(null);
   const [playing, setPlaying] = useState(false);
   const [positionMs, setPositionMs] = useState(0);
@@ -94,23 +104,47 @@ export function useTimelineAudio({
     // `durationchange`, which is why both are listened for.
     const onDuration = () => {
       if (Number.isFinite(el.duration) && el.duration > 0) {
-        setMeasured({ src, ms: el.duration * 1000 });
+        setMeasured((prev) =>
+          prev?.src === src && prev.ms === el.duration * 1000
+            ? prev
+            : { src, ms: el.duration * 1000 }
+        );
       }
     };
+    // Metadata is the first moment a seek can land. Anything the user asked for
+    // before now was parked rather than lost.
+    const onLoadedMetadata = () => {
+      onDuration();
+      const pending = pendingSeekRef.current;
+      if (pending !== null) {
+        pendingSeekRef.current = null;
+        el.currentTime = pending;
+      }
+    };
+    // The element is the authority once a seek completes — clamping against a
+    // duration we only estimated can land somewhere else.
+    const onSeeked = () => {
+      positionRef.current = el.currentTime * 1000;
+      setPositionMs(positionRef.current);
+    };
+
     el.addEventListener("play", onPlay);
     el.addEventListener("pause", onPause);
     el.addEventListener("ended", onPause);
-    el.addEventListener("loadedmetadata", onDuration);
+    el.addEventListener("loadedmetadata", onLoadedMetadata);
     el.addEventListener("durationchange", onDuration);
+    el.addEventListener("seeked", onSeeked);
 
     return () => {
       el.pause();
       el.removeEventListener("play", onPlay);
       el.removeEventListener("pause", onPause);
       el.removeEventListener("ended", onPause);
-      el.removeEventListener("loadedmetadata", onDuration);
+      el.removeEventListener("loadedmetadata", onLoadedMetadata);
       el.removeEventListener("durationchange", onDuration);
+      el.removeEventListener("seeked", onSeeked);
       elRef.current = null;
+      pendingSeekRef.current = null;
     };
   }, [src]);
 
@@ -120,7 +154,13 @@ export function useTimelineAudio({
     let raf = 0;
     const tick = () => {
       const el = elRef.current;
-      if (el) setPositionMs(el.currentTime * 1000);
+      // While a seek is in flight `currentTime` still reads the old position,
+      // so sampling it here would drag the playhead back to where the user
+      // seeked *from* — and the next nudge would then measure from there.
+      if (el && !el.seeking) {
+        positionRef.current = el.currentTime * 1000;
+        setPositionMs(positionRef.current);
+      }
       raf = requestAnimationFrame(tick);
     };
     raf = requestAnimationFrame(tick);
@@ -130,9 +170,31 @@ export function useTimelineAudio({
   const seekMs = useCallback(
     (ms: number) => {
       const el = elRef.current;
-      const clamped = Math.min(Math.max(0, ms), durationMs);
+
+      /**
+       * Clamp to what the element actually has, and only when that is known.
+       *
+       * `durationMs` falls back to the length the recorder wrote down, which is
+       * 0 for a row that never got one — and clamping to 0 turns every seek
+       * into a jump to the start. An unknown limit is better left to the
+       * element, which clamps to its own seekable range anyway.
+       */
+      const elDuration =
+        el && Number.isFinite(el.duration) && el.duration > 0 ? el.duration * 1000 : null;
+      const limit = elDuration ?? (durationMs > 0 ? durationMs : Infinity);
+      const clamped = Math.min(Math.max(0, ms), limit);
+
+      positionRef.current = clamped;
       setPositionMs(clamped);
-      if (el) el.currentTime = clamped / 1000;
+      if (!el) return;
+
+      // Before metadata the assignment is dropped on the floor; park it.
+      if (el.readyState < 1 /* HAVE_METADATA */) {
+        pendingSeekRef.current = clamped / 1000;
+        return;
+      }
+      pendingSeekRef.current = null;
+      el.currentTime = clamped / 1000;
     },
     [durationMs]
   );
@@ -154,15 +216,39 @@ export function useTimelineAudio({
   const toggle = useCallback(() => {
     const el = elRef.current;
     if (!el) return;
-    if (el.paused) void el.play().catch(() => {});
-    else el.pause();
+    if (!el.paused) {
+      el.pause();
+      return;
+    }
+
+    // A seek made while the element was still loading has to land before play
+    // starts, or playback begins at zero and throws the seek away.
+    const pending = pendingSeekRef.current;
+    if (pending !== null && el.readyState >= 1) {
+      pendingSeekRef.current = null;
+      el.currentTime = pending;
+    } else if (el.ended) {
+      // play() on an element that has finished rewinds it to the start. When
+      // the user has since seeked somewhere else, that is the seek being
+      // discarded — put the position back before starting.
+      const target = positionRef.current / 1000;
+      if (Number.isFinite(target) && target < el.duration) el.currentTime = target;
+    }
+
+    void el.play().catch(() => {});
   }, []);
 
   const nudge = useCallback(
     (deltaMs: number) => {
       const el = elRef.current;
       if (!el) return;
-      seekMs(el.currentTime * 1000 + deltaMs);
+      // Step from where the user last asked to be, not from the element: with a
+      // seek still in flight `currentTime` is the old position, so repeated
+      // presses would keep re-measuring the same spot instead of advancing.
+      const from = el.seeking || pendingSeekRef.current !== null
+        ? positionRef.current
+        : el.currentTime * 1000;
+      seekMs(from + deltaMs);
     },
     [seekMs]
   );
@@ -177,6 +263,8 @@ export function useTimelineAudio({
     playheadAt: startMs === null ? null : startMs + positionMs,
     choose: (file: string) => {
       setChosenFile(file);
+      positionRef.current = 0;
+      pendingSeekRef.current = null;
       setPositionMs(0);
       setPlaying(false);
     },

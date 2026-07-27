@@ -25,6 +25,7 @@ import {
 } from "@/components/ui/select";
 import { FileJson, Loader2, Plus, Sparkles, Trash2, Pencil, X } from "lucide-react";
 import { ListError, ListLoading } from "@/components/livekit/list-state";
+import { ToolTestPanel } from "@/components/livekit/tool-test-panel";
 import { OpenApiDialog } from "./openapi-dialog";
 import {
   TOOL_KINDS,
@@ -357,6 +358,9 @@ function ToolDialog({
               </div>
             </>
           )}
+          {/* Try it before it goes in the library — a wrong URL or a missing
+              header is much cheaper to find here than mid-call. */}
+          <ToolTestPanel kind={kind} name={name} config={config} />
         </div>
 
         <DialogFooter>

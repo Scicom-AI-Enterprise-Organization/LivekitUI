@@ -16,6 +16,11 @@ example/agent-starter-python/venv
 example/agent-starter-python/.venv
 example/agent-starter-python/__pycache__
 
+# Secrets — never bake these into a layer. Gitignored, so CI checkouts don't
+# have them, but a local `docker build` from a working tree would.
+.env
+.env.local
+
 # Dev files
 Dockerfile
 docker-compose.yml

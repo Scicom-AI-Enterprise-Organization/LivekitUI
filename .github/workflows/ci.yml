@@ -1,0 +1,275 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel older in-flight runs of the same branch on new push.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  id-token: write   # needed for AWS OIDC (ECR push)
+
+env:
+  # Defaults match the AIES account GPUPlatform publishes to. Override any of
+  # them with a repo Variable (Settings > Secrets and variables > Actions) if
+  # this image lands somewhere else.
+  AWS_REGION: ${{ vars.AWS_REGION || 'ap-southeast-5' }}
+  ECR_ROLE: ${{ vars.ECR_ROLE || 'arn:aws:iam::865626945255:role/AIES-Serverlessgpu-ECRAccessRole' }}
+  ECR_REGISTRY: ${{ vars.ECR_REGISTRY || '865626945255.dkr.ecr.ap-southeast-5.amazonaws.com' }}
+  ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY || 'aies/livekitui-ecr' }}
+
+  # Match the runtime image (Dockerfile is node:24-bookworm-slim). Not just
+  # tidiness: tests/openapi.test.mjs imports src/lib/openapi.ts directly, which
+  # needs the unflagged TypeScript type stripping that landed in Node 23.6.
+  NODE_VERSION: "24"
+
+  # The repo has pre-existing lint errors in older pages (see CLAUDE.md), so
+  # lint is a ratchet, not a clean gate: CI fails only when the count goes UP.
+  # Measured on the CI-visible tree — data/ is gitignored and holds ~348 more
+  # errors in generated sandbox code that never reaches a checkout.
+  # To lower it after a cleanup, run `npx eslint -f json` and count errorCount.
+  LINT_ERROR_BASELINE: "59"
+
+jobs:
+  # Detect whether anything the image is built from changed, so doc-only commits
+  # skip a ~20 min Docker build. Workflow changes always rebuild (cheap
+  # insurance against bad CI edits).
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.filter.outputs.image }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          # The Dockerfile does `COPY . .`, so this is deliberately broad — it
+          # lists everything that ends up inside the image, plus the two sandbox
+          # trees under example/ whose lockfiles get their own npm ci layer.
+          filters: |
+            image:
+              - 'src/**'
+              - 'gateway/**'
+              - 'observer/**'
+              - 'public/**'
+              - 'example/**'
+              - 'agents/**'
+              - 'bin/**'
+              - 'mcp-example/**'
+              - 'package.json'
+              - 'package-lock.json'
+              - 'next.config.ts'
+              - 'tsconfig.json'
+              - 'postcss.config.mjs'
+              - 'components.json'
+              - 'Dockerfile'
+              - '.dockerignore'
+              - '.github/workflows/**'
+
+  # Single source of truth for the image tag + whether to push. Pushing only
+  # happens on main when the ENABLE_ECR_PUSH repo variable is set; PRs build
+  # for validation but never push.
+  meta:
+    runs-on: ubuntu-latest
+    outputs:
+      sha_short: ${{ steps.m.outputs.sha_short }}
+      push: ${{ steps.m.outputs.push }}
+    steps:
+      - id: m
+        run: |
+          echo "sha_short=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          if [ "${{ github.event_name }}" = "push" ] && [ "${{ github.ref }}" = "refs/heads/main" ] && [ "${{ vars.ENABLE_ECR_PUSH }}" = "true" ]; then
+            echo "push=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "push=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  # Static gate, cheapest checks first. Runs on every commit — it is the only
+  # signal a docs-only change gets, and a broken build fails here on one small
+  # runner instead of ~20 min into the Docker build on two.
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        # --incremental false because tsconfig.tsbuildinfo is committed: a stale
+        # one would let tsc skip files it has already "seen" and report clean.
+        run: npx tsc --noEmit --incremental false
+
+      - name: Unit tests
+        # `npm test` globs tests/**, but most of that suite is integration
+        # tests that drive the REST API of a *running* dashboard (see
+        # tests/helpers.mjs) and need TEST_EMAIL/TEST_PASSWORD. Only these two
+        # are self-contained; the rest need a deployed stack, not a CI runner.
+        run: node --test tests/wav-mixer.test.mjs tests/openapi.test.mjs
+
+      - name: Lint (ratchet against LINT_ERROR_BASELINE)
+        run: |
+          set -uo pipefail
+          # eslint exits non-zero when it finds errors — that is the normal case
+          # here, so read the JSON report instead of trusting the exit code.
+          npx eslint -f json -o eslint-report.json || true
+          if [ ! -f eslint-report.json ]; then
+            echo "::error::eslint produced no report — it likely crashed"
+            exit 1
+          fi
+          ERRORS=$(node -e 'console.log(require("./eslint-report.json").reduce((a,f)=>a+f.errorCount,0))')
+          WARNINGS=$(node -e 'console.log(require("./eslint-report.json").reduce((a,f)=>a+f.warningCount,0))')
+          echo "eslint: $ERRORS errors, $WARNINGS warnings (baseline $LINT_ERROR_BASELINE errors)"
+          {
+            echo "## Lint"
+            echo "\`$ERRORS\` errors / \`$WARNINGS\` warnings — baseline \`$LINT_ERROR_BASELINE\` errors"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$ERRORS" -gt "$LINT_ERROR_BASELINE" ]; then
+            echo "::error::Lint errors went up: $ERRORS > $LINT_ERROR_BASELINE"
+            # Print every error from the report we already have rather than
+            # paying for a second full eslint run.
+            node -e '
+              for (const f of require("./eslint-report.json")) {
+                for (const m of f.messages.filter((m) => m.severity === 2)) {
+                  const p = f.filePath.replace(process.cwd() + "/", "");
+                  console.log(`${p}:${m.line}:${m.column}  ${m.message}  (${m.ruleId})`);
+                }
+              }
+            '
+            exit 1
+          fi
+          if [ "$ERRORS" -lt "$LINT_ERROR_BASELINE" ]; then
+            echo "::notice::Lint errors are down to $ERRORS — lower LINT_ERROR_BASELINE in .github/workflows/ci.yml to lock the win in."
+          fi
+
+      - name: Build
+        # `next build` catches App Router constraints tsc misses (e.g. a page
+        # exporting anything but a default component) and type-checks the route
+        # types under .next/types that do not exist before a build.
+        run: npm run build
+
+  # ── Multi-arch image ──────────────────────────────────────────────────────
+  # One image serves both roles: the dashboard runs `node .next/standalone/
+  # server.js`, the key gateway runs `node gateway/server.mjs` off the same
+  # layers (see docker-compose.yml).
+  #
+  # Built on BOTH a native amd64 runner and a native arm64 runner (no QEMU —
+  # this image compiles native node modules and installs a pile of Python
+  # wheels, so emulation would be brutally slow) and pushed as a per-platform
+  # tag `<repo>:<sha>-<amd64|arm64>`. merge-images then stitches those into a
+  # single multi-arch manifest `<repo>:<sha>` + `:latest`.
+  #
+  #   amd64 → ubuntu-latest        arm64 → ubuntu-24.04-arm
+  #
+  # Auth: GitHub OIDC → the IAM role in ECR_ROLE. That role's trust policy must
+  # allow this repository, otherwise AssumeRoleWithWebIdentity is refused.
+  build-image:
+    name: build image (${{ matrix.suffix }})
+    needs: [checks, changes, meta]
+    if: needs.changes.outputs.image == 'true'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    # NEXT_PUBLIC_* are inlined into the client bundles by `next build` and are
+    # NOT read at runtime — see the ARG block in the Dockerfile. Overriding them
+    # on the deployed container does nothing. Defaults here reproduce a plain
+    # `docker build`; set the matching repo Variables before turning
+    # ENABLE_ECR_PUSH on, or the published image ships a browser bundle that
+    # dials ws://localhost:7880.
+    env:
+      NEXT_PUBLIC_LIVEKIT_URL: ${{ vars.NEXT_PUBLIC_LIVEKIT_URL || 'ws://localhost:7880' }}
+      NEXT_PUBLIC_LIVEKIT_GATEWAY_URL: ${{ vars.NEXT_PUBLIC_LIVEKIT_GATEWAY_URL || 'ws://localhost:7885' }}
+      NEXT_PUBLIC_SANDBOX_DOMAIN: ${{ vars.NEXT_PUBLIC_SANDBOX_DOMAIN || 'http://localhost:3000' }}
+      NEXT_PUBLIC_LIVEKIT_REGION: ${{ vars.NEXT_PUBLIC_LIVEKIT_REGION || 'local' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+            suffix: amd64
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            suffix: arm64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Configure AWS credentials (GitHub OIDC)
+        if: needs.meta.outputs.push == 'true'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.ECR_ROLE }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: GitHubActions-LivekitUI
+
+      - name: Login to ECR
+        if: needs.meta.outputs.push == 'true'
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build & maybe push (${{ matrix.platform }})
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: ${{ matrix.platform }}
+          push: ${{ needs.meta.outputs.push == 'true' }}
+          build-args: |
+            NEXT_PUBLIC_LIVEKIT_URL=${{ env.NEXT_PUBLIC_LIVEKIT_URL }}
+            NEXT_PUBLIC_LIVEKIT_GATEWAY_URL=${{ env.NEXT_PUBLIC_LIVEKIT_GATEWAY_URL }}
+            NEXT_PUBLIC_SANDBOX_DOMAIN=${{ env.NEXT_PUBLIC_SANDBOX_DOMAIN }}
+            NEXT_PUBLIC_LIVEKIT_REGION=${{ env.NEXT_PUBLIC_LIVEKIT_REGION }}
+          tags: ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${{ needs.meta.outputs.sha_short }}-${{ matrix.suffix }}
+          cache-from: type=gha,scope=livekitui-${{ matrix.suffix }}
+          cache-to: type=gha,scope=livekitui-${{ matrix.suffix }},mode=max
+          # ECR tolerates OCI manifests, but provenance attestations turn a
+          # single image into an index, which confuses `imagetools create`.
+          provenance: false
+
+  # ── Merge per-platform images into a multi-arch manifest ──────────────────
+  # Only runs when pushing (the per-platform tags must already be in ECR).
+  merge-image:
+    name: merge manifest
+    needs: [build-image, changes, meta]
+    if: needs.meta.outputs.push == 'true' && needs.changes.outputs.image == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure AWS credentials (GitHub OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.ECR_ROLE }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: GitHubActions-LivekitUI
+
+      - name: Login to ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Create and push multi-arch manifest
+        run: |
+          set -euo pipefail
+          IMAGE="${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}"
+          TAG="${{ needs.meta.outputs.sha_short }}"
+          docker buildx imagetools create \
+            --tag "${IMAGE}:${TAG}" \
+            --tag "${IMAGE}:latest" \
+            "${IMAGE}:${TAG}-amd64" \
+            "${IMAGE}:${TAG}-arm64"
+          {
+            echo "## Pushed image"
+            echo "**Image:** \`${IMAGE}:${TAG}\` (also tagged \`latest\`)"
+          } >> "$GITHUB_STEP_SUMMARY"
