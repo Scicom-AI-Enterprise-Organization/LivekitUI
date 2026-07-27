@@ -10,8 +10,8 @@
 #   - GitHub OIDC -> IAM role. NO long-lived AWS keys in secrets.
 #   - GHA layer cache, scoped per arch so the legs don't evict each other.
 #
-# Tags pushed on main:  main-<sha7> (immutable, for argocd-image-updater
-# allowTags ^main-[a-f0-9]{7}$) and latest (convenience).
+# Tags pushed on main: main-<sha7> + latest. On semver git tags (vX.Y.Z):
+# X.Y.Z + latest — for argocd-image-updater updateStrategy: semver.
 # PR builds compile both arches but never push.
 #
 # Setup required before first push (see PR description / runbook):
@@ -24,6 +24,7 @@ name: CI
 on:
   push:
     branches: [main]
+    tags: ["v*.*.*"] # semver releases: v1.2.3 -> image tags 1.2.3 + latest
   pull_request:
     branches: [main]
 
@@ -46,12 +47,19 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       push: ${{ steps.d.outputs.push }}
-      sha_short: ${{ steps.d.outputs.sha_short }}
+      # Image tag: semver (1.2.3, v-prefix stripped) on tag pushes, else main-<sha7>.
+      img_tag: ${{ steps.d.outputs.img_tag }}
     steps:
       - id: d
         run: |
-          echo "sha_short=$(echo '${{ github.sha }}' | cut -c1-7)" >> "$GITHUB_OUTPUT"
-          if [ "${{ github.event_name }}" = "push" ] && [ "${{ github.ref }}" = "refs/heads/main" ] && [ "${{ vars.ENABLE_ECR_PUSH }}" = "true" ]; then
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            echo "img_tag=$(echo '${{ github.ref_name }}' | sed 's/^v//')" >> "$GITHUB_OUTPUT"
+          else
+            echo "img_tag=main-$(echo '${{ github.sha }}' | cut -c1-7)" >> "$GITHUB_OUTPUT"
+          fi
+          IS_MAIN=$([ "${{ github.ref }}" = "refs/heads/main" ] && echo yes || echo no)
+          IS_TAG=$([ "${{ github.ref_type }}" = "tag" ] && echo yes || echo no)
+          if [ "${{ github.event_name }}" = "push" ] && { [ "$IS_MAIN" = "yes" ] || [ "$IS_TAG" = "yes" ]; } && [ "${{ vars.ENABLE_ECR_PUSH }}" = "true" ]; then
             echo "push=true" >> "$GITHUB_OUTPUT"
           else
             echo "push=false" >> "$GITHUB_OUTPUT"
@@ -98,7 +106,7 @@ jobs:
           platforms: ${{ matrix.platform }}
           # PRs: build-only (validates the Dockerfile on both arches).
           push: ${{ needs.meta.outputs.push == 'true' }}
-          tags: ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPO }}:main-${{ needs.meta.outputs.sha_short }}-${{ matrix.suffix }}
+          tags: ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPO }}:${{ needs.meta.outputs.img_tag }}-${{ matrix.suffix }}
           # Layer cache in the GHA cache backend, one scope per arch. The
           # pip-install and npm layers dominate build time; warm-cache runs
           # skip both unless the corresponding layer inputs changed.
@@ -129,7 +137,7 @@ jobs:
       - name: Create and push multi-arch manifest
         run: |
           IMAGE="${ECR_REGISTRY}/${ECR_REPO}"
-          TAG="main-${{ needs.meta.outputs.sha_short }}"
+          TAG="${{ needs.meta.outputs.img_tag }}"
           docker buildx imagetools create \
             --tag "${IMAGE}:${TAG}" \
             --tag "${IMAGE}:latest" \
