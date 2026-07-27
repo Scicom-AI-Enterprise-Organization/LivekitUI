@@ -82,12 +82,15 @@ services:
       - POSTGRES_HOST=postgres
       - LIVEKIT_URL=http://livekit:7880
       - LIVEKIT_PROMETHEUS_URL=http://livekit:6789/metrics
-      - NEXT_PUBLIC_LIVEKIT_URL=ws://localhost:7880
+      # Browser-facing, unlike LIVEKIT_URL above: the browser cannot resolve the
+      # `livekit` service name. Behind TLS these become wss:// — an https page
+      # cannot open a ws:// socket.
+      - LIVEKIT_PUBLIC_URL=ws://localhost:7880
       # Issued API keys are handed out with this URL — it must be the gateway,
       # as seen from the browser/agent, not the LiveKit server.
-      - NEXT_PUBLIC_LIVEKIT_GATEWAY_URL=ws://localhost:7885
+      - LIVEKIT_GATEWAY_PUBLIC_URL=ws://localhost:7885
       # Override the .env value: in compose the dashboard is published on 3000.
-      - NEXT_PUBLIC_SANDBOX_DOMAIN=http://localhost:3000
+      - SANDBOX_DOMAIN=http://localhost:3000
       # Agents run on the image's system interpreter, which has the plugins.
       - AGENT_PYTHON_BIN=/usr/bin/python3
     volumes:

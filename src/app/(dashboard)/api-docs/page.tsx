@@ -1,4 +1,5 @@
 import { TopBar } from "@/components/livekit/top-bar";
+import { getRuntimeConfig } from "@/lib/runtime-config";
 import { ApiDocs } from "./api-docs";
 
 export const metadata = {
@@ -8,10 +9,7 @@ export const metadata = {
 
 export default function ApiDocsPage() {
   // Shown in the curl samples so they can be copied and run as-is.
-  const baseUrl =
-    process.env.NEXT_PUBLIC_DASHBOARD_URL ||
-    process.env.NEXT_PUBLIC_SANDBOX_DOMAIN ||
-    "http://localhost:3000";
+  const baseUrl = process.env.DASHBOARD_URL || getRuntimeConfig().sandboxDomain;
 
   return (
     <div className="flex h-full flex-col">

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getSession } from "@/lib/auth";
 import { ensureDb } from "@/lib/db";
 import { generateApiKeyPair, encryptSecret } from "@/lib/api-keys";
+import { getRuntimeConfig } from "@/lib/runtime-config";
 
 /**
  * The URL handed out with issued keys. The LiveKit server has never heard of
@@ -9,13 +10,11 @@ import { generateApiKeyPair, encryptSecret } from "@/lib/api-keys";
  * the gateway, not straight at the server.
  */
 function issuedKeyUrl() {
-  const gateway = process.env.NEXT_PUBLIC_LIVEKIT_GATEWAY_URL;
+  const gateway =
+    process.env.LIVEKIT_GATEWAY_PUBLIC_URL ||
+    process.env.NEXT_PUBLIC_LIVEKIT_GATEWAY_URL;
   return {
-    wsUrl:
-      gateway ||
-      process.env.NEXT_PUBLIC_LIVEKIT_URL ||
-      process.env.LIVEKIT_URL ||
-      "ws://localhost:7880",
+    wsUrl: gateway || getRuntimeConfig().livekitUrl,
     gatewayConfigured: !!gateway,
   };
 }
@@ -26,7 +25,7 @@ export async function GET() {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const wsUrl = process.env.NEXT_PUBLIC_LIVEKIT_URL || process.env.LIVEKIT_URL || "ws://localhost:7880";
+  const wsUrl = getRuntimeConfig().livekitUrl;
   const httpUrl = process.env.LIVEKIT_URL || "http://localhost:7880";
   const apiKey = process.env.LIVEKIT_API_KEY || "";
   const apiSecret = process.env.LIVEKIT_API_SECRET || "";

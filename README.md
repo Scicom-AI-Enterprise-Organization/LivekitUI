@@ -122,7 +122,7 @@ Sandbox apps let you quickly spin up frontend templates for testing agents. Crea
 To configure a custom domain for production:
 
 ```env
-NEXT_PUBLIC_SANDBOX_DOMAIN=https://your-domain.com
+SANDBOX_DOMAIN=https://your-domain.com
 ```
 
 ## Model Providers
@@ -316,7 +316,7 @@ Then set in `.env`:
 
 ```env
 GATEWAY_PORT=7885
-NEXT_PUBLIC_LIVEKIT_GATEWAY_URL=ws://localhost:7885
+LIVEKIT_GATEWAY_PUBLIC_URL=ws://localhost:7885
 ```
 
 Generated keys are handed out with the **gateway** URL. Pointing them at the LiveKit server directly will fail — the server has never heard of them.

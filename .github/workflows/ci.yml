@@ -207,17 +207,9 @@ jobs:
     if: needs.changes.outputs.image == 'true'
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
-    # NEXT_PUBLIC_* are inlined into the client bundles by `next build` and are
-    # NOT read at runtime — see the ARG block in the Dockerfile. Overriding them
-    # on the deployed container does nothing. Defaults here reproduce a plain
-    # `docker build`; set the matching repo Variables before turning
-    # ENABLE_ECR_PUSH on, or the published image ships a browser bundle that
-    # dials ws://localhost:7880.
-    env:
-      NEXT_PUBLIC_LIVEKIT_URL: ${{ vars.NEXT_PUBLIC_LIVEKIT_URL || 'ws://localhost:7880' }}
-      NEXT_PUBLIC_LIVEKIT_GATEWAY_URL: ${{ vars.NEXT_PUBLIC_LIVEKIT_GATEWAY_URL || 'ws://localhost:7885' }}
-      NEXT_PUBLIC_SANDBOX_DOMAIN: ${{ vars.NEXT_PUBLIC_SANDBOX_DOMAIN || 'http://localhost:3000' }}
-      NEXT_PUBLIC_LIVEKIT_REGION: ${{ vars.NEXT_PUBLIC_LIVEKIT_REGION || 'local' }}
+    # The image carries no deployment addresses. LIVEKIT_PUBLIC_URL and friends
+    # are read at runtime (src/lib/runtime-config.ts), so they belong on the
+    # deployed container, not on this build.
     strategy:
       fail-fast: false
       matrix:
@@ -254,11 +246,6 @@ jobs:
           platforms: ${{ matrix.platform }}
           # PRs: build-only (validates the Dockerfile on both arches).
           push: ${{ needs.meta.outputs.push == 'true' }}
-          build-args: |
-            NEXT_PUBLIC_LIVEKIT_URL=${{ env.NEXT_PUBLIC_LIVEKIT_URL }}
-            NEXT_PUBLIC_LIVEKIT_GATEWAY_URL=${{ env.NEXT_PUBLIC_LIVEKIT_GATEWAY_URL }}
-            NEXT_PUBLIC_SANDBOX_DOMAIN=${{ env.NEXT_PUBLIC_SANDBOX_DOMAIN }}
-            NEXT_PUBLIC_LIVEKIT_REGION=${{ env.NEXT_PUBLIC_LIVEKIT_REGION }}
           tags: ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPO }}:${{ needs.meta.outputs.img_tag }}-${{ matrix.suffix }}
           # Layer cache in the GHA cache backend, one scope per arch. The
           # pip-install and npm layers dominate build time; warm-cache runs

@@ -112,7 +112,7 @@ LIVEKIT_API_SECRET=${generated.apiSecret}`;
                 <p>
                   Issued keys only work through the gateway. Set{" "}
                   <code className="rounded bg-muted px-1 py-0.5">
-                    NEXT_PUBLIC_LIVEKIT_GATEWAY_URL
+                    LIVEKIT_GATEWAY_PUBLIC_URL
                   </code>{" "}
                   and run <code className="rounded bg-muted px-1 py-0.5">npm run gateway</code>, or
                   this key will be rejected.
@@ -235,7 +235,7 @@ export default function ApiKeysPage() {
                 <div className="space-y-1 text-muted-foreground">
                   <p className="font-medium text-foreground">Gateway not configured</p>
                   <p>
-                    Set <code className="rounded bg-muted px-1 py-0.5 text-xs">NEXT_PUBLIC_LIVEKIT_GATEWAY_URL</code>{" "}
+                    Set <code className="rounded bg-muted px-1 py-0.5 text-xs">LIVEKIT_GATEWAY_PUBLIC_URL</code>{" "}
                     (e.g. <code className="rounded bg-muted px-1 py-0.5 text-xs">ws://localhost:7885</code>) and
                     run <code className="rounded bg-muted px-1 py-0.5 text-xs">npm run gateway</code>. Until then,
                     issued keys are handed out with the direct server URL and will be rejected.
