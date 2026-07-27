@@ -1,27 +1,53 @@
-name: ci
+# CI — check the app, then build the LivekitUI image (multi-arch) and push to ECR.
+#
+# Pattern follows Serverless-GPU's ci.yml (org convention):
+#   - Native runners per architecture (ubuntu-latest for amd64,
+#     ubuntu-24.04-arm for arm64) — no QEMU emulation. This image installs
+#     Node deps AND a Python venv with livekit plugins; under QEMU the arm64
+#     leg would take 40+ minutes, natively both legs run in parallel.
+#   - Each leg pushes a per-platform tag (<tag>-amd64 / <tag>-arm64); the
+#     merge job stitches them into one multi-arch manifest.
+#   - GitHub OIDC -> IAM role. NO long-lived AWS keys in secrets.
+#   - GHA layer cache, scoped per arch so the legs don't evict each other.
+#
+# Tags pushed on main: main-<sha7> + latest. On semver git tags (vX.Y.Z):
+# X.Y.Z + latest — for argocd-image-updater updateStrategy: semver.
+# PR builds compile both arches but never push.
+#
+# Two jobs run ahead of the build:
+#   - changes: skips the ~20 min image build on doc-only commits.
+#   - checks:  typecheck, unit tests, lint ratchet, next build. Cheapest first,
+#              on one small runner, so a broken build fails here rather than
+#              20 minutes into the Docker build on two.
+#
+# Setup required before first push (see PR description / runbook):
+#   - IAM role with ECR push policy + OIDC trust for this repo; its ARN in
+#     the repo VARIABLE ECR_ROLE_ARN.
+#   - Repo VARIABLE ENABLE_ECR_PUSH=true (kill-switch, same as sgpu).
+#   - ECR repository scicom/livekitui must exist.
+#   - The NEXT_PUBLIC_* repo VARIABLES below — they are baked into the client
+#     bundle at build time and cannot be fixed on the running container.
+name: CI
 
 on:
   push:
     branches: [main]
+    tags: ["v*.*.*"] # semver releases: v1.2.3 -> image tags 1.2.3 + latest
   pull_request:
+    branches: [main]
 
-# Cancel older in-flight runs of the same branch on new push.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ci-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
   contents: read
-  id-token: write   # needed for AWS OIDC (ECR push)
+  id-token: write # OIDC federation to AWS — this replaces AWS keys
 
 env:
-  # Defaults match the AIES account GPUPlatform publishes to. Override any of
-  # them with a repo Variable (Settings > Secrets and variables > Actions) if
-  # this image lands somewhere else.
-  AWS_REGION: ${{ vars.AWS_REGION || 'ap-southeast-5' }}
-  ECR_ROLE: ${{ vars.ECR_ROLE || 'arn:aws:iam::865626945255:role/AIES-Serverlessgpu-ECRAccessRole' }}
-  ECR_REGISTRY: ${{ vars.ECR_REGISTRY || '865626945255.dkr.ecr.ap-southeast-5.amazonaws.com' }}
-  ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY || 'aies/livekitui-ecr' }}
+  AWS_REGION: ap-southeast-5
+  ECR_REGISTRY: 865626945255.dkr.ecr.ap-southeast-5.amazonaws.com
+  ECR_REPO: scicom/livekitui
 
   # Match the runtime image (Dockerfile is node:24-bookworm-slim). Not just
   # tidiness: tests/openapi.test.mjs imports src/lib/openapi.ts directly, which
@@ -36,21 +62,45 @@ env:
   LINT_ERROR_BASELINE: "59"
 
 jobs:
-  # Detect whether anything the image is built from changed, so doc-only commits
-  # skip a ~20 min Docker build. Workflow changes always rebuild (cheap
-  # insurance against bad CI edits).
+  # ── Decide once whether this run pushes, and compute the tag ──────────────
+  meta:
+    runs-on: ubuntu-latest
+    outputs:
+      push: ${{ steps.d.outputs.push }}
+      # Image tag: semver (1.2.3, v-prefix stripped) on tag pushes, else main-<sha7>.
+      img_tag: ${{ steps.d.outputs.img_tag }}
+    steps:
+      - id: d
+        run: |
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            echo "img_tag=$(echo '${{ github.ref_name }}' | sed 's/^v//')" >> "$GITHUB_OUTPUT"
+          else
+            echo "img_tag=main-$(echo '${{ github.sha }}' | cut -c1-7)" >> "$GITHUB_OUTPUT"
+          fi
+          IS_MAIN=$([ "${{ github.ref }}" = "refs/heads/main" ] && echo yes || echo no)
+          IS_TAG=$([ "${{ github.ref_type }}" = "tag" ] && echo yes || echo no)
+          if [ "${{ github.event_name }}" = "push" ] && { [ "$IS_MAIN" = "yes" ] || [ "$IS_TAG" = "yes" ]; } && [ "${{ vars.ENABLE_ECR_PUSH }}" = "true" ]; then
+            echo "push=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "push=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  # ── Skip the image build when nothing that lands in it changed ────────────
   changes:
     runs-on: ubuntu-latest
     outputs:
-      image: ${{ steps.filter.outputs.image }}
+      image: ${{ steps.decide.outputs.image }}
     steps:
       - uses: actions/checkout@v4
+
       - uses: dorny/paths-filter@v3
         id: filter
+        if: github.ref_type != 'tag'
         with:
           # The Dockerfile does `COPY . .`, so this is deliberately broad — it
           # lists everything that ends up inside the image, plus the two sandbox
           # trees under example/ whose lockfiles get their own npm ci layer.
+          # Workflow changes always rebuild (insurance against bad CI edits).
           filters: |
             image:
               - 'src/**'
@@ -71,27 +121,18 @@ jobs:
               - '.dockerignore'
               - '.github/workflows/**'
 
-  # Single source of truth for the image tag + whether to push. Pushing only
-  # happens on main when the ENABLE_ECR_PUSH repo variable is set; PRs build
-  # for validation but never push.
-  meta:
-    runs-on: ubuntu-latest
-    outputs:
-      sha_short: ${{ steps.m.outputs.sha_short }}
-      push: ${{ steps.m.outputs.push }}
-    steps:
-      - id: m
+      - id: decide
+        # A release tag always builds: a freshly-pushed tag has no meaningful
+        # base commit for paths-filter to diff against, and skipping the build
+        # would mean a vX.Y.Z tag that never produces an image.
         run: |
-          echo "sha_short=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
-          if [ "${{ github.event_name }}" = "push" ] && [ "${{ github.ref }}" = "refs/heads/main" ] && [ "${{ vars.ENABLE_ECR_PUSH }}" = "true" ]; then
-            echo "push=true" >> "$GITHUB_OUTPUT"
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            echo "image=true" >> "$GITHUB_OUTPUT"
           else
-            echo "push=false" >> "$GITHUB_OUTPUT"
+            echo "image=${{ steps.filter.outputs.image }}" >> "$GITHUB_OUTPUT"
           fi
 
-  # Static gate, cheapest checks first. Runs on every commit — it is the only
-  # signal a docs-only change gets, and a broken build fails here on one small
-  # runner instead of ~20 min into the Docker build on two.
+  # ── Static gate: typecheck, unit tests, lint ratchet, build ───────────────
   checks:
     runs-on: ubuntu-latest
     steps:
@@ -159,24 +200,10 @@ jobs:
         # types under .next/types that do not exist before a build.
         run: npm run build
 
-  # ── Multi-arch image ──────────────────────────────────────────────────────
-  # One image serves both roles: the dashboard runs `node .next/standalone/
-  # server.js`, the key gateway runs `node gateway/server.mjs` off the same
-  # layers (see docker-compose.yml).
-  #
-  # Built on BOTH a native amd64 runner and a native arm64 runner (no QEMU —
-  # this image compiles native node modules and installs a pile of Python
-  # wheels, so emulation would be brutally slow) and pushed as a per-platform
-  # tag `<repo>:<sha>-<amd64|arm64>`. merge-images then stitches those into a
-  # single multi-arch manifest `<repo>:<sha>` + `:latest`.
-  #
-  #   amd64 → ubuntu-latest        arm64 → ubuntu-24.04-arm
-  #
-  # Auth: GitHub OIDC → the IAM role in ECR_ROLE. That role's trust policy must
-  # allow this repository, otherwise AssumeRoleWithWebIdentity is refused.
-  build-image:
-    name: build image (${{ matrix.suffix }})
-    needs: [checks, changes, meta]
+  # ── Build one image per architecture on its native runner ─────────────────
+  build:
+    name: build (${{ matrix.suffix }})
+    needs: [meta, changes, checks]
     if: needs.changes.outputs.image == 'true'
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
@@ -211,11 +238,11 @@ jobs:
         if: needs.meta.outputs.push == 'true'
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ env.ECR_ROLE }}
+          role-to-assume: ${{ vars.ECR_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
           role-session-name: GitHubActions-LivekitUI
 
-      - name: Login to ECR
+      - name: Login to ECR (private)
         if: needs.meta.outputs.push == 'true'
         uses: aws-actions/amazon-ecr-login@v2
 
@@ -225,35 +252,36 @@ jobs:
           context: .
           file: ./Dockerfile
           platforms: ${{ matrix.platform }}
+          # PRs: build-only (validates the Dockerfile on both arches).
           push: ${{ needs.meta.outputs.push == 'true' }}
           build-args: |
             NEXT_PUBLIC_LIVEKIT_URL=${{ env.NEXT_PUBLIC_LIVEKIT_URL }}
             NEXT_PUBLIC_LIVEKIT_GATEWAY_URL=${{ env.NEXT_PUBLIC_LIVEKIT_GATEWAY_URL }}
             NEXT_PUBLIC_SANDBOX_DOMAIN=${{ env.NEXT_PUBLIC_SANDBOX_DOMAIN }}
             NEXT_PUBLIC_LIVEKIT_REGION=${{ env.NEXT_PUBLIC_LIVEKIT_REGION }}
-          tags: ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${{ needs.meta.outputs.sha_short }}-${{ matrix.suffix }}
+          tags: ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPO }}:${{ needs.meta.outputs.img_tag }}-${{ matrix.suffix }}
+          # Layer cache in the GHA cache backend, one scope per arch. The
+          # pip-install and npm layers dominate build time; warm-cache runs
+          # skip both unless the corresponding layer inputs changed.
           cache-from: type=gha,scope=livekitui-${{ matrix.suffix }}
           cache-to: type=gha,scope=livekitui-${{ matrix.suffix }},mode=max
-          # ECR tolerates OCI manifests, but provenance attestations turn a
-          # single image into an index, which confuses `imagetools create`.
           provenance: false
 
-  # ── Merge per-platform images into a multi-arch manifest ──────────────────
-  # Only runs when pushing (the per-platform tags must already be in ECR).
-  merge-image:
+  # ── Stitch the per-arch images into one multi-arch manifest ───────────────
+  merge:
     name: merge manifest
-    needs: [build-image, changes, meta]
+    needs: [meta, changes, build]
     if: needs.meta.outputs.push == 'true' && needs.changes.outputs.image == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Configure AWS credentials (GitHub OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ env.ECR_ROLE }}
+          role-to-assume: ${{ vars.ECR_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
           role-session-name: GitHubActions-LivekitUI
 
-      - name: Login to ECR
+      - name: Login to ECR (private)
         uses: aws-actions/amazon-ecr-login@v2
 
       - name: Set up Docker Buildx
@@ -262,13 +290,14 @@ jobs:
       - name: Create and push multi-arch manifest
         run: |
           set -euo pipefail
-          IMAGE="${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}"
-          TAG="${{ needs.meta.outputs.sha_short }}"
+          IMAGE="${ECR_REGISTRY}/${ECR_REPO}"
+          TAG="${{ needs.meta.outputs.img_tag }}"
           docker buildx imagetools create \
             --tag "${IMAGE}:${TAG}" \
             --tag "${IMAGE}:latest" \
             "${IMAGE}:${TAG}-amd64" \
             "${IMAGE}:${TAG}-arm64"
+          docker buildx imagetools inspect "${IMAGE}:${TAG}"
           {
             echo "## Pushed image"
             echo "**Image:** \`${IMAGE}:${TAG}\` (also tagged \`latest\`)"
