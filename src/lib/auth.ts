@@ -12,6 +12,8 @@ export interface User {
   role: UserRole;
   /** "local" accounts have a password here; anything else is managed by an IdP. */
   authProvider?: AuthProvider;
+  /** GitHub username for SSO accounts. */
+  githubLogin?: string;
   createdAt?: string;
 }
 
@@ -55,8 +57,99 @@ function toUser(row: DbUser): User {
     company: row.company ?? undefined,
     role: row.role,
     authProvider: row.auth_provider ?? "local",
+    githubLogin: row.github_login ?? undefined,
     createdAt: row.created_at,
   };
+}
+
+/**
+ * Placeholder email for members added by GitHub username only — GitHub's
+ * historical noreply format, guaranteed not to collide with a real mailbox.
+ * Replaced with the account's verified email on first SSO sign-in.
+ */
+export function githubPlaceholderEmail(login: string): string {
+  return `${login.toLowerCase()}@users.noreply.github.com`;
+}
+
+/**
+ * Resolve a GitHub profile to a team account. Membership is closed: the
+ * profile must match a user pre-added by GitHub username (Team Members), or
+ * an existing account's email (which auto-links the GitHub username to it).
+ * Unknown profiles are rejected — SSO is a door, not a signup form.
+ */
+export async function loginWithGithub(profile: {
+  login: string;
+  email: string | null;
+  name: string | null;
+}): Promise<{ success: boolean; user?: User; error?: string }> {
+  const db = await ensureDb();
+
+  let row = await db.findUserByGithubLogin(profile.login);
+
+  if (!row && profile.email) {
+    const byEmail = await db.findUserByEmail(profile.email);
+    if (byEmail) {
+      await db.linkGithubLogin(byEmail.id, profile.login);
+      row = { ...byEmail, github_login: profile.login };
+    }
+  }
+
+  if (!row) {
+    return {
+      success: false,
+      error: `GitHub account “${profile.login}” is not a team member. Ask an owner to add you in Settings → Team Members.`,
+    };
+  }
+
+  // First real sign-in of a username-only member: swap the placeholder email
+  // for the verified one GitHub just told us, and fill an empty name.
+  if (
+    profile.email &&
+    row.email === githubPlaceholderEmail(row.github_login ?? profile.login) &&
+    !(await db.findUserByEmail(profile.email))
+  ) {
+    await db.updateUserEmail(row.id, profile.email);
+    row = { ...row, email: profile.email };
+  }
+  if (row.first_name === row.github_login && profile.name) {
+    const [first, ...rest] = profile.name.split(" ");
+    await db.updateUserProfile(row.id, first, rest.join(" "), row.company);
+    row = { ...row, first_name: first, last_name: rest.join(" ") };
+  }
+
+  return { success: true, user: toUser(row) };
+}
+
+/**
+ * Owner adds a member by GitHub username — no invite link, no password.
+ * The account becomes usable the moment that person clicks “GitHub” on the
+ * login page.
+ */
+export async function addGithubMember(
+  githubLogin: string,
+  role: UserRole
+): Promise<{ success: boolean; user?: User; error?: string }> {
+  const db = await ensureDb();
+
+  if (!/^[a-zA-Z0-9](?:[a-zA-Z0-9]|-(?=[a-zA-Z0-9])){0,38}$/.test(githubLogin)) {
+    return { success: false, error: "Not a valid GitHub username" };
+  }
+  if (role === "owner") {
+    return { success: false, error: "Cannot add a user as owner" };
+  }
+  const existing = await db.findUserByGithubLogin(githubLogin);
+  if (existing) {
+    return { success: false, error: "That GitHub user is already a member" };
+  }
+  const email = githubPlaceholderEmail(githubLogin);
+  if (await db.findUserByEmail(email)) {
+    return { success: false, error: "That GitHub user is already a member" };
+  }
+
+  // Name defaults to the username until their first sign-in reveals the
+  // real profile name (see loginWithGithub).
+  const row = await db.createGithubUser(email, githubLogin, "", role, githubLogin);
+  return { success: true, user: toUser(row) };
 }
 
 /**

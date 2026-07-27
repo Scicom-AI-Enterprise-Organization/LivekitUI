@@ -10,7 +10,6 @@ import {
   EyeOff,
   Check,
   Github,
-  Chrome,
   Loader2,
 } from "lucide-react";
 
@@ -38,6 +37,17 @@ export default function LoginPage() {
       })
       .catch(() => setChecking(false));
   }, [router]);
+
+  // Surface a failed SSO roundtrip (?sso_error= set by the OAuth callback).
+  // Read from window.location instead of useSearchParams() so the page
+  // needs no Suspense boundary.
+  useEffect(() => {
+    const ssoError = new URLSearchParams(window.location.search).get("sso_error");
+    if (ssoError) {
+      Promise.resolve().then(() => setError(ssoError));
+      window.history.replaceState(null, "", "/login");
+    }
+  }, []);
 
   if (checking) {
     return (
@@ -135,16 +145,16 @@ export default function LoginPage() {
             </div>
           )}
 
-          {/* Social Login */}
+          {/* GitHub SSO — closed membership: only accounts added in
+              Settings → Team Members can sign in this way. */}
           <div className="mb-6 flex gap-3">
-            <button className="flex flex-1 items-center justify-center gap-2 rounded-lg border border-border py-2.5 text-sm font-medium text-foreground transition-colors hover:bg-muted">
-              <Chrome className="h-4 w-4" />
-              Google
-            </button>
-            <button className="flex flex-1 items-center justify-center gap-2 rounded-lg border border-border py-2.5 text-sm font-medium text-foreground transition-colors hover:bg-muted">
+            <a
+              href="/api/auth/github/start"
+              className="flex flex-1 items-center justify-center gap-2 rounded-lg border border-border py-2.5 text-sm font-medium text-foreground transition-colors hover:bg-muted"
+            >
               <Github className="h-4 w-4" />
-              GitHub
-            </button>
+              Continue with GitHub
+            </a>
           </div>
 
           <div className="mb-6 flex items-center gap-3">
