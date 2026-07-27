@@ -50,6 +50,30 @@ Open http://localhost:3000. The first registered account becomes the **owner**.
 docker compose up --build
 ```
 
+### Releasing an image
+
+Pushing to `main` runs the checks only. The multi-arch image is built and pushed to ECR **only for a `vX.Y.Z` tag**, because that build occupies two runners for ~20 minutes and nothing deploys from a per-commit tag:
+
+```bash
+./release.sh                 # bump the patch, tag, push
+./release.sh --dry-run       # show what it would do
+```
+
+Rolling the published image out is a separate step — the workflow has no deploy job. Set `LIVEKIT_PUBLIC_URL` on the container when you do (see below).
+
+### Two addresses for one server
+
+`LIVEKIT_URL` is the address the **dashboard** uses to reach `livekit-server`. Under Docker it is an internal hostname like `http://livekit:7880`, which a browser cannot resolve.
+
+`LIVEKIT_PUBLIC_URL` is the address the **browser** dials for the console and the agent preview. It is read at runtime, so changing it needs a restart, not a rebuild.
+
+```env
+LIVEKIT_URL=http://livekit:7880          # dashboard -> server
+LIVEKIT_PUBLIC_URL=wss://livekit.example.com   # browser -> server
+```
+
+Behind TLS the public one must be `wss://`: an `https` page cannot open a `ws://` socket. Leaving it at the `ws://localhost:7880` default on a deployed dashboard does not look like a URL problem — the browser reaches whatever LiveKit happens to be on the *viewer's own machine*, shows it a token signed by a key that server has never heard of, and the console reports `invalid API key`.
+
 ## Running the Full Stack
 
 Run each in a separate terminal:

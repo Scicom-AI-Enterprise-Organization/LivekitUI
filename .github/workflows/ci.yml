@@ -10,23 +10,29 @@
 #   - GitHub OIDC -> IAM role. NO long-lived AWS keys in secrets.
 #   - GHA layer cache, scoped per arch so the legs don't evict each other.
 #
-# Tags pushed on main: main-<sha7> + latest. On semver git tags (vX.Y.Z):
-# X.Y.Z + latest — for argocd-image-updater updateStrategy: semver.
-# PR builds compile both arches but never push.
+# WHAT RUNS WHEN
+#   push to main / PR  -> checks only (typecheck, unit tests, lint ratchet,
+#                         next build). One small runner, a couple of minutes.
+#   push a vX.Y.Z tag  -> checks, then the multi-arch image build and push:
+#                         image tags X.Y.Z + latest, for argocd-image-updater
+#                         updateStrategy: semver.
 #
-# Two jobs run ahead of the build:
-#   - changes: skips the ~20 min image build on doc-only commits.
-#   - checks:  typecheck, unit tests, lint ratchet, next build. Cheapest first,
-#              on one small runner, so a broken build fails here rather than
-#              20 minutes into the Docker build on two.
+# The image build is deliberately NOT on main. It occupies two runners for
+# ~20 min a go, and every main push paying that to publish a main-<sha7> tag
+# nothing deploys from is waste. Cut a release with ./release.sh.
+#
+# The tradeoff: a Dockerfile that no longer builds now surfaces when you tag,
+# not on the PR that broke it. `checks` still runs `next build` on every push,
+# so app-level breakage is caught early — it is the container layers (apt, pip,
+# the sandbox npm ci legs) that go unverified until release.
 #
 # Setup required before first push (see PR description / runbook):
 #   - IAM role with ECR push policy + OIDC trust for this repo; its ARN in
 #     the repo SECRET ECR_ROLE_ARN.
 #   - Repo VARIABLE ENABLE_ECR_PUSH=true (kill-switch, same as sgpu).
 #   - ECR repository scicom/livekitui must exist.
-#   - The NEXT_PUBLIC_* repo VARIABLES below — they are baked into the client
-#     bundle at build time and cannot be fixed on the running container.
+# No NEXT_PUBLIC_* variables are needed: the image carries no deployment
+# addresses, they are read at runtime (src/lib/runtime-config.ts).
 name: CI
 
 on:
@@ -63,73 +69,25 @@ env:
 
 jobs:
   # ── Decide once whether this run pushes, and compute the tag ──────────────
+  # Only reached on a tag: `build` gates on github.ref_type, so meta never has
+  # a branch case to consider. ENABLE_ECR_PUSH remains the kill-switch — with
+  # it off a tag still builds both arches (proving the Dockerfile) but
+  # publishes nothing.
   meta:
+    if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     outputs:
       push: ${{ steps.d.outputs.push }}
-      # Image tag: semver (1.2.3, v-prefix stripped) on tag pushes, else main-<sha7>.
+      # Image tag: semver with the v- prefix stripped (v1.2.3 -> 1.2.3).
       img_tag: ${{ steps.d.outputs.img_tag }}
     steps:
       - id: d
         run: |
-          if [ "${{ github.ref_type }}" = "tag" ]; then
-            echo "img_tag=$(echo '${{ github.ref_name }}' | sed 's/^v//')" >> "$GITHUB_OUTPUT"
-          else
-            echo "img_tag=main-$(echo '${{ github.sha }}' | cut -c1-7)" >> "$GITHUB_OUTPUT"
-          fi
-          IS_MAIN=$([ "${{ github.ref }}" = "refs/heads/main" ] && echo yes || echo no)
-          IS_TAG=$([ "${{ github.ref_type }}" = "tag" ] && echo yes || echo no)
-          if [ "${{ github.event_name }}" = "push" ] && { [ "$IS_MAIN" = "yes" ] || [ "$IS_TAG" = "yes" ]; } && [ "${{ vars.ENABLE_ECR_PUSH }}" = "true" ]; then
+          echo "img_tag=$(echo '${{ github.ref_name }}' | sed 's/^v//')" >> "$GITHUB_OUTPUT"
+          if [ "${{ vars.ENABLE_ECR_PUSH }}" = "true" ]; then
             echo "push=true" >> "$GITHUB_OUTPUT"
           else
             echo "push=false" >> "$GITHUB_OUTPUT"
-          fi
-
-  # ── Skip the image build when nothing that lands in it changed ────────────
-  changes:
-    runs-on: ubuntu-latest
-    outputs:
-      image: ${{ steps.decide.outputs.image }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dorny/paths-filter@v3
-        id: filter
-        if: github.ref_type != 'tag'
-        with:
-          # The Dockerfile does `COPY . .`, so this is deliberately broad — it
-          # lists everything that ends up inside the image, plus the two sandbox
-          # trees under example/ whose lockfiles get their own npm ci layer.
-          # Workflow changes always rebuild (insurance against bad CI edits).
-          filters: |
-            image:
-              - 'src/**'
-              - 'gateway/**'
-              - 'observer/**'
-              - 'public/**'
-              - 'example/**'
-              - 'agents/**'
-              - 'bin/**'
-              - 'mcp-example/**'
-              - 'package.json'
-              - 'package-lock.json'
-              - 'next.config.ts'
-              - 'tsconfig.json'
-              - 'postcss.config.mjs'
-              - 'components.json'
-              - 'Dockerfile'
-              - '.dockerignore'
-              - '.github/workflows/**'
-
-      - id: decide
-        # A release tag always builds: a freshly-pushed tag has no meaningful
-        # base commit for paths-filter to diff against, and skipping the build
-        # would mean a vX.Y.Z tag that never produces an image.
-        run: |
-          if [ "${{ github.ref_type }}" = "tag" ]; then
-            echo "image=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "image=${{ steps.filter.outputs.image }}" >> "$GITHUB_OUTPUT"
           fi
 
   # ── Static gate: typecheck, unit tests, lint ratchet, build ───────────────
@@ -203,8 +161,8 @@ jobs:
   # ── Build one image per architecture on its native runner ─────────────────
   build:
     name: build (${{ matrix.suffix }})
-    needs: [meta, changes, checks]
-    if: needs.changes.outputs.image == 'true'
+    needs: [meta, checks]
+    if: github.ref_type == 'tag'
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     # The image carries no deployment addresses. LIVEKIT_PUBLIC_URL and friends
@@ -244,7 +202,8 @@ jobs:
           context: .
           file: ./Dockerfile
           platforms: ${{ matrix.platform }}
-          # PRs: build-only (validates the Dockerfile on both arches).
+          # False only when ENABLE_ECR_PUSH is off — the build still runs, so
+          # the kill-switch proves the Dockerfile without publishing.
           push: ${{ needs.meta.outputs.push == 'true' }}
           tags: ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPO }}:${{ needs.meta.outputs.img_tag }}-${{ matrix.suffix }}
           # Layer cache in the GHA cache backend, one scope per arch. The
@@ -257,8 +216,8 @@ jobs:
   # ── Stitch the per-arch images into one multi-arch manifest ───────────────
   merge:
     name: merge manifest
-    needs: [meta, changes, build]
-    if: needs.meta.outputs.push == 'true' && needs.changes.outputs.image == 'true'
+    needs: [meta, build]
+    if: needs.meta.outputs.push == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Configure AWS credentials (GitHub OIDC)
