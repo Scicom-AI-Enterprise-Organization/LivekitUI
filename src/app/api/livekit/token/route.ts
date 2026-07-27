@@ -4,6 +4,7 @@ import { getSession } from "@/lib/auth";
 import { getAgentDispatchClient, getRoomServiceClient } from "@/lib/livekit";
 import { isAgentRunning } from "@/lib/agent-runner";
 import { CONSOLE_PARTICIPANT_ATTRIBUTE } from "@/lib/console-sessions";
+import { getRuntimeConfig } from "@/lib/runtime-config";
 
 /**
  * A self-hosted LiveKit server records nothing about a client's platform — that
@@ -108,7 +109,7 @@ export async function POST(req: NextRequest) {
       room: observeRoom,
       identity,
       observer: true,
-      serverUrl: process.env.LIVEKIT_URL || "ws://localhost:7880",
+      serverUrl: getRuntimeConfig().livekitUrl,
     });
   }
 
@@ -192,6 +193,9 @@ export async function POST(req: NextRequest) {
     agent: dispatchName,
     identity,
     participantName: displayName,
-    serverUrl: process.env.LIVEKIT_URL || "ws://localhost:7880",
+    // Whoever holds this token dials the server themselves — a browser, or an
+    // external caller using an issued API key. Both need the public address,
+    // never the server-to-server `LIVEKIT_URL`.
+    serverUrl: getRuntimeConfig().livekitUrl,
   });
 }

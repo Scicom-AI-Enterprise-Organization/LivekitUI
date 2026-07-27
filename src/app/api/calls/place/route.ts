@@ -8,6 +8,7 @@ import {
 } from "@/lib/livekit";
 import { isAgentRunning } from "@/lib/agent-runner";
 import { livekitError } from "@/lib/livekit-errors";
+import { getRuntimeConfig } from "@/lib/runtime-config";
 import { SIPOutboundConfig, SIPTransport } from "@livekit/protocol";
 
 /**
@@ -167,7 +168,10 @@ export async function POST(request: NextRequest) {
       participantId: participant.participantId,
       sipCallId: participant.sipCallId,
       token: await at.toJwt(),
-      serverUrl: process.env.LIVEKIT_URL || "ws://localhost:7880",
+      // The browser joins this room to listen in, so it needs the public
+      // address. `LIVEKIT_URL` is the in-cluster one and resolves to nothing
+      // from a laptop.
+      serverUrl: getRuntimeConfig().livekitUrl,
     });
   } catch (error) {
     return livekitError(error, "SIP", "place the call");
