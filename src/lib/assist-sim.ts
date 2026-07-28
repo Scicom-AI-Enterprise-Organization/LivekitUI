@@ -124,8 +124,11 @@ export async function resolveSim(request: SimRequest): Promise<ResolvedSim> {
     try {
       settings = JSON.parse(app.settings || "{}");
     } catch {}
-    // The room the sandbox itself uses, so the call lands where its history does.
-    room ||= `assist-${app.name}`;
+    // A room of its own, *not* the sandbox's (`assist-<name>`). History keeps one
+    // row per room name, so a simulated call in the sandbox's own room would
+    // replace the record of the last real call made there. Pass `room` explicitly
+    // to aim at it anyway.
+    room ||= `assist-${app.name}-sim`;
     dispatch =
       (typeof settings.agentName === "string" && settings.agentName) ||
       (typeof settings.agentDispatch === "string" && settings.agentDispatch) ||

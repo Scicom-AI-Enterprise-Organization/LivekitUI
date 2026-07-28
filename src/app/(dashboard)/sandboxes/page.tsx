@@ -16,6 +16,7 @@ import {
   Copy,
   Check,
   ScrollText,
+  FlaskConical,
   RefreshCw,
   X,
   RotateCw,
@@ -38,6 +39,7 @@ import {
   DialogFooter,
 } from "@/components/ui/dialog";
 import { AssistSettings } from "@/components/livekit/assist-settings";
+import { AssistSimDialog } from "@/components/livekit/assist-sim-dialog";
 import { CodeBlock } from "@/components/livekit/code-block";
 import {
   ASSIST_TEMPLATE,
@@ -634,6 +636,7 @@ export default function SandboxPage() {
   const [apps, setApps] = useState<SandboxApp[]>([]);
   const [loading, setLoading] = useState(true);
   const [logsApp, setLogsApp] = useState<string | null>(null);
+  const [simApp, setSimApp] = useState<SandboxApp | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<{ id: number; name: string } | null>(null);
   const [restartTarget, setRestartTarget] = useState<{ id: number; name: string } | null>(null);
   const [restarting, setRestarting] = useState(false);
@@ -804,6 +807,20 @@ export default function SandboxPage() {
                           >
                             <ScrollText className="size-4" />
                           </Button>
+                          {/* This template needs two people on one link, so it
+                              is the one sandbox you cannot try from a single
+                              browser. The simulator is how it gets tested. */}
+                          {app.template === ASSIST_TEMPLATE && (
+                            <Button
+                              variant="ghost"
+                              size="icon-sm"
+                              className="text-muted-foreground hover:text-foreground"
+                              title="Simulate a call"
+                              onClick={() => setSimApp(app)}
+                            >
+                              <FlaskConical className="size-4" />
+                            </Button>
+                          )}
                           {/* agent-assist lives in this repo, not in
                               livekit-examples, so there is no upstream to link. */}
                           {app.template !== ASSIST_TEMPLATE && (
@@ -854,6 +871,7 @@ export default function SandboxPage() {
 
       {/* Log viewer overlay */}
       {logsApp && <LogViewer name={logsApp} onClose={() => setLogsApp(null)} />}
+      {simApp && <AssistSimDialog app={simApp} onClose={() => setSimApp(null)} />}
 
       {/* Edit sandbox dialog */}
       {editApp && (
