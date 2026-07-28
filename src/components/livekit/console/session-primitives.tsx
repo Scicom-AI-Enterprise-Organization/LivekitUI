@@ -1,11 +1,11 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Keyboard, Loader2, SendHorizontal } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
-import { formatClock } from "@/lib/console-metrics";
+import { formatClock, speechStarts, type ConsoleMetric } from "@/lib/console-metrics";
 import { TIMELINE_ACTIVE_WINDOW_MS } from "./timeline-plot";
 import type { TranscriptLine } from "./session-types";
 
@@ -155,6 +155,7 @@ export function TranscriptPanel({
   /** Off while reviewing, so the pane holds the position you are reading. */
   autoScroll = true,
   playheadAt,
+  metrics,
   canSeekTo,
   onSeek,
   onSend,
@@ -167,6 +168,12 @@ export function TranscriptPanel({
   autoScroll?: boolean;
   /** Wall-clock instant of the recording playhead, to follow along. */
   playheadAt?: number | null;
+  /**
+   * The session's metrics, if it has them. Only used to place lines in time: a
+   * final transcript is reported after the speech it describes, and the STT
+   * metric is what knows how much audio the segment covered.
+   */
+  metrics?: ConsoleMetric[];
   canSeekTo?: (at: number) => boolean;
   onSeek?: (at: number) => void;
   /** Given, the pane grows a composer — typing is another way to take a turn. */
@@ -180,16 +187,28 @@ export function TranscriptPanel({
     endRef.current?.scrollIntoView({ block: "end" });
   }, [lines.length, autoScroll]);
 
+  // When each line was spoken, which is not when its transcript arrived. Without
+  // this a line lights up seconds after you hear it — the recogniser's latency,
+  // read as the transcript lagging the recording.
+  const spokenAt = useMemo(
+    () => (metrics?.length ? speechStarts(lines, metrics) : new Map<string, number>()),
+    [lines, metrics]
+  );
+  const startOf = useCallback(
+    (line: TranscriptLine) => spokenAt.get(line.id) ?? line.at,
+    [spokenAt]
+  );
+
   // A line is "current" from when it starts until the next one does, which is
   // what makes the transcript readable against a playing recording.
   const activeIndex = useMemo(() => {
     if (playheadAt == null) return -1;
     let index = -1;
     for (let i = 0; i < lines.length; i++) {
-      if (lines[i].at <= playheadAt + TIMELINE_ACTIVE_WINDOW_MS) index = i;
+      if (startOf(lines[i]) <= playheadAt + TIMELINE_ACTIVE_WINDOW_MS) index = i;
     }
     return index;
-  }, [lines, playheadAt]);
+  }, [lines, playheadAt, startOf]);
 
   return (
     <div className={cn("flex min-h-0 flex-col", className ?? "w-1/2")}>
@@ -202,19 +221,20 @@ export function TranscriptPanel({
       <div className="min-h-0 flex-1 space-y-1 overflow-y-auto p-3">
         {lines.length === 0 && <p className="text-sm text-muted-foreground">{emptyMessage}</p>}
         {lines.map((line, i) => {
-          const seekable = onSeek ? (canSeekTo?.(line.at) ?? true) : false;
+          const start = startOf(line);
+          const seekable = onSeek ? (canSeekTo?.(start) ?? true) : false;
           return (
             <div
               key={line.id}
               role={seekable ? "button" : undefined}
               tabIndex={seekable ? 0 : undefined}
-              onClick={seekable ? () => onSeek?.(line.at) : undefined}
+              onClick={seekable ? () => onSeek?.(start) : undefined}
               onKeyDown={
                 seekable
                   ? (ev) => {
                       if (ev.key === "Enter" || ev.key === " ") {
                         ev.preventDefault();
-                        onSeek?.(line.at);
+                        onSeek?.(start);
                       }
                     }
                   : undefined
@@ -226,14 +246,18 @@ export function TranscriptPanel({
                   : seekable && "hover:bg-muted/40",
                 seekable && "cursor-pointer"
               )}
-              title={
-                seekable
-                  ? `${formatClock(line.at)} — play the recording from here`
-                  : formatClock(line.at)
-              }
+              title={[
+                // Both instants, because the gap between them is the recogniser's
+                // latency and worth being able to see.
+                `spoken ${formatClock(start)}`,
+                start !== line.at ? `transcribed ${formatClock(line.at)}` : null,
+                seekable ? "play the recording from here" : null,
+              ]
+                .filter(Boolean)
+                .join(" · ")}
             >
               <span className="shrink-0 font-mono text-[10px] leading-5 tabular-nums text-muted-foreground/70">
-                {formatSpeechClock(line.at)}
+                {formatSpeechClock(start)}
               </span>
               <span
                 className={cn(

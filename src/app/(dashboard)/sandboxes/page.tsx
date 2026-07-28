@@ -38,6 +38,7 @@ import {
   DialogFooter,
 } from "@/components/ui/dialog";
 import { AssistSettings } from "@/components/livekit/assist-settings";
+import { CodeBlock } from "@/components/livekit/code-block";
 import {
   ASSIST_TEMPLATE,
   DEFAULT_ASSIST_CONFIG,
@@ -158,6 +159,21 @@ function EditSandboxDialog({
   const [appearanceOpen, setAppearanceOpen] = useState(false);
 
   const isAssist = app.template === ASSIST_TEMPLATE;
+  // The dashboard's own origin, taken from the sandbox's URL rather than from
+  // `window`: reading that during render is a hydration mismatch waiting to
+  // happen, and this string is already absolute and correct for a deployment.
+  const simulationCommand = [
+    `curl -X POST ${(() => {
+      try {
+        return new URL(app.url).origin;
+      } catch {
+        return "";
+      }
+    })()}/api/assist-sim \\`,
+    `  -H "Authorization: Bearer $TOKEN" \\`,
+    `  -H 'Content-Type: application/json' \\`,
+    `  -d '{"sandbox": "${app.name}"}'`,
+  ].join("\n");
   // A worker the sandbox dispatches but did not deploy — one assist worker can
   // serve many of these sandboxes, each in its own room.
   const dispatch = settings.agentDispatch === "__auto__" ? "" : settings.agentDispatch || "";
@@ -281,6 +297,31 @@ function EditSandboxDialog({
                       Recreate it with a worker.
                     </>
                   )}
+                </div>
+                {/* Testing this template otherwise means two people in two
+                    browsers, which is why the simulator exists at all. */}
+                <div className="rounded-lg border border-border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+                  <p className="mb-2">
+                    Or run a <strong className="text-foreground">simulated call</strong>: two
+                    synthetic speakers join and talk through this sandbox&apos;s own TTS, so the
+                    transcript, the coaching notes and the per-speaker metrics can be checked
+                    without two browsers. It answers when the call is over, and lands in{" "}
+                    <Link href="/sessions/history" className="text-primary hover:underline">
+                      Sessions → History
+                    </Link>{" "}
+                    like any other call.
+                  </p>
+                  <CodeBlock code={simulationCommand} />
+                  <p className="mt-2">
+                    <code>$TOKEN</code> comes from{" "}
+                    <Link
+                      href="/settings/access-tokens"
+                      className="text-primary hover:underline"
+                    >
+                      Settings → Access tokens
+                    </Link>
+                    . Pass <code>turns</code> to say your own lines.
+                  </p>
                 </div>
                 <AssistSettings
                   config={settings.assist ?? DEFAULT_ASSIST_CONFIG}

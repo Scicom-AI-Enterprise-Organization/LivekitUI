@@ -20,6 +20,7 @@ import {
   type ConsoleMetric,
   type MetricKind,
 } from "@/lib/console-metrics";
+import { MetricsGlossary } from "./metrics-glossary";
 import { MetricsTimeline, metricWindows } from "./metrics-timeline";
 import { DockEmpty, StatTile } from "./session-primitives";
 import { TIMELINE_ACTIVE_WINDOW_MS } from "./timeline-plot";
@@ -96,6 +97,11 @@ export function MetricsPanel({
     .filter((m) => (m.kind === "llm" || m.kind === "realtime") && m.ttft !== undefined)
     .map((m) => m.ttft!);
   const ttfbs = metrics.filter((m) => m.kind === "tts" && m.ttfb !== undefined).map((m) => m.ttfb!);
+  // How long the recogniser took to return a transcript, not how much speech it
+  // covered — `audio_duration` is a property of the utterance, not of the model.
+  const sttLatencies = metrics
+    .filter((m) => m.kind === "stt" && m.duration !== undefined)
+    .map((m) => m.duration!);
   const totals = traces.map((t) => t.total).filter((t) => t > 0);
   // The turn detector's own inference time, else the session's EOU delay. A text
   // detector reports no detection delay, only the round trip it measured.
@@ -177,7 +183,10 @@ export function MetricsPanel({
 
       <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-4">
         {/* Summary */}
-        <div className="grid grid-cols-2 gap-3 md:grid-cols-5">
+        {/* Six across on a wide dock; a turn reads left to right, so the
+            recogniser comes before the model that answered it. */}
+        <div className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-6">
+          <StatTile label="STT latency p50" value={formatSeconds(percentile(sttLatencies, 50))} />
           <StatTile label="LLM TTFT p50" value={formatSeconds(percentile(ttfts, 50))} />
           <StatTile label="LLM TTFT p90" value={formatSeconds(percentile(ttfts, 90))} />
           <StatTile label="TTS TTFB p50" value={formatSeconds(percentile(ttfbs, 50))} />
@@ -187,6 +196,8 @@ export function MetricsPanel({
           />
           <StatTile label="Turn latency p90" value={formatSeconds(percentile(totals, 90))} />
         </div>
+
+        <MetricsGlossary />
 
         {/* Tracing */}
         {traces.length > 0 && (

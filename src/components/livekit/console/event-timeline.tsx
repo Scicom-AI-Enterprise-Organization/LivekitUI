@@ -6,8 +6,10 @@ import {
   TIMELINE_ACTIVE_WINDOW_MS,
   TimelineAxis,
   TimelinePlayhead,
+  TimelineZoomControls,
   buildTicks,
   useTimelineScrub,
+  useTimelineView,
 } from "./timeline-plot";
 
 /**
@@ -137,39 +139,63 @@ export function EventTimeline({
     };
   }, [events]);
 
+  /** The whole session — the window when fully zoomed out. */
+  const full = grouped && {
+    start: Math.min(grouped.first, audioWindow?.start ?? grouped.first),
+    end: Math.max(
+      grouped.last + 500,
+      audioWindow?.end ?? 0,
+      live ? now : 0,
+      Math.min(grouped.first, audioWindow?.start ?? grouped.first) + 1000
+    ),
+  };
+
+  // Hooks run before the early return, so both take a placeholder window until
+  // there is something to plot.
+  const view = useTimelineView({
+    plotRef,
+    start: full ? full.start : 0,
+    end: full ? full.end : 1,
+    playheadAt,
+    live,
+  });
+
   // Cheap enough to redo on every tick.
   const model =
     grouped &&
+    full &&
     (() => {
-      const start = Math.min(grouped.first, audioWindow?.start ?? grouped.first);
-      const end = Math.max(
-        grouped.last + 500,
-        audioWindow?.end ?? 0,
-        live ? now : 0,
-        start + 1000
-      );
-      const span = end - start;
+      const { start, end, span } = view;
 
-      // Agent state → spans between transitions; the last one runs to the edge,
-      // which is "now" during a live session.
-      const spans = grouped.stateEvents.map((e, i) => {
-        const next = grouped.stateEvents[i + 1];
-        const spanEnd = next ? next.at : end;
-        return {
-          id: e.id,
-          state: e.detail,
-          left: ((e.at - start) / span) * 100,
-          width: Math.max(0.4, ((spanEnd - e.at) / span) * 100),
-          at: e.at,
-          durationMs: spanEnd - e.at,
-        };
-      });
+      // Agent state → spans between transitions; the last one runs to the end of
+      // the session, which is "now" during a live one. Zooming clips a span
+      // rather than shortening it, so it is measured against the session.
+      const spans = grouped.stateEvents
+        .map((e, i) => {
+          const next = grouped.stateEvents[i + 1];
+          const spanEnd = next ? next.at : full.end;
+          return {
+            id: e.id,
+            state: e.detail,
+            left: ((e.at - start) / span) * 100,
+            width: Math.max(0.4, ((spanEnd - e.at) / span) * 100),
+            at: e.at,
+            until: spanEnd,
+            durationMs: spanEnd - e.at,
+          };
+        })
+        .filter((s) => s.until >= start && s.at <= end);
 
-      return { start, end, span, byLane: grouped.byLane, spans, ticks: buildTicks(span) };
+      return {
+        start,
+        end,
+        span,
+        byLane: grouped.byLane,
+        spans,
+        ticks: buildTicks(span, 6, view.offset),
+      };
     })();
 
-  // Hooks run before the early return, so the window is a placeholder until
-  // there is something to plot.
   const { scrubbing, onPointerDown, cursorClass } = useTimelineScrub({
     plotRef,
     start: model ? model.start : 0,
@@ -198,6 +224,7 @@ export function EventTimeline({
 
   return (
     <div className={cn("rounded-lg border p-3", className)}>
+      <TimelineZoomControls view={view} className="mb-1.5 justify-end" />
       <div className="flex gap-2">
         {/* Lane labels */}
         <div className="w-[104px] shrink-0 space-y-1.5">
@@ -260,6 +287,8 @@ export function EventTimeline({
                 {/* Point markers */}
                 {laneEvents.map((e) => {
                   if (lane.key === "agent" && e.name === "agent.state") return null;
+                  // Zoomed in, most of the session is off-window.
+                  if (e.at < model.start || e.at > model.end) return null;
                   const left = ((e.at - model.start) / model.span) * 100;
                   const active =
                     playheadAt != null &&

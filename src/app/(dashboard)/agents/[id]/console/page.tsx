@@ -1246,6 +1246,7 @@ function ConsoleShell({
                     alongside the browser mic and a phone. */}
                 <TranscriptPanel
                   lines={transcript}
+                  metrics={metrics}
                   onSend={sendMessage}
                   sending={isSending}
                   composerPlaceholder={
@@ -1275,7 +1276,7 @@ function ConsoleShell({
                     </Button>
                   )}
                 </div>
-                <TranscriptPanel lines={transcript} className="w-full" />
+                <TranscriptPanel lines={transcript} metrics={metrics} className="w-full" />
               </div>
             ) : talkMode === "sip" ? (
               <SipPanel

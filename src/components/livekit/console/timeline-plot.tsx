@@ -1,6 +1,12 @@
 "use client";
 
-import { useState, type PointerEvent as ReactPointerEvent, type RefObject } from "react";
+import {
+  useEffect,
+  useRef,
+  useState,
+  type PointerEvent as ReactPointerEvent,
+  type RefObject,
+} from "react";
 import { cn } from "@/lib/utils";
 
 /**
@@ -18,14 +24,22 @@ export interface TimelineTick {
   label: string;
 }
 
-/** Evenly spaced ticks, labelled by offset from the start of the window. */
-export function buildTicks(span: number, count = 6): TimelineTick[] {
+/**
+ * Evenly spaced ticks, labelled by offset from the start of the session.
+ *
+ * `offset` is how far the visible window itself starts into the session, so a
+ * zoomed-in view keeps counting from where the call began instead of restarting
+ * at zero — which is the whole point of zooming in on a timestamp.
+ */
+export function buildTicks(span: number, count = 6, offset = 0): TimelineTick[] {
   const ticks: TimelineTick[] = [];
+  // A zoomed-in window needs more decimals than a whole call does.
+  const decimals = span < 2000 ? 2 : span < 20000 ? 1 : 0;
   for (let i = 0; i <= count; i++) {
-    const t = (span / count) * i;
+    const t = offset + (span / count) * i;
     ticks.push({
       left: (i / count) * 100,
-      label: `${(t / 1000).toFixed(t < 10000 ? 1 : 0)}s`,
+      label: `${(t / 1000).toFixed(decimals)}s`,
     });
   }
   return ticks;
@@ -64,6 +78,196 @@ export function TimelinePlayhead({ pct, scrubbing }: { pct: number; scrubbing: b
           scrubbing ? "size-3 ring-2 ring-red-500/30" : "size-2"
         )}
       />
+    </div>
+  );
+}
+
+/** Zoom steps, and the shortest window worth drawing: a quarter of a second. */
+const ZOOM_STEP = 2;
+const MAX_ZOOM = 256;
+const MIN_SPAN_MS = 250;
+
+export interface TimelineView {
+  /** Visible window — what every lane, bar and tick is drawn against. */
+  start: number;
+  end: number;
+  span: number;
+  /** 1 is the whole session; the maximum zoom *out*. */
+  zoom: number;
+  canZoomIn: boolean;
+  canZoomOut: boolean;
+  zoomIn: () => void;
+  zoomOut: () => void;
+  reset: () => void;
+  /** Full session span, for the "4.0s of 26.1s" readout. */
+  fullSpan: number;
+  /** How far into the session the window starts, for tick labels. */
+  offset: number;
+}
+
+/**
+ * A zoomable window over a timeline.
+ *
+ * Fully zoomed out is the whole session, which is what the plots showed before
+ * this existed — so the default is unchanged and zooming only ever narrows.
+ *
+ * The window **centres on the playhead** rather than being panned in absolute
+ * terms: zoom in and you get the moment you are listening to, and it stays in
+ * view as the recording plays. That is a pure derivation from the playhead, with
+ * no effect chasing it — an effect would fight `react-hooks/set-state-in-effect`
+ * and, worse, lag the audio by a frame. Panning shifts the window *relative* to
+ * the playhead and survives until it is reset.
+ */
+export function useTimelineView({
+  plotRef,
+  start,
+  end,
+  playheadAt,
+  live,
+}: {
+  plotRef: RefObject<HTMLDivElement | null>;
+  start: number;
+  end: number;
+  /** Where the audio is, if there is any. The window follows it while zoomed. */
+  playheadAt?: number | null;
+  /** A live session anchors to now instead, since that is where it is drawing. */
+  live?: boolean;
+}): TimelineView {
+  const [zoom, setZoom] = useState(1);
+  /** User pan, in milliseconds relative to the anchor. */
+  const [pan, setPan] = useState(0);
+
+  const fullSpan = Math.max(1, end - start);
+  const maxZoom = Math.min(MAX_ZOOM, Math.max(1, fullSpan / MIN_SPAN_MS));
+  const effectiveZoom = Math.min(zoom, maxZoom);
+  const span = fullSpan / effectiveZoom;
+
+  // What the window is built around: the playhead if there is one, else the live
+  // edge, else the middle of the session.
+  const anchor = playheadAt ?? (live ? end : start + fullSpan / 2);
+  const clampedStart = Math.min(
+    Math.max(start, anchor - span / 2 + pan),
+    Math.max(start, end - span)
+  );
+
+  const zoomBy = (factor: number) =>
+    setZoom((current) => Math.min(maxZoom, Math.max(1, current * factor)));
+
+  // The gesture reads the window through a ref so the listener can be attached
+  // once: `anchor` moves with the playhead, which ticks several times a second
+  // while audio plays, and re-subscribing that often is pure churn.
+  const windowRef = useRef({ anchor, clampedStart, span, effectiveZoom, fullSpan, maxZoom });
+  useEffect(() => {
+    windowRef.current = { anchor, clampedStart, span, effectiveZoom, fullSpan, maxZoom };
+  }, [anchor, clampedStart, span, effectiveZoom, fullSpan, maxZoom]);
+
+  // A native, non-passive listener rather than React's `onWheel`: React attaches
+  // wheel handlers passively, so `preventDefault()` there is ignored — ⌘/ctrl
+  // wheel would zoom the whole browser page and shift-wheel would scroll it.
+  useEffect(() => {
+    const plot = plotRef.current;
+    if (!plot) return;
+
+    const onWheel = (event: WheelEvent) => {
+      const current = windowRef.current;
+      // Plain wheel belongs to the page: the dock this sits in scrolls. Only a
+      // modifier means the timeline.
+      if (event.ctrlKey || event.metaKey) {
+        event.preventDefault();
+        const rect = plot.getBoundingClientRect();
+        const ratio =
+          rect.width > 0
+            ? Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width))
+            : 0.5;
+        // Keep the instant under the cursor where it is: absorb the shift the
+        // zoom would otherwise introduce into the pan.
+        const under = current.clampedStart + ratio * current.span;
+        const factor = event.deltaY < 0 ? ZOOM_STEP : 1 / ZOOM_STEP;
+        const nextZoom = Math.min(
+          current.maxZoom,
+          Math.max(1, current.effectiveZoom * factor)
+        );
+        const nextSpan = current.fullSpan / nextZoom;
+        setZoom(nextZoom);
+        setPan(nextZoom === 1 ? 0 : under - ratio * nextSpan - (current.anchor - nextSpan / 2));
+        return;
+      }
+      if (event.shiftKey && current.effectiveZoom > 1) {
+        event.preventDefault();
+        setPan((pan) => pan + (event.deltaY || event.deltaX) * (current.span / 400));
+      }
+    };
+
+    plot.addEventListener("wheel", onWheel, { passive: false });
+    return () => plot.removeEventListener("wheel", onWheel);
+  }, [plotRef]);
+
+  return {
+    start: clampedStart,
+    end: clampedStart + span,
+    span,
+    zoom: effectiveZoom,
+    canZoomIn: effectiveZoom < maxZoom,
+    canZoomOut: effectiveZoom > 1,
+    zoomIn: () => zoomBy(ZOOM_STEP),
+    zoomOut: () => {
+      const next = Math.max(1, effectiveZoom / ZOOM_STEP);
+      setZoom(next);
+      if (next === 1) setPan(0);
+    },
+    reset: () => {
+      setZoom(1);
+      setPan(0);
+    },
+    fullSpan,
+    offset: clampedStart - start,
+  };
+}
+
+/**
+ * Zoom controls, and the readout that says what you are looking at. Rendered by
+ * both timelines so the two read the same.
+ */
+export function TimelineZoomControls({
+  view,
+  className,
+}: {
+  view: TimelineView;
+  className?: string;
+}) {
+  const seconds = (ms: number) => `${(ms / 1000).toFixed(ms < 10000 ? 1 : 0)}s`;
+  return (
+    <div className={cn("flex items-center gap-1 font-mono text-[10px]", className)}>
+      <span className="text-muted-foreground/70">
+        {view.zoom > 1 ? `${seconds(view.span)} of ${seconds(view.fullSpan)}` : seconds(view.fullSpan)}
+      </span>
+      <button
+        type="button"
+        onClick={view.zoomOut}
+        disabled={!view.canZoomOut}
+        title="Zoom out (⌘/ctrl + scroll)"
+        className="rounded border px-1.5 leading-4 text-muted-foreground hover:bg-accent disabled:opacity-40"
+      >
+        −
+      </button>
+      <button
+        type="button"
+        onClick={view.zoomIn}
+        disabled={!view.canZoomIn}
+        title="Zoom in (⌘/ctrl + scroll); shift + scroll pans"
+        className="rounded border px-1.5 leading-4 text-muted-foreground hover:bg-accent disabled:opacity-40"
+      >
+        +
+      </button>
+      <button
+        type="button"
+        onClick={view.reset}
+        disabled={!view.canZoomOut}
+        title="Fit the whole session"
+        className="rounded border px-1.5 leading-4 text-muted-foreground hover:bg-accent disabled:opacity-40"
+      >
+        fit
+      </button>
     </div>
   );
 }

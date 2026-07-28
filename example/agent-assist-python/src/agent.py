@@ -136,12 +136,45 @@ def _env_flag(name: str, default: bool) -> bool:
     return raw in ("1", "true", "yes", "on")
 
 
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(_env(name) or default)
+    except ValueError:
+        logger.warning("%s is not a number — using %s", name, default)
+        return default
+
+
 AGENT_NAME = _env("ASSIST_AGENT_NAME", "agent-assist")
 LANGUAGE = _env("ASSIST_LANGUAGE")
 INSTRUCTIONS = _env("ASSIST_INSTRUCTIONS") or DEFAULT_INSTRUCTIONS
 TURN_DETECTOR = _env("ASSIST_TURN_DETECTOR", "audio").lower()
 NOISE_CANCELLATION = _env("ASSIST_NOISE_CANCELLATION", "gtcrn").lower()
 SUGGEST_FOR = _env("ASSIST_SUGGEST_FOR", CUSTOMER_ROLE).lower()
+
+# ── How much silence goes to the recogniser ──────────────────────────────────
+# Silero's own defaults pad every utterance by about a second — 0.5s kept from
+# before speech started, 0.55s of silence waited out before it is called ended —
+# and all of it is sent to the STT. Two costs: the transcript arrives later than
+# it needs to, and `audio_duration` (which is what puts a bar on the metrics
+# timeline) covers noticeably more than the speech you hear, so a segment reads
+# as longer than it was.
+#
+# The two are not equally safe to cut, which is why they are not cut equally:
+#
+# * **The prefix is nearly free.** It only decides how much silence is kept from
+#   before speech started; 0.2s still covers a first syllable. This is the win.
+# * **The trailing silence is what ends a turn.** Cutting it to 0.35s split
+#   "Support here, how can I help?" into two utterances on a measured run — the
+#   pause between the sentences was longer than the wait — and each fragment then
+#   costs its own STT call, its own turn-detector run, and reaches the coaching
+#   LLM as a separate turn. 0.5s keeps sentences whole while still trimming.
+#
+# Together: 1.05s of padding per utterance down to 0.7s. Push `MIN_SILENCE` lower
+# for faster coaching if fragmented lines are an acceptable trade.
+VAD_PREFIX_PADDING = _env_float("ASSIST_VAD_PREFIX_PADDING", 0.2)
+VAD_MIN_SILENCE = _env_float("ASSIST_VAD_MIN_SILENCE", 0.5)
+VAD_MIN_SPEECH = _env_float("ASSIST_VAD_MIN_SPEECH", 0.05)
+VAD_ACTIVATION = _env_float("ASSIST_VAD_ACTIVATION", 0.5)
 HISTORY_TURNS = int(_env("ASSIST_HISTORY_TURNS", "12") or 12)
 TRANSCRIBE_INTERIM = _env_flag("ASSIST_INTERIM_TRANSCRIPTS", True)
 
@@ -464,6 +497,16 @@ class AssistedCall:
         # lane for a conversation that had two speakers in it.
         if speaker is not None:
             payload = {**payload, "speaker": speaker}
+        # How much of the segment was never speech. `audio_duration` covers what
+        # was *sent* to the recogniser, which is the utterance plus the padding
+        # the VAD wraps it in — so a bar drawn from it alone reads as longer than
+        # what you hear. These are the numbers that produced it, and the timeline
+        # draws the difference.
+        if payload.get("type") == "stt_metrics":
+            payload = {
+                **payload,
+                "vadPadding": {"prefix": VAD_PREFIX_PADDING, "silence": VAD_MIN_SILENCE},
+            }
         self._publish(CONSOLE_METRICS_TOPIC, payload)
 
     # -- sessions ------------------------------------------------------------
@@ -768,7 +811,12 @@ server = AgentServer()
 
 
 def prewarm(proc: JobProcess) -> None:
-    proc.userdata["vad"] = silero.VAD.load()
+    proc.userdata["vad"] = silero.VAD.load(
+        min_speech_duration=VAD_MIN_SPEECH,
+        min_silence_duration=VAD_MIN_SILENCE,
+        prefix_padding_duration=VAD_PREFIX_PADDING,
+        activation_threshold=VAD_ACTIVATION,
+    )
 
 
 server.setup_fnc = prewarm

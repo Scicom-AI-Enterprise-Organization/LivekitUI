@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
 import {
   METRIC_KIND_LABEL,
@@ -8,18 +8,22 @@ import {
   formatClock,
   formatSeconds,
   metricLaneKey,
+  metricWindows,
   metricRowCells,
   metricSpeakerLabel,
   type ConsoleMetric,
   type MetricKind,
+  type MetricWindow,
 } from "@/lib/console-metrics";
 import { AGENT_STATE_COLOR } from "./event-timeline";
 import {
   TIMELINE_ACTIVE_WINDOW_MS,
   TimelineAxis,
   TimelinePlayhead,
+  TimelineZoomControls,
   buildTicks,
   useTimelineScrub,
+  useTimelineView,
 } from "./timeline-plot";
 
 /**
@@ -66,8 +70,13 @@ function alpha(hex: string, a: number): string {
     .padStart(2, "0")}`;
 }
 
-/** Metric fields are seconds; the plot is in milliseconds. */
-const ms = (value?: number) => (value ?? 0) * 1000;
+/**
+ * Where every metric belongs on a wall-clock axis lives in `console-metrics.ts`,
+ * with the rest of the placement rules — the metric rows and the transcript
+ * highlight read the same windows, so none of the three can drift. Re-exported
+ * here because this is where callers have always imported it from.
+ */
+export { metricWindows, type MetricWindow };
 
 /**
  * One row of the plot: a metric kind, and — for a session that measured more
@@ -82,134 +91,8 @@ interface Lane {
   items: { metric: ConsoleMetric; window: MetricWindow }[];
 }
 
-export interface MetricWindow {
-  /** Wall-clock instant the work started. */
-  from: number;
-  /** Wall-clock instant it finished — for TTS, when the speech stopped. */
-  to: number;
-  /** End of the part that was pure waiting (TTFT, TTFB, EOU delay). */
-  solidTo?: number;
-}
-
-/**
- * What one metric covers in wall-clock time, read from its own fields.
- *
- * A metric is *reported* after the work it measures, so a bar runs back from
- * its timestamp over its duration. `metricWindows` refines the two kinds where
- * that isn't the whole story.
- */
-function baseWindow(m: ConsoleMetric): MetricWindow {
-  switch (m.kind) {
-    case "llm":
-    case "realtime": {
-      // Compute, not audio: the reply was being generated up to the report.
-      const from = m.at - ms(m.duration ?? m.ttft);
-      return {
-        from,
-        to: m.at,
-        solidTo: m.ttft !== undefined ? from + ms(m.ttft) : undefined,
-      };
-    }
-    case "tts": {
-      const requested = m.at - ms(m.duration);
-      const speaks = requested + ms(m.ttfb);
-      return {
-        from: requested,
-        // Falls back to the report instant when the plugin gives no audio
-        // length; never shorter than the synthesis it measured.
-        to: Math.max(speaks + ms(m.audioDuration), m.at),
-        solidTo: m.ttfb !== undefined ? speaks : undefined,
-      };
-    }
-    case "stt":
-      // The user's speech, not the recogniser's compute: `audio_duration` is
-      // how much audio this final segment covered.
-      return { from: m.at - ms(m.audioDuration ?? m.duration), to: m.at };
-    case "eou": {
-      const from = m.at - ms(m.endOfUtteranceDelay);
-      return {
-        from,
-        to: m.at,
-        solidTo: m.transcriptionDelay !== undefined ? from + ms(m.transcriptionDelay) : undefined,
-      };
-    }
-    case "eot": {
-      const from = m.at - ms(m.totalDuration ?? m.predictionDuration ?? m.detectionDelay);
-      return {
-        from,
-        to: m.at,
-        solidTo: m.detectionDelay !== undefined ? from + ms(m.detectionDelay) : undefined,
-      };
-    }
-    case "interrupt": {
-      const from = m.at - ms(m.predictionDuration ?? m.detectionDelay);
-      return {
-        from,
-        to: m.at,
-        solidTo: m.detectionDelay !== undefined ? from + ms(m.detectionDelay) : undefined,
-      };
-    }
-    default:
-      return { from: m.at - ms(m.duration), to: m.at };
-  }
-}
-
-/**
- * Where every metric belongs on a wall-clock axis, keyed by metric id.
- *
- * Two things need the whole list rather than one metric:
- *
- * - **TTS is heard, not computed.** Synthesis finishes long before the audio it
- *   produced has finished playing, so a TTS bar runs from the request, through
- *   the wait, and on over `audio_duration` — past the instant the metric
- *   arrived. And a reply split into sentences is *heard back to back*: the
- *   second chunk starts when the first stops playing, not when its own
- *   synthesis returned, which is usually while the first is still being spoken.
- *   Chaining them is what stops one reply drawing as a pile of overlapping bars
- *   and makes the lane match what the recording plays.
- * - **STT segments must not overlap.** Each reaches back over the audio it
- *   transcribed, and consecutive finals would otherwise cover the same speech
- *   twice.
- */
-export function metricWindows(metrics: ConsoleMetric[]): Map<string, MetricWindow> {
-  const windows = new Map<string, MetricWindow>();
-  for (const m of metrics) windows.set(m.id, baseWindow(m));
-
-  // Playout is serial per reply. Keyed on the turn, with one shared bucket for
-  // plugins that report no speech id — `Math.max` means an unrelated later turn
-  // is never dragged forward by an earlier one.
-  const speechEnd = new Map<string, number>();
-  for (const m of [...metrics].sort((a, b) => a.at - b.at)) {
-    if (m.kind !== "tts" || m.audioDuration === undefined) continue;
-    const base = windows.get(m.id)!;
-    const key = m.speechId ?? "";
-    const readyAt = base.solidTo ?? base.from;
-    const previousEnd = speechEnd.get(key);
-    const speaks = previousEnd !== undefined ? Math.max(readyAt, previousEnd) : readyAt;
-    const to = speaks + ms(m.audioDuration);
-    windows.set(m.id, {
-      // A chunk that waited on the one before it was not slow — its TTFB
-      // elapsed while the agent was still speaking, so it shows no wait.
-      from: previousEnd !== undefined && speaks > readyAt ? speaks : base.from,
-      to,
-      solidTo: previousEnd !== undefined && speaks > readyAt ? undefined : base.solidTo,
-    });
-    speechEnd.set(key, to);
-  }
-
-  let sttEnd: number | null = null;
-  for (const m of [...metrics].sort((a, b) => a.at - b.at)) {
-    if (m.kind !== "stt") continue;
-    const base = windows.get(m.id)!;
-    const from = sttEnd !== null ? Math.max(base.from, sttEnd) : base.from;
-    windows.set(m.id, { ...base, from: Math.min(from, base.to) });
-    sttEnd = base.to;
-  }
-
-  return windows;
-}
-
-function tooltipOf(m: ConsoleMetric, { from, to }: MetricWindow): string {
+function tooltipOf(m: ConsoleMetric, window: MetricWindow): string {
+  const { from, to } = window;
   const cells = metricRowCells(m);
   const who = metricSpeakerLabel(m);
   return [
@@ -218,6 +101,10 @@ function tooltipOf(m: ConsoleMetric, { from, to }: MetricWindow): string {
     cells.latency !== "—" ? `${cells.latencyLabel} ${cells.latency}` : null,
     m.kind === "tts" && m.audioDuration !== undefined
       ? `speaks ${formatSeconds(m.audioDuration)}`
+      : null,
+    // Where the bar sits versus where the speech in it sits.
+    m.kind === "stt" && window.speech
+      ? `speech ${formatClock(window.speech.from)} → ${formatClock(window.speech.to)}`
       : null,
     m.speechId ? `turn ${m.speechId}` : null,
     cells.detail || null,
@@ -301,32 +188,43 @@ export function MetricsTimeline({
     return { first, last, lanes };
   }, [metrics]);
 
-  const model =
-    grouped &&
-    (() => {
-      const start = Math.min(grouped.first, audioWindow?.start ?? grouped.first);
-      const end = Math.max(
-        grouped.last + 500,
-        audioWindow?.end ?? 0,
-        live ? now : 0,
-        start + 1000
-      );
-      const span = end - start;
-      return { start, end, span, ticks: buildTicks(span) };
-    })();
+  /** The whole session — the window when fully zoomed out. */
+  const full = grouped && {
+    start: Math.min(grouped.first, audioWindow?.start ?? grouped.first),
+    end: Math.max(
+      grouped.last + 500,
+      audioWindow?.end ?? 0,
+      live ? now : 0,
+      Math.min(grouped.first, audioWindow?.start ?? grouped.first) + 1000
+    ),
+  };
+
+  // Hooks run before the early return, so both take a placeholder window until
+  // there is something to plot.
+  const view = useTimelineView({
+    plotRef,
+    start: full ? full.start : 0,
+    end: full ? full.end : 1,
+    playheadAt,
+    live,
+  });
+  const model = full && {
+    ...view,
+    ticks: buildTicks(view.span, 6, view.offset),
+  };
 
   // The agent's states become spans between transitions, the last running to
-  // the edge of the plot — the same treatment the Events tab gives them.
+  // the edge of the session — not of the visible window: zooming clips a span,
+  // it does not shorten it.
+  const sessionEnd = full ? full.end : 0;
   const stateSpans = useMemo(() => {
-    if (!agentStates || agentStates.length === 0 || !model) return [];
+    if (!agentStates || agentStates.length === 0 || !sessionEnd) return [];
     return agentStates.map((point, i) => {
       const next = agentStates[i + 1];
-      return { ...point, until: next ? next.at : model.end };
+      return { ...point, until: next ? next.at : sessionEnd };
     });
-  }, [agentStates, model]);
+  }, [agentStates, sessionEnd]);
 
-  // Hooks run before the early return, so the window is a placeholder until
-  // there is something to plot.
   const { scrubbing, onPointerDown, cursorClass } = useTimelineScrub({
     plotRef,
     start: model ? model.start : 0,
@@ -362,8 +260,13 @@ export function MetricsTimeline({
     return { left, width: Math.max(0.4, right - left) };
   };
 
+  /** Zoomed in, most of the session is off-window; drawing it would pile slivers
+      against the edges. */
+  const visible = (from: number, to: number) => to >= model.start && from <= model.end;
+
   return (
     <div className={cn("rounded-lg border p-3", className)}>
+      <TimelineZoomControls view={view} className="mb-1.5 justify-end" />
       <div className="flex gap-2">
         {/* Lane labels — same width as the event timeline so the two line up */}
         <div className="w-[104px] shrink-0 space-y-1.5">
@@ -416,6 +319,7 @@ export function MetricsTimeline({
           {stateSpans.length > 0 && (
             <div className="relative h-5 rounded bg-muted/50">
               {stateSpans.map((span) => {
+                if (!visible(span.at, span.until)) return null;
                 const { left, width } = barOf(span.at, span.until);
                 const color = AGENT_STATE_COLOR[span.state] ?? "#94a3b8";
                 const active =
@@ -451,6 +355,7 @@ export function MetricsTimeline({
                 )}
 
                 {laneMetrics.map(({ metric: m, window }) => {
+                  if (!visible(window.from, window.to)) return null;
                   const title = tooltipOf(m, window);
 
                   // A metric with no duration (VAD, an empty payload) is an
@@ -476,24 +381,46 @@ export function MetricsTimeline({
                     playheadAt != null &&
                     playheadAt >= window.from - TIMELINE_ACTIVE_WINDOW_MS &&
                     playheadAt <= window.to + TIMELINE_ACTIVE_WINDOW_MS;
-                  const { left, width } = barOf(window.from, window.to);
+                  // The block is the work itself; a trailing wait — the
+                  // recogniser answering after the audio stopped — is drawn as a
+                  // thin tail, so the bar still ends where the speech ended and
+                  // the gap before the turn detector is accounted for.
+                  const blockTo = window.waitFrom ?? window.to;
+                  const { left, width } = barOf(window.from, blockTo);
+                  const tail =
+                    window.waitFrom !== undefined && window.to > window.waitFrom
+                      ? barOf(window.waitFrom, window.to)
+                      : null;
                   // The bar carries the tooltip, so the wait is drawn inside it
                   // — and tinted with alpha rather than opacity, which a child
                   // would inherit and cancel out.
                   const solidPct =
-                    window.solidTo !== undefined && window.to > window.from
+                    window.solidTo !== undefined && blockTo > window.from
                       ? Math.max(
                           2,
                           Math.min(
                             100,
-                            ((window.solidTo - window.from) / (window.to - window.from)) * 100
+                            ((window.solidTo - window.from) / (blockTo - window.from)) * 100
                           )
                         )
                       : null;
 
+                  const speechPct =
+                    window.speech && blockTo > window.from
+                      ? {
+                          left:
+                            ((window.speech.from - window.from) / (blockTo - window.from)) * 100,
+                          width: Math.max(
+                            2,
+                            ((window.speech.to - window.speech.from) / (blockTo - window.from)) *
+                              100
+                          ),
+                        }
+                      : null;
+
                   return (
+                    <Fragment key={m.id}>
                     <div
-                      key={m.id}
                       className={cn(
                         "absolute inset-y-0.5 rounded-sm",
                         m.cancelled && "outline-1 outline-dashed outline-destructive"
@@ -515,7 +442,33 @@ export function MetricsTimeline({
                           }}
                         />
                       )}
+                      {/* The audible part of an utterance. What sticks out either
+                          side of it is padding the VAD added and the recogniser
+                          was billed for — the reason a segment reads longer than
+                          it sounds. */}
+                      {speechPct && (
+                        <div
+                          className="absolute inset-y-0 rounded-sm"
+                          style={{
+                            left: `${speechPct.left}%`,
+                            width: `${speechPct.width}%`,
+                            backgroundColor: alpha(color, active ? 1 : 0.85),
+                          }}
+                        />
+                      )}
                     </div>
+                    {tail && (
+                      <div
+                        className="absolute top-1/2 h-px -translate-y-1/2"
+                        style={{
+                          left: `${tail.left}%`,
+                          width: `${tail.width}%`,
+                          backgroundColor: alpha(color, active ? 0.9 : 0.55),
+                        }}
+                        title={title}
+                      />
+                    )}
+                    </Fragment>
                   );
                 })}
               </div>
@@ -534,6 +487,9 @@ export function MetricsTimeline({
       <div className="ml-[112px] flex flex-wrap items-center gap-3 pt-2 font-mono text-[9px] uppercase tracking-wide text-muted-foreground">
         <span>solid head = the wait (TTFT / TTFB / EOU)</span>
         <span className="text-muted-foreground/70">· TTS runs over the speech it played</span>
+        <span className="text-muted-foreground/70">
+          · STT: solid = speech, faint = vad padding, tail = waiting for the transcript
+        </span>
         {onSeek && <span className="text-muted-foreground/70">· click or drag to seek</span>}
         {live && <span className="text-muted-foreground/70">· live</span>}
       </div>

@@ -37,20 +37,33 @@ Two things about the audio window are easy to get wrong:
 
 `timeline-plot.tsx` is the shared substrate — the axis (`buildTicks`, `TimelineAxis`), the red playhead (`TimelinePlayhead`), the click-or-drag-to-seek gesture (`useTimelineScrub`), and `TIMELINE_ACTIVE_WINDOW_MS`, the tolerance every panel uses to decide what counts as "now". Both timelines look and feel identical because they draw through these rather than reimplementing them.
 
-`useTimelineScrub` must be called **before** any early return — pass a placeholder window when there is nothing to plot. Both timelines bail out on empty input, and a hook after that return is a rules-of-hooks error.
+`useTimelineScrub` must be called **before** any early return — pass a placeholder window when there is nothing to plot. Both timelines bail out on empty input, and a hook after that return is a rules-of-hooks error. `useTimelineView` has the same constraint, and both timelines call it with the *full* session window.
+
+### Zooming
+
+`useTimelineView` owns the visible window. Fully zoomed out is the whole session — what the plots always showed — so the default is unchanged and zooming only narrows: `⌘/ctrl + wheel` zooms about the cursor, `shift + wheel` pans, and the `− + fit` controls do the same without a modifier. Plain wheel is deliberately left to the page, since the dock scrolls.
+
+Two things keep it honest:
+
+- **The window centres on the playhead**, derived during render rather than chased by an effect. An effect would both trip `react-hooks/set-state-in-effect` and lag the audio by a frame; deriving means a zoomed-in view is always looking at the moment you are listening to, and a user's pan is stored *relative* to the playhead so it survives playback.
+- **Tick labels count from the start of the session** (`buildTicks(span, count, offset)`), not from the left edge of the window. Restarting at `0.0s` on every zoom step would defeat the purpose of zooming in on a timestamp; the decimals grow as the window shrinks.
+
+Anything whose window falls outside the visible one is skipped rather than clamped — a clamped bar becomes a sliver pinned to the edge, and at high zoom every one of them piles up there.
 
 - `event-timeline.tsx` — a lane per event category. Point events are markers; `agent.state` becomes spans between transitions. `AGENT_STATE_COLOR` is exported because the metrics timeline draws the same spans.
 - `metrics-timeline.tsx` — a lane per metric kind, plus an `AGENT` reference lane built from those same `agent.state` transitions. That lane is ground truth: it comes from the room, so it lines up with the recording by definition, and the metric lanes are read against it.
 
 ### Placing a metric in time
 
-**A metric's timestamp is when it was *reported*, not when the work happened.** `metricWindows()` in `metrics-timeline.tsx` is the single place that decides where a bar goes, and adding a metric kind means adding its window there rather than drawing a dot at `m.at`:
+**A metric's timestamp is when it was *reported*, not when the work happened.** `metricWindows()` in `src/lib/console-metrics.ts` (re-exported from `metrics-timeline.tsx`, where callers have always imported it) is the single place that decides where a bar goes — the timeline bars, the metric rows and the transcript highlight all read it, so none of them can drift. Adding a metric kind means adding its window there rather than drawing a dot at `m.at`:
 
 - **LLM / EOU / turn detector** — compute and silence. The bar runs back from the timestamp over its duration; the solid head is the part the user waited through (TTFT, EOU delay).
 - **TTS** — heard, not computed. Synthesis finishes long before the audio it produced has finished playing, so the bar runs from the request, through the TTFB wait, and on over `audio_duration`, **past its own timestamp**. A reply split into sentences is heard back to back, so chunks sharing a `speech_id` are chained: the second starts when the first stops playing, and shows no wait, because its TTFB elapsed while the agent was still talking. Without the chaining one reply draws as a pile of overlapping bars.
-- **STT** — the user's speech, so it reaches back over `audio_duration` from the timestamp, clamped against the previous segment so consecutive finals don't cover the same speech twice.
+- **STT** — the user's speech, and the one kind whose window has three parts. The recogniser reports when it *returned*, so a one-shot plugin's audio ended roughly `duration` before that: the block runs back over `audio_duration` from there, the round trip is drawn as a thin **tail** to the report instant, and the audible speech is marked solid inside the block when the agent reports its VAD padding (`vadPadding`). All three matter. Anchoring the block to the report drew every utterance about a second late; ending the window at the audio left an unexplained second before the turn detector, which a *text* detector cannot start until the transcript exists; and without the padding a segment reads as longer than it sounds. Consecutive finals are clamped per speaker (against audio, not the report) so they don't cover the same speech twice — two people in one room really do talk over each other.
 
 `MetricsPanel` looks windows up from the same function, so a row highlights and seeks over exactly the span its bar covers.
+
+**EOU contains the others, which is the plot's one genuinely confusing part.** Its bar runs from where the speech stopped to where the turn was declared over, so it spans the VAD's trailing silence, the STT tail and the turn-detector bar. Measured on a real call (`voice_assistant_room_3882`, first turn): speech stops at 8.53s, the STT segment's audio runs to 9.11s (0.58s of padding), the transcript lands at 10.28s, the detector answers by 10.38s — `end_of_utterance_delay` 1.86s = 0.58 + 1.18 + 0.09. That decomposition is why `metrics-glossary.tsx` exists and is rendered by the panel in both hosts: two readers asked the same question of the same plot.
 
 ### A lane per speaker
 
@@ -59,6 +72,8 @@ A metric may carry a `speaker` (identity, name, role), and `metricLaneKey()` —
 The turn-detector lane is the one to be careful with. The audio detector (`inference.TurnDetector`) reports `detection_delay` — how long after the speech its verdict landed — and the bar's solid head is that wait. A **text** detector has no audio-relative number to report, only the round trip it measured, so it fills `total_duration` alone and the bar is drawn hollow; `metricRowCells` relabels its latency "inference" rather than passing a round trip off as a detection delay.
 
 ### Transcript lines
+
+**A line's `at` is when its transcript arrived, not when it was said.** End of turn, then the recogniser, so `at` can sit seconds past the audio — highlighting on it lit a line up well after you heard it, which reads as the transcript lagging the recording. `speechStarts()` (`console-metrics.ts`) matches each line to the STT metric that produced it and reaches back over its `audio_duration`, the same translation `metricWindows()` does for bars; the panel highlights, seeks and labels from that instant and keeps the reported one in the tooltip. Metrics are claimed once each, so two people in one room cannot borrow each other's timing, and typed turns are left alone — they never passed through STT.
 
 A `TranscriptLine` carries `via: "voice" | "text"`. Typed turns never pass through STT, so they produce no transcription and have to be collected from the chat topic (`lk.chat`) — the console merges `useChat()` messages into the transcript, and the observer registers the same topic. Panels mark them, since a transcript read as evidence of what was *heard* shouldn't silently include what was typed.
 

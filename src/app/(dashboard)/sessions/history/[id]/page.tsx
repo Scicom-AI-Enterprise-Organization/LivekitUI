@@ -294,6 +294,7 @@ function SessionReplayPage() {
                 lines={transcript}
                 autoScroll={false}
                 emptyMessage="This session saved no transcript."
+                metrics={metrics}
                 playheadAt={audio.selected ? audio.playheadAt : null}
                 onSeek={audio.selected ? audio.seekTo : undefined}
                 canSeekTo={audio.canSeekTo}
@@ -429,6 +430,7 @@ function SessionReplayPage() {
                 className="w-full"
                 autoScroll={false}
                 emptyMessage="This session saved no transcript."
+                metrics={metrics}
                 playheadAt={audio.selected ? audio.playheadAt : null}
                 onSeek={audio.selected ? audio.seekTo : undefined}
                 canSeekTo={audio.canSeekTo}

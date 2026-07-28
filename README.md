@@ -141,7 +141,28 @@ Sandbox apps let you quickly spin up frontend templates for testing agents. Crea
 - Apps are proxied through the dashboard at `http://localhost:3000/sandbox/{name}`
 - No direct port access needed — the dashboard handles routing
 - Each sandbox gets a random available port internally
-- Supports the Web Voice Agent and Video Conference templates
+- Supports the Web Voice Agent, Video Conference and Agent Assist templates
+
+### Agent assist
+
+**Agent Assist** is the one template with two *humans* in the room — a support agent
+and a customer on the same link — with a worker transcribing both and writing
+coaching notes only the agent sees. It deploys that worker for you, and can point
+it at an existing agent so its models live in one place.
+
+Testing it therefore needs two people in two browsers, so there is a simulator:
+one request joins the room twice, speaks a scripted call through your own TTS, and
+reports the transcript, the coaching notes and a count of metrics per speaker.
+
+```bash
+curl -s -X POST http://localhost:3000/api/assist-sim \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"sandbox": "my-assist-app"}' | jq .run.summary
+```
+
+`$TOKEN` comes from **Settings > Access tokens**. Full options, and how to run the
+script without the dashboard, are in `example/agent-assist-sim/README.md`.
 
 To configure a custom domain for production:
 

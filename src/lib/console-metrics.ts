@@ -82,6 +82,19 @@ export interface ConsoleMetric {
   charactersCount?: number;
 
   cancelled?: boolean;
+  /**
+   * Whether the plugin streamed rather than sending one request. It decides what
+   * `duration` means — a single round trip, or the life of the stream — and so
+   * where the bar for it belongs.
+   */
+  streamed?: boolean;
+  /**
+   * Seconds of the segment that were never speech, when the agent reports them:
+   * the VAD keeps some audio from before speech started and waits out some
+   * silence before calling it ended, and all of it goes to the recogniser. Only
+   * with these can a bar say which part of an utterance you would actually hear.
+   */
+  vadPadding?: { prefix: number; silence: number };
   raw: Record<string, unknown>;
 }
 
@@ -207,9 +220,283 @@ export function parseConsoleMetric(
     tokensPerSecond: num(raw.tokens_per_second) ?? num(raw.tokensPerSecond),
     charactersCount: num(raw.characters_count) ?? num(raw.charactersCount),
     cancelled: typeof raw.cancelled === "boolean" ? raw.cancelled : undefined,
+    streamed: typeof raw.streamed === "boolean" ? raw.streamed : undefined,
+    vadPadding: paddingOf(raw.vadPadding),
     raw,
   };
 }
+
+function paddingOf(v: unknown): { prefix: number; silence: number } | undefined {
+  if (!v || typeof v !== "object") return undefined;
+  const raw = v as Record<string, unknown>;
+  const prefix = num(raw.prefix) ?? 0;
+  const silence = num(raw.silence) ?? 0;
+  return prefix || silence ? { prefix, silence } : undefined;
+}
+
+// ---------------------------------------------------------------------------
+// Placing a metric in time
+// ---------------------------------------------------------------------------
+
+/** Metric fields are seconds; every plot here is in milliseconds. */
+const ms = (value?: number) => (value ?? 0) * 1000;
+
+export interface MetricWindow {
+  /** Wall-clock instant the work started. */
+  from: number;
+  /** Wall-clock instant it finished — for TTS, when the speech stopped. */
+  to: number;
+  /** End of the part that was pure waiting (TTFT, TTFB, EOU delay). */
+  solidTo?: number;
+  /**
+   * The audible part, inside a window that covers more than it. Only STT has
+   * one: its segment is the utterance plus the VAD's padding, and the two are
+   * worth telling apart — everything either side of this is silence that was
+   * transcribed anyway.
+   */
+  speech?: { from: number; to: number };
+  /**
+   * Where a *trailing* wait begins — work that happened after the thing measured
+   * was over. STT's is its round trip: the audio ended, then the recogniser
+   * answered. It matters because a text turn detector cannot run until the
+   * transcript exists, so this wait is what sits between an utterance and the
+   * turn ending, and it looked like an unexplained gap on the plot.
+   */
+  waitFrom?: number;
+}
+
+/**
+ * What one metric covers in wall-clock time, read from its own fields.
+ *
+ * A metric is *reported* after the work it measures, so a bar runs back from its
+ * timestamp over its duration. `metricWindows` refines the kinds where that is
+ * not the whole story.
+ */
+function baseWindow(m: ConsoleMetric): MetricWindow {
+  switch (m.kind) {
+    case "llm":
+    case "realtime": {
+      // Compute, not audio: the reply was being generated up to the report.
+      const from = m.at - ms(m.duration ?? m.ttft);
+      return {
+        from,
+        to: m.at,
+        solidTo: m.ttft !== undefined ? from + ms(m.ttft) : undefined,
+      };
+    }
+    case "tts": {
+      const requested = m.at - ms(m.duration);
+      const speaks = requested + ms(m.ttfb);
+      return {
+        from: requested,
+        // Falls back to the report instant when the plugin gives no audio
+        // length; never shorter than the synthesis it measured.
+        to: Math.max(speaks + ms(m.audioDuration), m.at),
+        solidTo: m.ttfb !== undefined ? speaks : undefined,
+      };
+    }
+    case "stt": {
+      // The user's speech, not the recogniser's compute — and the recogniser
+      // reports when it *returned*, which is a round trip after the speech
+      // stopped. A one-shot STT collects the utterance, sends it, and answers
+      // `duration` later, so the audio ended about that far before the report;
+      // anchoring the bar to the report instead drew every utterance a second or
+      // so late, past where you hear it in the recording. A streaming plugin
+      // measures the life of the stream instead, and its transcript lands with
+      // the audio, so nothing is taken off.
+      // `raw` as a fallback: a session saved before this field was parsed still
+      // carries the payload it arrived in, so its bars are corrected too rather
+      // than the fix only applying to calls made from now on.
+      const streamed =
+        m.streamed ?? (typeof m.raw?.streamed === "boolean" ? m.raw.streamed : undefined);
+      const audioTo = streamed === false ? m.at - ms(m.duration) : m.at;
+      // `audio_duration` is what the segment covered, silence padding included,
+      // so this window is wider than the speech itself — which is why the agent
+      // reports the padding it added and the audible part is marked inside.
+      const from = audioTo - ms(m.audioDuration ?? m.duration);
+      // The window runs on to the report, with the round trip marked as a wait:
+      // ending it at the audio left a gap before the turn detector that looked
+      // like nothing was happening, when in fact the recogniser was answering.
+      const waitFrom = audioTo < m.at ? audioTo : undefined;
+      const pad = m.vadPadding;
+      if (!pad) return { from, to: m.at, waitFrom };
+      const speechFrom = Math.min(from + ms(pad.prefix), audioTo);
+      const speechTo = Math.max(audioTo - ms(pad.silence), speechFrom);
+      return { from, to: m.at, waitFrom, speech: { from: speechFrom, to: speechTo } };
+    }
+    case "eou": {
+      const from = m.at - ms(m.endOfUtteranceDelay);
+      return {
+        from,
+        to: m.at,
+        solidTo: m.transcriptionDelay !== undefined ? from + ms(m.transcriptionDelay) : undefined,
+      };
+    }
+    case "eot": {
+      const from = m.at - ms(m.totalDuration ?? m.predictionDuration ?? m.detectionDelay);
+      return {
+        from,
+        to: m.at,
+        solidTo: m.detectionDelay !== undefined ? from + ms(m.detectionDelay) : undefined,
+      };
+    }
+    case "interrupt": {
+      const from = m.at - ms(m.predictionDuration ?? m.detectionDelay);
+      return {
+        from,
+        to: m.at,
+        solidTo: m.detectionDelay !== undefined ? from + ms(m.detectionDelay) : undefined,
+      };
+    }
+    default:
+      return { from: m.at - ms(m.duration), to: m.at };
+  }
+}
+
+/**
+ * Where every metric belongs on a wall-clock axis, keyed by metric id. The one
+ * place that decides this — the timeline bars, the metric rows and the transcript
+ * highlight all read it, so none of them can drift from the others.
+ *
+ * Two things need the whole list rather than one metric:
+ *
+ * - **TTS is heard, not computed.** Synthesis finishes long before the audio it
+ *   produced has finished playing, so a TTS bar runs from the request, through
+ *   the wait, and on over `audio_duration` — past the instant the metric
+ *   arrived. And a reply split into sentences is *heard back to back*: the
+ *   second chunk starts when the first stops playing, not when its own
+ *   synthesis returned, which is usually while the first is still being spoken.
+ *   Chaining them is what stops one reply drawing as a pile of overlapping bars
+ *   and makes the lane match what the recording plays.
+ * - **STT segments must not overlap.** Each reaches back over the audio it
+ *   transcribed, and consecutive finals would otherwise cover the same speech
+ *   twice. Per speaker, though: in a room with two people the two are talking
+ *   over each other for real, and clamping across them would invent an order.
+ */
+export function metricWindows(metrics: ConsoleMetric[]): Map<string, MetricWindow> {
+  const windows = new Map<string, MetricWindow>();
+  for (const m of metrics) windows.set(m.id, baseWindow(m));
+
+  // Playout is serial per reply. Keyed on the turn, with one shared bucket for
+  // plugins that report no speech id — `Math.max` means an unrelated later turn
+  // is never dragged forward by an earlier one.
+  const speechEnd = new Map<string, number>();
+  for (const m of [...metrics].sort((a, b) => a.at - b.at)) {
+    if (m.kind !== "tts" || m.audioDuration === undefined) continue;
+    const base = windows.get(m.id)!;
+    const key = m.speechId ?? "";
+    const readyAt = base.solidTo ?? base.from;
+    const previousEnd = speechEnd.get(key);
+    const speaks = previousEnd !== undefined ? Math.max(readyAt, previousEnd) : readyAt;
+    const to = speaks + ms(m.audioDuration);
+    windows.set(m.id, {
+      // A chunk that waited on the one before it was not slow — its TTFB
+      // elapsed while the agent was still speaking, so it shows no wait.
+      from: previousEnd !== undefined && speaks > readyAt ? speaks : base.from,
+      to,
+      solidTo: previousEnd !== undefined && speaks > readyAt ? undefined : base.solidTo,
+    });
+    speechEnd.set(key, to);
+  }
+
+  const sttEnd = new Map<string, number>();
+  for (const m of [...metrics].sort((a, b) => a.at - b.at)) {
+    if (m.kind !== "stt") continue;
+    const base = windows.get(m.id)!;
+    const who = m.speaker?.identity ?? "";
+    const previousEnd = sttEnd.get(who);
+    const audioTo = base.waitFrom ?? base.to;
+    const from = Math.min(previousEnd !== undefined ? Math.max(base.from, previousEnd) : base.from, audioTo);
+    windows.set(m.id, {
+      ...base,
+      from,
+      // The audible part cannot start before the window it sits in.
+      speech: base.speech && { ...base.speech, from: Math.max(base.speech.from, from) },
+    });
+    // Keyed on audio, not on the report: the round trip is not speech, and
+    // clamping the next utterance against it would push it later than it was.
+    sttEnd.set(who, audioTo);
+  }
+
+  return windows;
+}
+
+// ---------------------------------------------------------------------------
+// Transcript lines against the recording
+// ---------------------------------------------------------------------------
+
+/** The little a transcript line has to carry to be placed in time. */
+export interface PlaceableLine {
+  id: string;
+  at: number;
+  identity?: string;
+  via?: string;
+}
+
+/**
+ * When each transcript line was *spoken*, rather than when its transcript
+ * arrived.
+ *
+ * A final transcript is reported after the speech it describes — end of turn,
+ * then the recogniser — so a line's own `at` can sit seconds past the audio.
+ * Highlighting on it lit the line up well after you heard it, which reads as the
+ * transcript lagging the recording.
+ *
+ * The STT metric for that utterance is what knows better: it carries
+ * `audio_duration`, the speech the segment covered. Lines are matched to metrics
+ * by speaker and proximity, each metric claimed once, so two people talking in
+ * one room cannot borrow each other's timing.
+ *
+ * Typed turns are left alone — they never passed through STT, and their `at` is
+ * already the moment they were sent.
+ */
+export function speechStarts(
+  lines: PlaceableLine[],
+  metrics: ConsoleMetric[]
+): Map<string, number> {
+  const starts = new Map<string, number>();
+  const stt = metrics.filter((m) => m.kind === "stt" && (m.audioDuration ?? m.duration));
+  if (stt.length === 0) return starts;
+
+  // The same windows the timeline draws, so a highlighted line and its bar begin
+  // together — including the round trip taken off a one-shot recogniser.
+  const windows = metricWindows(metrics);
+
+  const claimed = new Set<string>();
+  for (const line of lines) {
+    if (line.via === "text") continue;
+
+    let best: ConsoleMetric | undefined;
+    let bestDelta = Number.POSITIVE_INFINITY;
+    for (const metric of stt) {
+      if (claimed.has(metric.id)) continue;
+      const who = metric.speaker?.identity;
+      // Only when both name a speaker: a voice agent's STT metrics name none,
+      // and the line still belongs to whoever was transcribed.
+      if (who && line.identity && who !== line.identity) continue;
+      // A transcript cannot precede the recogniser that produced it by much;
+      // the small negative slack covers the two clocks disagreeing.
+      const delta = line.at - metric.at;
+      if (delta < -250 || delta > SPEECH_MATCH_WINDOW_MS) continue;
+      if (Math.abs(delta) < bestDelta) {
+        best = metric;
+        bestDelta = Math.abs(delta);
+      }
+    }
+
+    if (!best) continue;
+    claimed.add(best.id);
+    const window = windows.get(best.id);
+    // The audible start when the agent reported its padding, else the segment's.
+    const spoken = window ? (window.speech?.from ?? window.from) : best.at;
+    starts.set(line.id, Math.min(line.at, spoken));
+  }
+
+  return starts;
+}
+
+/** How long after its STT metric a transcript line may still belong to it. */
+const SPEECH_MATCH_WINDOW_MS = 4000;
 
 // ---------------------------------------------------------------------------
 // Per-turn tracing
@@ -400,16 +687,24 @@ export function metricRowCells(m: ConsoleMetric): MetricRowCells {
         tps,
         detail: m.cancelled ? "cancelled" : "",
       };
-    case "stt":
+    case "stt": {
+      // What it cost, then what of it was speech: the recogniser is sent the
+      // utterance plus the VAD's padding, and only the first is worth reading as
+      // "how long they talked".
+      const pad = m.vadPadding ? m.vadPadding.prefix + m.vadPadding.silence : 0;
+      const speech = m.audioDuration !== undefined ? Math.max(0, m.audioDuration - pad) : undefined;
       return {
-        latency: "—",
-        latencyLabel: "—",
+        latency: formatSeconds(m.duration),
+        latencyLabel: "recogniser",
         duration: formatSeconds(m.duration),
         audio: formatSeconds(m.audioDuration),
         tokens,
         tps,
-        detail: "",
+        detail: pad
+          ? `speech ${formatSeconds(speech)} · vad padding ${formatSeconds(pad)}`
+          : "",
       };
+    }
     case "eou":
       return {
         latency: formatSeconds(m.endOfUtteranceDelay),
