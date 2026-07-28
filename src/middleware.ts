@@ -13,11 +13,32 @@ const DASHBOARD_PREFIXES = [
   "/billing", "/hub", "/api-docs",
 ];
 
-async function resolveSandboxPort(origin: string, name: string): Promise<number | null> {
+/**
+ * Where the middleware calls its own API. Deliberately NOT `nextUrl.origin`:
+ * that is the address the *browser* used, so on a deployment it is the public
+ * HTTPS hostname, and resolving a sandbox would mean leaving the container,
+ * resolving its own public DNS name from the inside, hairpinning back through
+ * the ingress and trusting its certificate. Where any of that fails the fetch
+ * throws, the port comes back null, and every sandbox renders "not found or
+ * not running" while `/api/sandbox-apps/resolve` answers correctly from
+ * outside.
+ *
+ * Middleware runs on the edge runtime, so `process.env.PORT` is inlined at
+ * build time and is not readable here. `nextUrl.port` carries the real port
+ * whenever the client connected straight to the server (dev on :3010); behind
+ * TLS termination it is empty, and the container listens on 3000 — the port
+ * the Dockerfile sets and exposes.
+ */
+function internalOrigin(request: NextRequest): string {
+  return `http://127.0.0.1:${request.nextUrl.port || "3000"}`;
+}
+
+async function resolveSandboxPort(request: NextRequest, name: string): Promise<number | null> {
   try {
-    const r = await fetch(`${origin}/api/sandbox-apps/resolve?name=${encodeURIComponent(name)}`, {
-      cache: "no-store",
-    });
+    const r = await fetch(
+      `${internalOrigin(request)}/api/sandbox-apps/resolve?name=${encodeURIComponent(name)}`,
+      { cache: "no-store", signal: AbortSignal.timeout(5000) }
+    );
     if (!r.ok) return null;
     const data = await r.json();
     return typeof data.port === "number" ? data.port : null;
@@ -29,17 +50,17 @@ async function resolveSandboxPort(origin: string, name: string): Promise<number 
 export async function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
-  const origin = request.nextUrl.origin;
-
   // --- Sandbox: /sandbox/{name}/* ---
   if (pathname.startsWith("/sandbox/")) {
     const parts = pathname.split("/");
     const name = parts[2];
     if (name) {
-      const port = await resolveSandboxPort(origin, name);
+      const port = await resolveSandboxPort(request, name);
       if (port) {
         const subPath = parts.slice(3).join("/");
-        const target = new URL(`http://localhost:${port}/${subPath}${request.nextUrl.search}`);
+        // 127.0.0.1, not localhost: Node resolves localhost verbatim and may
+        // try ::1 first, which a sandbox bound to 0.0.0.0 never answers.
+        const target = new URL(`http://127.0.0.1:${port}/${subPath}${request.nextUrl.search}`);
         return NextResponse.rewrite(target);
       }
       return new NextResponse(
@@ -57,9 +78,9 @@ export async function middleware(request: NextRequest) {
   const refererSandboxMatch = referer.match(/\/sandbox\/([^/?#]+)/);
   if (refererSandboxMatch) {
     if (!DASHBOARD_PREFIXES.some((p) => pathname.startsWith(p)) && !PUBLIC_PATHS.some((p) => pathname.startsWith(p))) {
-      const port = await resolveSandboxPort(origin, refererSandboxMatch[1]);
+      const port = await resolveSandboxPort(request, refererSandboxMatch[1]);
       if (port) {
-        const target = new URL(`http://localhost:${port}${pathname}${request.nextUrl.search}`);
+        const target = new URL(`http://127.0.0.1:${port}${pathname}${request.nextUrl.search}`);
         return NextResponse.rewrite(target);
       }
     }
