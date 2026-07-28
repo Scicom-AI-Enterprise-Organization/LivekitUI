@@ -1488,6 +1488,13 @@ function createSqliteDb(): Database {
          ON CONFLICT(room) DO UPDATE SET
            room_sid = excluded.room_sid,
            talk_mode = excluded.talk_mode,
+           -- Refreshed, not preserved: a room name gets reused (the agent-assist
+           -- sandbox uses one room per sandbox, SIP rules can funnel every caller
+           -- into one), and this row then describes the newest call. Keeping the
+           -- first call's start left the row claiming a start hours before its own
+           -- audio, which every timeline in the replay is plotted against. For a
+           -- repeat write of the *same* session the value is identical anyway.
+           started_at = excluded.started_at,
            ended_at = excluded.ended_at,
            duration_ms = excluded.duration_ms,
            participants = excluded.participants,
@@ -2672,6 +2679,9 @@ function createPostgresDb(): Database {
          ON CONFLICT (room) DO UPDATE SET
            room_sid = EXCLUDED.room_sid,
            talk_mode = EXCLUDED.talk_mode,
+           -- See the SQLite half: a reused room name means this row describes the
+           -- newest call, so its start has to move with it.
+           started_at = EXCLUDED.started_at,
            ended_at = EXCLUDED.ended_at,
            duration_ms = EXCLUDED.duration_ms,
            participants = EXCLUDED.participants,

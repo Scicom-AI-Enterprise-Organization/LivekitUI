@@ -16,7 +16,22 @@ interface DataTableProps {
   className?: string;
   /** Per-row classes, for state the cells cannot express — selection, say. */
   rowClassName?: (row: Record<string, React.ReactNode>, index: number) => string | undefined;
+  /**
+   * Makes the whole row activate the row's primary action, usually opening it.
+   *
+   * Clicks that land on a control inside the row — a link, a button, the select
+   * checkbox — belong to that control and are ignored here, as is a click that
+   * merely finished selecting text.
+   *
+   * A `<tr>` is not focusable and giving it a link role would cost the table its
+   * row semantics, so a table using this still owes keyboard and screen-reader
+   * users a real link in one of its cells.
+   */
+  onRowClick?: (row: Record<string, React.ReactNode>, index: number) => void;
 }
+
+/** Controls that own their own click, so a row click must not fire as well. */
+const INTERACTIVE = "a,button,input,select,textarea,label,[role='checkbox'],[data-no-row-click]";
 
 export function DataTable({
   columns,
@@ -24,6 +39,7 @@ export function DataTable({
   emptyMessage = "No results.",
   className,
   rowClassName,
+  onRowClick,
 }: DataTableProps) {
   return (
     <Card className={cn("py-0 overflow-hidden", className)}>
@@ -59,8 +75,18 @@ export function DataTable({
                 key={i}
                 className={cn(
                   "border-b last:border-b-0 hover:bg-accent/50 transition-colors",
+                  onRowClick && "cursor-pointer",
                   rowClassName?.(row, i)
                 )}
+                onClick={
+                  onRowClick
+                    ? (event) => {
+                        if ((event.target as HTMLElement).closest(INTERACTIVE)) return;
+                        if (window.getSelection()?.toString()) return;
+                        onRowClick(row, i);
+                      }
+                    : undefined
+                }
               >
                 {columns.map((col) => (
                   <td key={col.key} className={cn("px-4 py-3 text-sm", col.className)}>

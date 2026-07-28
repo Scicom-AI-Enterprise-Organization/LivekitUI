@@ -35,7 +35,7 @@ function findFreePort(start = 3100): Promise<number> {
   });
 }
 
-function isPortFree(port: number): Promise<boolean> {
+export function isPortFree(port: number): Promise<boolean> {
   return new Promise((resolve) => {
     const s = net.createServer();
     s.once("error", () => resolve(false));
@@ -47,28 +47,80 @@ export function getProcessInfo(name: string): SandboxProcess | null {
   return runningProcesses.get(name) || null;
 }
 
-export function isRunning(name: string): boolean {
-  if (runningProcesses.has(name)) return true;
+/**
+ * Where a sandbox records the PID of its dev server.
+ *
+ * The in-memory map is lost whenever the dashboard reloads, and the `/proc` scan
+ * below only exists on Linux — so on macOS a restarted dashboard could neither
+ * see a running sandbox nor stop one. Every redeploy then leaked the old server,
+ * moved to a new port, and left the database pointing at a port nothing was
+ * listening on: the sandbox reads as "not found or not running" while its old
+ * copy is still serving. A PID file is how `agent-runner.ts` already solves the
+ * same problem.
+ */
+function pidFilePath(name: string): string {
+  return path.join(getSandboxesRoot(), name, "sandbox.pid");
+}
 
-  // Fallback: the dashboard may have restarted, losing the in-memory map.
-  // Scan /proc to see if any process has this sandbox's dir as its cwd.
-  const sandboxDir = path.join(getSandboxesRoot(), name);
+function writeSandboxPid(name: string, pid: number): void {
+  try {
+    fs.writeFileSync(pidFilePath(name), String(pid));
+  } catch {}
+}
+
+function readSandboxPid(name: string): number | null {
+  try {
+    const file = pidFilePath(name);
+    if (!fs.existsSync(file)) return null;
+    const pid = parseInt(fs.readFileSync(file, "utf-8").trim(), 10);
+    return Number.isFinite(pid) ? pid : null;
+  } catch {
+    return null;
+  }
+}
+
+function isPidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** PIDs whose cwd is this sandbox's directory. Linux only — `/proc` is the source. */
+function pidsByCwd(sandboxDir: string): number[] {
+  const found: number[] = [];
   try {
     for (const pid of fs.readdirSync("/proc")) {
       if (!/^\d+$/.test(pid)) continue;
       try {
         const cwd = fs.readlinkSync(path.join("/proc", pid, "cwd"));
-        if (cwd === sandboxDir) {
-          // Re-populate the in-memory map so future checks are fast
-          const port = readPortFromCmdline(Number(pid));
-          if (port) {
-            runningProcesses.set(name, { pid: Number(pid), port, logFile: path.join(getLogsDir(), `${name}.log`) });
-          }
-          return true;
-        }
+        if (cwd === sandboxDir || cwd.startsWith(sandboxDir + "/")) found.push(Number(pid));
       } catch {}
     }
   } catch {}
+  return found;
+}
+
+export function isRunning(name: string): boolean {
+  const known = runningProcesses.get(name);
+  if (known && isPidAlive(known.pid)) return true;
+  if (known) runningProcesses.delete(name);
+
+  // Survives a dashboard reload, on every platform.
+  const filePid = readSandboxPid(name);
+  if (filePid && isPidAlive(filePid)) return true;
+
+  // Legacy fallback for a sandbox started before the PID file existed.
+  const sandboxDir = path.join(getSandboxesRoot(), name);
+  for (const pid of pidsByCwd(sandboxDir)) {
+    const port = readPortFromCmdline(pid);
+    if (port) {
+      runningProcesses.set(name, { pid, port, logFile: path.join(getLogsDir(), `${name}.log`) });
+    }
+    return true;
+  }
   return false;
 }
 
@@ -99,9 +151,20 @@ function getSandboxesRoot(): string {
   return dir;
 }
 
-// Symlink-copy from source template dir to per-sandbox dir.
-// We symlink heavy dirs (node_modules, .next) and copy the rest (so each
-// sandbox has its own .env.local, next.config.ts, source code, etc.)
+/**
+ * Copies a template into a sandbox's own directory, symlinking the heavy parts.
+ *
+ * **Template files are refreshed on every deploy.** They used to be skipped when
+ * they already existed, which froze a sandbox at whatever the template looked
+ * like the day it was created: fixing a bug in the template, or adding a route to
+ * it, could never reach an existing sandbox, and Restart looked like it did
+ * nothing. Anything hand-edited inside `data/sandboxes/<name>` is therefore
+ * overwritten — the sandbox directory is a build output, not a place to work.
+ *
+ * `.env.local` is the sandbox's own (written per deploy from its settings), and
+ * `sandbox.pid` belongs to the running process, so neither comes from the
+ * template.
+ */
 function provisionSandboxDir(srcDir: string, dstDir: string) {
   if (!fs.existsSync(dstDir)) fs.mkdirSync(dstDir, { recursive: true });
 
@@ -109,16 +172,18 @@ function provisionSandboxDir(srcDir: string, dstDir: string) {
   // build/compile time, and a shared .next would leak one sandbox's agent
   // name into all others. Each sandbox needs its own build cache.
   const SYMLINK = new Set(["node_modules", ".git"]);
-  const SKIP = new Set([".env.local"]);
+  const SKIP = new Set([".env.local", "sandbox.json", "sandbox.pid", ".next"]);
 
   for (const entry of fs.readdirSync(srcDir)) {
     if (SKIP.has(entry)) continue;
     const src = path.join(srcDir, entry);
     const dst = path.join(dstDir, entry);
 
-    if (fs.existsSync(dst)) continue;
-
     const stat = fs.lstatSync(src);
+
+    // A symlink that is already in place points at the same template dir; there
+    // is nothing to refresh, and replacing it would churn node_modules.
+    if (SYMLINK.has(entry) && fs.existsSync(dst)) continue;
 
     if (SYMLINK.has(entry)) {
       // Symlink large directories so we don't duplicate them
@@ -129,7 +194,11 @@ function provisionSandboxDir(srcDir: string, dstDir: string) {
     }
 
     if (stat.isDirectory()) {
-      // Recursively copy directories
+      // Replaced, not merged: a file the template no longer has would otherwise
+      // linger, and in `app/` a lingering file is a route that still answers.
+      try {
+        fs.rmSync(dst, { recursive: true, force: true });
+      } catch {}
       fs.mkdirSync(dst, { recursive: true });
       for (const sub of fs.readdirSync(src)) {
         copyRecursive(path.join(src, sub), path.join(dst, sub));
@@ -210,6 +279,15 @@ export async function deploySandbox(
     `LIVEKIT_API_KEY=${livekitApiKey}`,
     `LIVEKIT_API_SECRET=${livekitApiSecret}`,
     `LIVEKIT_URL=${livekitWsUrl}`,
+    // The server-to-server address, for a template that calls the SDK from its
+    // own routes (agent-assist lists participants to show a seat as taken). The
+    // public URL above is a browser address and under Docker the container may
+    // not resolve it at all.
+    `LIVEKIT_SERVER_URL=${process.env.LIVEKIT_URL || livekitWsUrl}`,
+    // Its own name, so a template can derive a stable room from it rather than
+    // inventing a random one per visit — which is what lets two people reach the
+    // same call from one link.
+    `SANDBOX_NAME=${name}`,
     `AGENT_NAME=${agentName || ""}`,
     `NEXT_PUBLIC_AGENT_NAME=${agentName || ""}`,
     "",
@@ -217,10 +295,40 @@ export async function deploySandbox(
 
   fs.writeFileSync(path.join(sandboxDir, ".env.local"), envContent);
 
-  // Reset next.config so sandbox runs at root
+  // The same values as a file the template can read at request time.
+  //
+  // `.env.local` alone is not reliable enough for a value the app must get right:
+  // a bundler is free to constant-fold `process.env.AGENT_NAME` into whatever it
+  // knew at compile time, and a sandbox is compiled fresh every deploy while its
+  // environment changes underneath. When that folding goes wrong the symptom is
+  // brutal to diagnose — the process holds the correct value, a newly added route
+  // reads it correctly, and the *existing* route reads empty, so the app quietly
+  // dispatches no agent and transcribes nothing. A `readFileSync` cannot be
+  // folded away.
+  const sandboxConfig = {
+    name,
+    agentName: agentName || "",
+    livekitUrl: livekitWsUrl,
+    livekitServerUrl: process.env.LIVEKIT_URL || livekitWsUrl,
+    apiKey: livekitApiKey,
+    apiSecret: livekitApiSecret,
+  };
+  fs.writeFileSync(
+    path.join(sandboxDir, "sandbox.json"),
+    JSON.stringify(sandboxConfig, null, 2) + "\n"
+  );
+
+  // Reset next.config so sandbox runs at root.
+  //
+  // `devIndicators: false` removes the floating Next.js dev badge. A sandbox is
+  // something you hand to another person — a support agent, a customer on a test
+  // call — and the badge sits over the app's own controls. Sandboxes always run
+  // via `next dev`, so without this it is always there.
   const configContent = `
 import type { NextConfig } from 'next';
-const nextConfig: NextConfig = {};
+const nextConfig: NextConfig = {
+  devIndicators: false,
+};
 export default nextConfig;
 `;
   fs.writeFileSync(path.join(sandboxDir, "next.config.ts"), configContent);
@@ -237,6 +345,7 @@ export default nextConfig;
   child.unref();
 
   runningProcesses.set(name, { pid: child.pid!, port, logFile });
+  writeSandboxPid(name, child.pid!);
 
   // Persist the fresh port so /enter works after the dashboard restarts
   // (in-memory map gets lost; DB is the durable source of truth).
@@ -250,29 +359,29 @@ export default nextConfig;
 }
 
 export function stopSandbox(name: string): void {
+  const kill = (pid: number) => {
+    // The child is detached, so it leads its own process group — killing the
+    // group takes `next dev` and the compiler workers it spawned. Falling back to
+    // the bare PID would leave those holding the port.
+    try { process.kill(-pid, "SIGKILL"); }
+    catch { try { process.kill(pid, "SIGKILL"); } catch {} }
+  };
+
   const proc = runningProcesses.get(name);
   if (proc) {
-    try { process.kill(-proc.pid, "SIGKILL"); }
-    catch { try { process.kill(proc.pid, "SIGKILL"); } catch {} }
+    kill(proc.pid);
     runningProcesses.delete(name);
   }
 
-  // Fallback: the dashboard may have been restarted since the sandbox was
-  // started, losing the in-memory PID. Kill any `next dev` process whose
-  // cwd points at this sandbox's directory so we don't leak.
-  const sandboxDir = path.join(getSandboxesRoot(), name);
-  try {
-    const procDir = "/proc";
-    for (const pid of fs.readdirSync(procDir)) {
-      if (!/^\d+$/.test(pid)) continue;
-      try {
-        const cwd = fs.readlinkSync(path.join(procDir, pid, "cwd"));
-        if (cwd === sandboxDir || cwd.startsWith(sandboxDir + "/")) {
-          try { process.kill(Number(pid), "SIGKILL"); } catch {}
-        }
-      } catch {}
-    }
-  } catch {}
+  // The dashboard may have reloaded since this sandbox started, losing the
+  // in-memory PID. Without this the old server keeps the port and the next
+  // deploy moves to a new one, so the database stops describing reality.
+  const filePid = readSandboxPid(name);
+  if (filePid && filePid !== proc?.pid) kill(filePid);
+  try { fs.unlinkSync(pidFilePath(name)); } catch {}
+
+  // Legacy fallback for anything started before the PID file existed (Linux).
+  for (const pid of pidsByCwd(path.join(getSandboxesRoot(), name))) kill(pid);
 }
 
 export function deleteSandboxDir(name: string): void {

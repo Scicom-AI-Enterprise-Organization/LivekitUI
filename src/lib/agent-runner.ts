@@ -42,6 +42,10 @@ const AGENT_PIP_PACKAGES = [
   "livekit-plugins-elevenlabs",
   "livekit-plugins-silero",
   "livekit-plugins-turn-detector",
+  // The code generator no longer emits Krisp — it is Cloud-only and self-hosted it
+  // just logged `not authorized (404)`; agents use the GTCRN filter from stt_api
+  // instead. Kept installed so agent.py files generated before that change still
+  // import cleanly until they are redeployed.
   "livekit-plugins-noise-cancellation",
   "python-dotenv",
   "aiohttp",
@@ -51,7 +55,8 @@ const AGENT_PIP_PACKAGES = [
   "'stt-api @ git+https://github.com/Scicom-AI-Enterprise-Organization/STT-API.git'",
 ].join(" ");
 
-function getPythonBin(): string {
+/** Exported for anything else that runs Python from this repo's venv. */
+export function getPythonBin(): string {
   // An explicit interpreter wins — useful when the venv lives outside the repo.
   const override = process.env.AGENT_PYTHON_BIN;
   if (override) {

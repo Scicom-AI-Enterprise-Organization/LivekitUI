@@ -730,6 +730,26 @@ interface CallSummaryConfig {
  */
 type TurnDetector = "audio" | "livekit" | "scicom";
 
+/**
+ * Noise cancellation on the agent's audio input.
+ *
+ * `gtcrn` is an ONNX model run in the agent process (`stt_api`), so it works on a
+ * self-hosted server. `krisp` is LiveKit's own plugin, which authorises against
+ * LiveKit Cloud — on a self-hosted server it logs `not authorized (404)` and does
+ * nothing, so it is only worth picking against Cloud.
+ */
+type NoiseCancellation = "none" | "gtcrn" | "krisp";
+const DEFAULT_NOISE_CANCELLATION: NoiseCancellation = "gtcrn";
+
+/** Input sample rate each filter wants. `null` leaves the SDK default alone. */
+const NC_SAMPLE_RATE: Record<NoiseCancellation, number | null> = {
+  none: null,
+  // GTCRN's native rate. Anything else adds two resampler stages whose latency
+  // (56 ms vs 32 ms) dwarfs the model's own.
+  gtcrn: 16000,
+  krisp: null,
+};
+
 interface AgentConfig {
   name: string;
   instructions: string;
@@ -744,6 +764,11 @@ interface AgentConfig {
   /** Base URL of the vLLM engine. Only read when turnDetector is "scicom". */
   eotUrl: string;
   backgroundAudio: string;
+  /**
+   * Which filter cleans the *incoming* audio. Optional because agents saved
+   * before this existed have no value, and they were all emitting Krisp.
+   */
+  noiseCancellation?: NoiseCancellation;
 }
 
 const AGENT_NAME_POOL = [
@@ -781,6 +806,7 @@ You are interacting with the user via voice, and must apply the following rules 
   turnDetector: "audio",
   eotUrl: "",
   backgroundAudio: "none",
+  noiseCancellation: DEFAULT_NOISE_CANCELLATION,
 };
 
 /* ────────────────────────────────────
@@ -1287,6 +1313,76 @@ function ModelsVoiceTab({
           </div>
         )}
       </div>}
+
+      {/* Noise cancellation — applies to incoming audio, so it is not tied to the
+          pipeline mode the way turn detection is. */}
+      <div className="space-y-2">
+        <label className="text-sm font-medium text-foreground">Noise cancellation</label>
+        <p className="text-xs text-muted-foreground">
+          Cleans the caller&apos;s audio before the agent hears it. Browser microphones
+          already arrive with WebRTC suppression applied — phone calls do not, which is
+          where this earns its keep.
+        </p>
+        <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+          <button
+            onClick={() => onChange({ noiseCancellation: "gtcrn" })}
+            className={`rounded-lg border px-4 py-3 text-left text-sm transition-colors ${
+              (config.noiseCancellation ?? DEFAULT_NOISE_CANCELLATION) === "gtcrn"
+                ? "border-primary bg-primary/5 text-foreground"
+                : "border-border text-muted-foreground hover:border-foreground/20"
+            }`}
+          >
+            <div className="font-medium">GTCRN (self-hosted)</div>
+            <div className="text-xs text-muted-foreground mt-0.5">
+              ONNX, in-process. +10 dB SNR, 32 ms, 3% of a core.
+            </div>
+          </button>
+          <button
+            onClick={() => onChange({ noiseCancellation: "krisp" })}
+            className={`rounded-lg border px-4 py-3 text-left text-sm transition-colors ${
+              config.noiseCancellation === "krisp"
+                ? "border-primary bg-primary/5 text-foreground"
+                : "border-border text-muted-foreground hover:border-foreground/20"
+            }`}
+          >
+            <div className="font-medium">Krisp BVC</div>
+            <div className="text-xs text-muted-foreground mt-0.5">
+              LiveKit&apos;s plugin. Needs Cloud.
+            </div>
+          </button>
+          <button
+            onClick={() => onChange({ noiseCancellation: "none" })}
+            className={`rounded-lg border px-4 py-3 text-left text-sm transition-colors ${
+              config.noiseCancellation === "none"
+                ? "border-primary bg-primary/5 text-foreground"
+                : "border-border text-muted-foreground hover:border-foreground/20"
+            }`}
+          >
+            <div className="font-medium">Off</div>
+            <div className="text-xs text-muted-foreground mt-0.5">
+              Whatever the caller&apos;s device sent.
+            </div>
+          </button>
+        </div>
+
+        {config.noiseCancellation === "krisp" && (
+          <p className="text-xs text-muted-foreground">
+            Krisp NC/BVC authorises against LiveKit Cloud. On this self-hosted server the
+            plugin loads, logs{" "}
+            <code className="rounded bg-muted px-1 py-0.5">
+              noise cancellation is not authorized (404)
+            </code>{" "}
+            and passes audio through unfiltered — pick GTCRN unless you are pointing this
+            agent at Cloud.
+          </p>
+        )}
+        {(config.noiseCancellation ?? DEFAULT_NOISE_CANCELLATION) === "gtcrn" && (
+          <p className="text-xs text-muted-foreground">
+            Sets the agent&apos;s input to 16 kHz, the model&apos;s native rate — which is
+            also what the STT and the VAD want.
+          </p>
+        )}
+      </div>
 
       {/* Background audio */}
       <div className="space-y-2">
@@ -2250,6 +2346,14 @@ function generateAgentCode(
   const agentSlug = config.name.replace(/\s+/g, "-");
   const lang = languageMap[config.sttLanguage] || config.sttLanguage;
 
+  // Which filter cleans the incoming audio. Agents saved before this was
+  // selectable have no value and were all emitting Krisp — but Krisp never did
+  // anything on a self-hosted server, so they read as the local default rather
+  // than keeping a filter that logs `not authorized (404)` and passes audio
+  // through. Declared up here because the import list depends on it.
+  const noiseCancellation: NoiseCancellation =
+    config.noiseCancellation ?? DEFAULT_NOISE_CANCELLATION;
+
   // Resolve each model through the provider list so custom OpenAI-compatible
   // endpoints emit their own base_url / api_key. Direct plugins are used (e.g.
   // openai.STT) instead of inference.*, which would require LiveKit Cloud.
@@ -2443,11 +2547,14 @@ ${payloadCode}
     "        "
   );
 
-  // Both text detectors expose the same MultilingualModel(); only their import
-  // differs. The audio one is a different class entirely.
+  // A text detector reports nothing about itself, so it is wrapped to be timed —
+  // see the generated `TimedTurnDetector`. The audio one must be handed over bare:
+  // `AgentActivity` picks its streaming path by `isinstance`, and it already
+  // reports a metric per prediction.
+  const usesTextEou = !isRealtime && !usesAudioEou;
   const turnDetectionExpr = usesAudioEou
     ? `inference.TurnDetector(version="v1-mini")`
-    : "MultilingualModel()";
+    : "TimedTurnDetector(MultilingualModel(), ctx)";
 
   let sessionBlock: string;
   if (isRealtime) {
@@ -2493,6 +2600,7 @@ ${payloadCode}
   // metrics as JSON from a background task.
   topImportLines.push("import asyncio");
   topImportLines.push("import json");
+  if (usesTextEou) topImportLines.push("import time");
   topImportLines.push("from dataclasses import asdict, is_dataclass");
   if (hasCallSummary) {
     topImportLines.push("from datetime import UTC, datetime");
@@ -2518,7 +2626,11 @@ ${payloadCode}
     // dependency of livekit-agents — no plugin package, no model download.
     agentImports.push("inference");
   }
-  agentImports.push("room_io");
+  // Only needed for the audio-input options below, so skip it when nothing
+  // configures the input — an unused import trips flake8 in the generated file.
+  if (noiseCancellation !== "none") {
+    agentImports.push("room_io");
+  }
   if (hasAnyTools) {
     agentImports.push("RunContext", "ToolError", "function_tool");
   }
@@ -2682,9 +2794,42 @@ async def _on_session_end_func(ctx: JobContext) -> None:
 
   // Collect plugins used (direct plugins, not inference) so self-hosted users
   // don't need LiveKit Cloud credentials.
-  const pluginsSet = new Set<string>(["noise_cancellation", "silero"]);
+  const pluginsSet = new Set<string>(["silero"]);
+  if (noiseCancellation === "krisp") pluginsSet.add("noise_cancellation");
   for (const info of usedModels) pluginsSet.add(info.plugin);
   const pluginsImportStr = Array.from(pluginsSet).sort().map((p) => `    ${p},\n`).join("");
+
+  // `AudioInputOptions.noise_cancellation` takes either Krisp's Cloud-authorised
+  // options or any `rtc.FrameProcessor`, and only the first is gated — which is what
+  // lets the self-hosted filter work with no entitlement, key or external service.
+  // Unlike the remote turn detector, importing it does nothing at module scope; the
+  // weights load on first use and are shared across streams.
+  const noiseCancellationImport =
+    noiseCancellation === "gtcrn"
+      ? "from stt_api.livekit_plugin.noise_cancellation import GTCRN\n"
+      : "";
+
+  // A selector rather than one instance: each participant stream needs its own
+  // model state. Krisp keeps its telephony-specific model for SIP callers.
+  const ncSelector =
+    noiseCancellation === "gtcrn"
+      ? "lambda params: GTCRN()"
+      : noiseCancellation === "krisp"
+        ? "lambda params: noise_cancellation.BVCTelephony() if params.participant.kind == rtc.ParticipantKind.PARTICIPANT_KIND_SIP else noise_cancellation.BVC()"
+        : "";
+  const ncRate = NC_SAMPLE_RATE[noiseCancellation];
+  const audioInputLines = [
+    ncRate === null ? "" : `                sample_rate=${ncRate},\n`,
+    ncSelector ? `                noise_cancellation=${ncSelector},\n` : "",
+  ].join("");
+  // Nothing to configure on the input? Then don't emit `room_options` at all —
+  // an empty options object would just be noise in the generated file.
+  const roomOptionsBlock = audioInputLines
+    ? `\n        room_options=room_io.RoomOptions(\n` +
+      `            audio_input=room_io.AudioInputOptions(\n` +
+      audioInputLines +
+      `            ),\n        ),`
+    : "";
 
   // Turn detector import. Nothing to emit for the audio detector (it rides in
   // on `inference`, already in the livekit.agents import list) or for realtime,
@@ -2708,9 +2853,74 @@ async def _on_session_end_func(ctx: JobContext) -> None:
       `load_dotenv(".env.local")\n` +
       seed +
       `\nfrom stt_api.livekit_plugin.turn_detector import MultilingualModel  # noqa: E402\n`;
-  } else if (!isRealtime && !usesAudioEou) {
+  } else if (usesTextEou) {
     turnDetectorImport = "from livekit.plugins.turn_detector.multilingual import MultilingualModel\n";
   }
+
+  // A text turn detector emits no metrics of its own — the ONNX runner times
+  // itself and drops the number into a debug log — so a session using one drew
+  // no turn detection on the metrics timeline at all. The audio detector needs
+  // none of this: it reports a metric per prediction and the session forwards it.
+  const turnDetectorTimerBlock = usesTextEou
+    ? `
+
+class TimedTurnDetector:
+    """Times a text turn detector, so its latency reaches the Console.
+
+    Measured from the caller's side, which is what the turn actually waited on:
+    the user's turn stays open until this returns, IPC or network included.
+
+    Only the *text* detectors may be wrapped. \`AgentActivity\` selects the audio
+    detector's streaming path by \`isinstance\`, so wrapping that one would quietly
+    demote it to text-only detection.
+    """
+
+    def __init__(self, inner: object, ctx: JobContext) -> None:
+        self._inner = inner
+        self._ctx = ctx
+
+    @property
+    def model(self) -> str:
+        return getattr(self._inner, "model", "unknown")
+
+    @property
+    def provider(self) -> str:
+        return getattr(self._inner, "provider", "unknown")
+
+    async def unlikely_threshold(self, language):
+        return await self._inner.unlikely_threshold(language)
+
+    async def supports_language(self, language):
+        return await self._inner.supports_language(language)
+
+    async def predict_end_of_turn(self, chat_ctx, **kwargs) -> float:
+        # **kwargs rather than an explicit \`timeout=None\`: the plugin's own
+        # default is 3 seconds, and forwarding None would remove it.
+        started = time.perf_counter()
+        try:
+            return await self._inner.predict_end_of_turn(chat_ctx, **kwargs)
+        finally:
+            elapsed = time.perf_counter() - started
+            # Shaped like the audio detector's EOTInferenceMetrics, minus
+            # \`detection_delay\`: how long after the speech itself the verdict
+            # landed is audio-relative, and a text model cannot know it.
+            publish_console_metrics(
+                self._ctx,
+                {
+                    "type": "eot_inference_metrics",
+                    "kind": "EOTInferenceMetrics",
+                    "label": f"{self.provider}.{self.model}",
+                    "timestamp": time.time(),
+                    "total_duration": elapsed,
+                    "num_requests": 1,
+                    "metadata": {
+                        "model_name": self.model,
+                        "model_provider": self.provider,
+                    },
+                },
+            )
+`
+    : "";
 
   return `import logging
 
@@ -2721,7 +2931,7 @@ ${agentImportsStr}
 )
 ${endCallImportLine}from livekit.plugins import (
 ${pluginsImportStr})
-${turnDetectorImport}
+${noiseCancellationImport}${turnDetectorImport}
 logger = logging.getLogger("agent-${agentSlug}")
 
 load_dotenv(".env.local")
@@ -2736,6 +2946,10 @@ CONSOLE_METRICS_TOPIC = "${CONSOLE_METRICS_TOPIC}"
 
 def _metrics_to_dict(m: object) -> dict:
     """Best-effort dict for a metrics object across livekit-agents versions."""
+    # Already a payload: metrics this agent measures itself are built as dicts,
+    # and \`vars()\` below raises on one.
+    if isinstance(m, dict):
+        return m
     if is_dataclass(m) and not isinstance(m, type):
         data = asdict(m)
     elif hasattr(m, "model_dump"):
@@ -2769,7 +2983,7 @@ def publish_console_metrics(ctx: JobContext, m: object) -> None:
     except RuntimeError:
         logger.debug("console metrics dropped: no running event loop")
 
-
+${turnDetectorTimerBlock}
 class DefaultAgent(Agent):
     def __init__(self) -> None:
         super().__init__(
@@ -2801,12 +3015,7 @@ ${sessionBlock}
 
     await session.start(
         agent=DefaultAgent(),
-        room=ctx.room,
-        room_options=room_io.RoomOptions(
-            audio_input=room_io.AudioInputOptions(
-                noise_cancellation=lambda params: noise_cancellation.BVCTelephony() if params.participant.kind == rtc.ParticipantKind.PARTICIPANT_KIND_SIP else noise_cancellation.BVC(),
-            ),
-        ),
+        room=ctx.room,${roomOptionsBlock}
     )
 
 

@@ -444,7 +444,12 @@ function SessionReplayPage() {
                 recordings={recordings}
                 dockHeight={dockHeight}
                 audio={audio}
-                emptyHint="This session was recorded without metrics. Agents publish them on the lk.metrics topic — redeploy from the Builder and the next session will have them."
+                // Not always a stale agent: a captured session has no metrics when
+                // no agent was in the room at all, which is what happens when a
+                // sandbox dispatches a worker that is not running. Naming both
+                // causes beats sending someone to the Builder for a worker that
+                // never came from it.
+                emptyHint="No metrics were recorded. Agents publish them on the lk.metrics topic, so this is either an agent deployed before that existed — redeploy it — or a call no agent ever joined."
                 transportEmptyLabel="no audio saved for this session"
               />
             )}

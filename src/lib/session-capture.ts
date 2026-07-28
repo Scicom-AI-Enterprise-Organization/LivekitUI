@@ -1,12 +1,13 @@
 import fs from "fs";
 import path from "path";
-import { ensureDb } from "./db";
+import { ensureDb, type DbConsoleSession } from "./db";
 import { parseConsoleMetric } from "./console-metrics";
 import { saveRecording } from "./console-recordings";
 import {
   SESSION_EVENT_LIMIT,
   SESSION_METRIC_LIMIT,
   SESSION_TRANSCRIPT_LIMIT,
+  dbTimeToIso,
   jsonTail,
   keepsExistingSession,
 } from "./console-sessions";
@@ -143,6 +144,32 @@ function reclaimAbandoned(dir: string, entries: string[]): void {
   }
 }
 
+/**
+ * Is the stored row the *same call* as this capture, rather than an earlier one
+ * that happened to use the same room name?
+ *
+ * A LiveKit room SID identifies the room instance, so two calls in one room name
+ * have different SIDs — that is the authoritative answer whenever both sides have
+ * one. Older rows may not, so the fallback asks whether the stored session was
+ * still running when this capture started.
+ */
+function isSameCall(existing: DbConsoleSession, capture: CaptureFile): boolean {
+  const storedSid = (existing.room_sid || "").trim();
+  const captureSid = (capture.roomSid || "").trim();
+  if (storedSid && captureSid) return storedSid === captureSid;
+
+  const startedAt = new Date(capture.startedAt ?? Date.now()).getTime();
+  // `dbTimeToIso` because the two backends store this differently: a `Date` from
+  // Postgres, `"YYYY-MM-DD HH:MM:SS"` UTC from SQLite, which `new Date()` would
+  // read as local time and shift by the timezone offset.
+  const storedEndIso = existing.ended_at ? dbTimeToIso(existing.ended_at) : "";
+  const storedEnd = storedEndIso ? new Date(storedEndIso).getTime() : null;
+  // No end time means the stored session never finished, so treat it as current.
+  if (!storedEnd) return true;
+  // A second of slack: the observer's clock and the row's are not the same clock.
+  return startedAt <= storedEnd + 1000;
+}
+
 async function adoptOne(dir: string, claim: string): Promise<void> {
   let capture: CaptureFile;
   try {
@@ -167,10 +194,17 @@ async function adoptOne(dir: string, claim: string): Promise<void> {
 
   const db = await ensureDb();
 
-  // A console tab that recorded the same room knows more than the observer does
-  // — it had the local mic and the agent's own view of the session.
+  // A console tab that recorded the same *call* knows more than the observer does
+  // — it had the local mic and the agent's own view of the session. That only
+  // applies to the same call: `console_sessions` is keyed by room name, and a room
+  // name gets reused (the agent-assist sandbox deliberately uses one room per
+  // sandbox, and SIP dispatch rules can route every caller into one room). Without
+  // the `isSameCall` check, the second call in a room was thrown away — its
+  // transcript and metrics discarded while its audio overwrote the first call's,
+  // leaving a history entry whose recording and transcript came from different
+  // conversations.
   const existing = await db.findConsoleSessionByRoom(room);
-  if (existing && keepsExistingSession(existing.source, source)) {
+  if (existing && isSameCall(existing, capture) && keepsExistingSession(existing.source, source)) {
     await attachAudio(dir, capture, agentName, room);
     fs.unlinkSync(claim);
     return;

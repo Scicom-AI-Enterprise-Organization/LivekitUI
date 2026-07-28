@@ -8,7 +8,6 @@ import {
   Loader2,
   Mic,
   Phone,
-  PlayCircle,
   Radio,
   RefreshCw,
   Search,
@@ -297,7 +296,8 @@ function SessionHistoryPage() {
     { key: "duration", label: "Duration" },
     { key: "mode", label: "Talk via" },
     { key: "contents", label: "Captured" },
-    { key: "actions", label: "", className: "text-right" },
+    // Delete is all that is left in there, so a member gets no column at all.
+    ...(canManage ? [{ key: "actions", label: "", className: "text-right w-10" }] : []),
   ];
 
   const tableData = sessions.map((session, index) => ({
@@ -316,15 +316,20 @@ function SessionHistoryPage() {
         aria-label={`Select session ${session.room}`}
       />
     ) : null,
+    // The row itself opens the session; this is the same destination as a real
+    // link, which is what keyboard and screen-reader users have to reach it by.
     started: (
-      <span className="text-foreground">
+      <Link
+        href={`/sessions/history/${session.id}`}
+        className="font-medium text-foreground hover:text-primary"
+      >
         {new Date(session.startedAt).toLocaleString(undefined, {
           month: "short",
           day: "numeric",
           hour: "2-digit",
           minute: "2-digit",
         })}
-      </span>
+      </Link>
     ),
     agent: (
       <Link
@@ -370,27 +375,19 @@ function SessionHistoryPage() {
         metrics
       </span>
     ),
-    actions: (
-      <div className="flex items-center justify-end gap-1">
-        <Button variant="outline" size="sm" asChild>
-          <Link href={`/sessions/history/${session.id}`}>
-            <PlayCircle className="size-3.5" />
-            Open
-          </Link>
+    actions: canManage ? (
+      <div className="flex items-center justify-end">
+        <Button
+          variant="ghost"
+          size="icon-xs"
+          className="text-muted-foreground hover:text-destructive"
+          onClick={() => setPendingDelete(session)}
+          title="Delete session"
+        >
+          <Trash2 className="size-3.5" />
         </Button>
-        {canManage && (
-          <Button
-            variant="ghost"
-            size="icon-xs"
-            className="text-muted-foreground hover:text-destructive"
-            onClick={() => setPendingDelete(session)}
-            title="Delete session"
-          >
-            <Trash2 className="size-3.5" />
-          </Button>
-        )}
       </div>
-    ),
+    ) : null,
   }));
 
   return (
@@ -527,6 +524,10 @@ function SessionHistoryPage() {
         <DataTable
           columns={columns}
           data={tableData}
+          onRowClick={(_row, index) => {
+            const session = sessions[index];
+            if (session) router.push(`/sessions/history/${session.id}`);
+          }}
           rowClassName={(row) => (row.__selected ? "bg-primary/5" : undefined)}
           emptyMessage={
             loading

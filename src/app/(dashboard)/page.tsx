@@ -54,7 +54,6 @@ interface Overview {
   live: { available: boolean; rooms: number; participants: number; agents: number };
   unavailable: {
     platforms: string | null;
-    topCountries: string;
     connectionTypes: string;
   };
 }
@@ -242,7 +241,7 @@ export default function OverviewPage() {
       <div className="flex-1 overflow-y-auto">
         {/* Connection Stats */}
         <Section title="Connection Stats">
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
             {/* Connection Success */}
             <Card className="py-0">
               <CardContent className="p-4">
@@ -340,13 +339,6 @@ export default function OverviewPage() {
                 )}
               </CardContent>
             </Card>
-
-            {/* Top Countries */}
-            <Unavailable
-              label="Top Countries"
-              reason={overview?.unavailable.topCountries ?? ""}
-              infoText={overview?.unavailable.topCountries ?? undefined}
-            />
           </div>
         </Section>
 

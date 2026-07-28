@@ -15,6 +15,7 @@ import {
   formatCount,
   formatSeconds,
   metricRowCells,
+  metricSpeakerLabel,
   percentile,
   type ConsoleMetric,
   type MetricKind,
@@ -96,10 +97,12 @@ export function MetricsPanel({
     .map((m) => m.ttft!);
   const ttfbs = metrics.filter((m) => m.kind === "tts" && m.ttfb !== undefined).map((m) => m.ttfb!);
   const totals = traces.map((t) => t.total).filter((t) => t > 0);
-  // The turn detector's own inference time, else the session's EOU delay.
+  // The turn detector's own inference time, else the session's EOU delay. A text
+  // detector reports no detection delay, only the round trip it measured.
   const turnDelays = metrics
-    .filter((m) => m.kind === "eot" && m.detectionDelay !== undefined)
-    .map((m) => m.detectionDelay!);
+    .filter((m) => m.kind === "eot")
+    .map((m) => m.detectionDelay ?? m.totalDuration ?? m.predictionDuration)
+    .filter((value): value is number => value !== undefined);
   const eouDelays = metrics
     .filter((m) => m.kind === "eou" && m.endOfUtteranceDelay !== undefined)
     .map((m) => m.endOfUtteranceDelay!);
@@ -320,7 +323,17 @@ export function MetricsPanel({
                           {METRIC_KIND_LABEL[m.kind]}
                         </Badge>
                       </td>
-                      <td className="px-2 py-1.5 text-foreground/70">{m.label}</td>
+                      <td className="px-2 py-1.5 text-foreground/70">
+                        {/* Who it measures, when the session had more than one
+                            speaker — an assist call transcribes two people and
+                            the label alone cannot tell them apart. */}
+                        {metricSpeakerLabel(m) && (
+                          <span className="mr-1.5 rounded bg-muted px-1 py-0.5 text-[10px] text-muted-foreground">
+                            {metricSpeakerLabel(m)}
+                          </span>
+                        )}
+                        {m.label}
+                      </td>
                       <td className="px-2 py-1.5 text-foreground/80" title={cells.latencyLabel}>
                         {cells.latency}
                       </td>

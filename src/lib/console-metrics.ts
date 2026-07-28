@@ -25,10 +25,27 @@ export type MetricKind =
   | "vad"
   | "unknown";
 
+/**
+ * Who a metric is about, when that is not simply "the agent".
+ *
+ * A voice agent has one speaker and never sets this. The agent-assist worker
+ * runs an `AgentSession` per human on the same room, so its STT and turn
+ * detection measure two different people and say which — otherwise a
+ * conversation with two speakers draws as one lane, and a slow turn cannot be
+ * attributed to the person who caused it.
+ */
+export interface MetricSpeaker {
+  identity?: string;
+  name?: string;
+  /** "agent" (the human taking the call) or "customer", for assist sessions. */
+  role?: string;
+}
+
 export interface ConsoleMetric {
   /** Local id — metrics carry no stable id of their own. */
   id: string;
   kind: MetricKind;
+  speaker?: MetricSpeaker;
   /** Plugin label, e.g. "openai.LLM". */
   label: string;
   /** When the browser received it (ms epoch). */
@@ -74,6 +91,35 @@ function num(v: unknown): number | undefined {
 
 function str(v: unknown): string | undefined {
   return typeof v === "string" && v.length > 0 ? v : undefined;
+}
+
+function speakerOf(v: unknown): MetricSpeaker | undefined {
+  if (!v || typeof v !== "object" || Array.isArray(v)) return undefined;
+  const raw = v as Record<string, unknown>;
+  const speaker: MetricSpeaker = {
+    identity: str(raw.identity),
+    name: str(raw.name),
+    role: str(raw.role),
+  };
+  return speaker.identity || speaker.name || speaker.role ? speaker : undefined;
+}
+
+/** Short label for a speaker's lane; empty when the metric names no speaker. */
+export function metricSpeakerLabel(m: ConsoleMetric): string {
+  const s = m.speaker;
+  if (!s) return "";
+  return s.name || s.role || s.identity || "";
+}
+
+/**
+ * Identifies the lane a metric belongs in. One lane per kind, split per speaker
+ * once a session has more than one — an assist call transcribes two people and
+ * they get a lane each.
+ */
+export function metricLaneKey(m: ConsoleMetric): string {
+  const s = m.speaker;
+  const who = s ? s.identity || s.name || s.role || "" : "";
+  return who ? `${m.kind}:${who}` : m.kind;
 }
 
 /** Maps a class name ("LLMMetrics") or type tag ("llm_metrics") to a kind. */
@@ -132,6 +178,7 @@ export function parseConsoleMetric(
   return {
     id: `${at}-${seq}`,
     kind,
+    speaker: speakerOf(raw.speaker),
     label: str(raw.label) ?? METRIC_KIND_TITLE[kind],
     at,
     timestamp: num(raw.timestamp),
@@ -374,14 +421,21 @@ export function metricRowCells(m: ConsoleMetric): MetricRowCells {
         detail: `transcription ${formatSeconds(m.transcriptionDelay)} · on_user_turn_completed ${formatSeconds(m.onUserTurnCompletedDelay)}`,
       };
     case "eot":
+      // The audio detector knows how long after the speech its verdict landed;
+      // a text one only knows its own round trip. Reporting the round trip as a
+      // detection delay would be a different measurement, so the label follows
+      // whichever number there is.
       return {
-        latency: formatSeconds(m.detectionDelay),
-        latencyLabel: "detection",
-        duration: formatSeconds(m.predictionDuration),
+        latency: formatSeconds(m.detectionDelay ?? m.totalDuration ?? m.predictionDuration),
+        latencyLabel: m.detectionDelay !== undefined ? "detection" : "inference",
+        duration: formatSeconds(m.predictionDuration ?? m.totalDuration),
         audio: "—",
         tokens: m.numRequests !== undefined ? `${formatCount(m.numRequests)} runs` : "—",
         tps: "—",
-        detail: `total ${formatSeconds(m.totalDuration)} · prediction ${formatSeconds(m.predictionDuration)}`,
+        detail:
+          m.detectionDelay !== undefined
+            ? `total ${formatSeconds(m.totalDuration)} · prediction ${formatSeconds(m.predictionDuration)}`
+            : `round trip ${formatSeconds(m.totalDuration)}`,
       };
     case "interrupt":
       return {

@@ -7,7 +7,9 @@ import {
   METRIC_KIND_TITLE,
   formatClock,
   formatSeconds,
+  metricLaneKey,
   metricRowCells,
+  metricSpeakerLabel,
   type ConsoleMetric,
   type MetricKind,
 } from "@/lib/console-metrics";
@@ -66,6 +68,19 @@ function alpha(hex: string, a: number): string {
 
 /** Metric fields are seconds; the plot is in milliseconds. */
 const ms = (value?: number) => (value ?? 0) * 1000;
+
+/**
+ * One row of the plot: a metric kind, and — for a session that measured more
+ * than one person, which in practice means an agent-assist call — the speaker it
+ * belongs to.
+ */
+interface Lane {
+  key: string;
+  kind: MetricKind;
+  /** Empty for a single-speaker session. */
+  speaker: string;
+  items: { metric: ConsoleMetric; window: MetricWindow }[];
+}
 
 export interface MetricWindow {
   /** Wall-clock instant the work started. */
@@ -196,8 +211,9 @@ export function metricWindows(metrics: ConsoleMetric[]): Map<string, MetricWindo
 
 function tooltipOf(m: ConsoleMetric, { from, to }: MetricWindow): string {
   const cells = metricRowCells(m);
+  const who = metricSpeakerLabel(m);
   return [
-    `${METRIC_KIND_LABEL[m.kind]} · ${m.label}`,
+    `${METRIC_KIND_LABEL[m.kind]}${who ? ` · ${who}` : ""} · ${m.label}`,
     `${formatClock(from)} → ${formatClock(to)}`,
     cells.latency !== "—" ? `${cells.latencyLabel} ${cells.latency}` : null,
     m.kind === "tts" && m.audioDuration !== undefined
@@ -258,20 +274,31 @@ export function MetricsTimeline({
     if (metrics.length === 0) return null;
 
     const windows = metricWindows(metrics);
-    const byLane = new Map<MetricKind, { metric: ConsoleMetric; window: MetricWindow }[]>();
+    const byLane = new Map<string, Lane>();
     let first = Number.POSITIVE_INFINITY;
     let last = Number.NEGATIVE_INFINITY;
 
     for (const metric of metrics) {
       const window = windows.get(metric.id) ?? { from: metric.at, to: metric.at };
-      const bucket = byLane.get(metric.kind) ?? [];
-      bucket.push({ metric, window });
-      byLane.set(metric.kind, bucket);
+      const key = metricLaneKey(metric);
+      let lane = byLane.get(key);
+      if (!lane) {
+        lane = { key, kind: metric.kind, speaker: metricSpeakerLabel(metric), items: [] };
+        byLane.set(key, lane);
+      }
+      lane.items.push({ metric, window });
       first = Math.min(first, window.from);
       last = Math.max(last, window.to);
     }
 
-    return { first, last, byLane };
+    // Kinds top-to-bottom in the order a turn happens. Within a kind, one lane
+    // per speaker in the order they first spoke — a stable sort, so the Map's
+    // insertion order carries that through.
+    const lanes = [...byLane.values()].sort(
+      (a, b) => LANE_ORDER.indexOf(a.kind) - LANE_ORDER.indexOf(b.kind)
+    );
+
+    return { first, last, lanes };
   }, [metrics]);
 
   const model =
@@ -309,7 +336,7 @@ export function MetricsTimeline({
 
   if (!model || !grouped) return null;
 
-  const lanes = LANE_ORDER.filter((kind) => (grouped.byLane.get(kind)?.length ?? 0) > 0);
+  const lanes = grouped.lanes;
 
   const playheadPct =
     playheadAt != null && playheadAt >= model.start && playheadAt <= model.end
@@ -350,20 +377,29 @@ export function MetricsTimeline({
               <span className="truncate">Agent</span>
             </div>
           )}
-          {lanes.map((kind) => (
+          {lanes.map((lane) => (
             <div
-              key={kind}
-              title={METRIC_KIND_TITLE[kind]}
+              key={lane.key}
+              title={
+                lane.speaker
+                  ? `${METRIC_KIND_TITLE[lane.kind]} · ${lane.speaker}`
+                  : METRIC_KIND_TITLE[lane.kind]
+              }
               className="flex h-5 items-center gap-1.5 font-mono text-[10px] uppercase tracking-wide text-muted-foreground"
             >
               <span
                 className="size-2 shrink-0 rounded-sm"
-                style={{ backgroundColor: KIND_COLOR[kind] }}
+                style={{ backgroundColor: KIND_COLOR[lane.kind] }}
               />
-              <span className="truncate">{METRIC_KIND_LABEL[kind]}</span>
-              <span className="text-muted-foreground/60">
-                {grouped.byLane.get(kind)?.length ?? 0}
-              </span>
+              <span className="shrink-0">{METRIC_KIND_LABEL[lane.kind]}</span>
+              {/* Truncates before the kind does: which measurement this is
+                  matters more than whose it was, and the title has both. */}
+              {lane.speaker && (
+                <span className="truncate text-muted-foreground/70 normal-case">
+                  {lane.speaker}
+                </span>
+              )}
+              <span className="ml-auto shrink-0 text-muted-foreground/60">{lane.items.length}</span>
             </div>
           ))}
         </div>
@@ -400,12 +436,12 @@ export function MetricsTimeline({
             </div>
           )}
 
-          {lanes.map((kind) => {
-            const laneMetrics = grouped.byLane.get(kind) ?? [];
-            const color = KIND_COLOR[kind];
+          {lanes.map((lane) => {
+            const laneMetrics = lane.items;
+            const color = KIND_COLOR[lane.kind];
 
             return (
-              <div key={kind} className="relative h-5 rounded bg-muted/50">
+              <div key={lane.key} className="relative h-5 rounded bg-muted/50">
                 {/* Recorded span, so it is obvious what the audio covers */}
                 {audioPct && (
                   <div

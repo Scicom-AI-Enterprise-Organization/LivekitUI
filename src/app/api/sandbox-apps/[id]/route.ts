@@ -3,6 +3,7 @@ import { getSession } from "@/lib/auth";
 import { getRuntimeConfig } from "@/lib/runtime-config";
 import { ensureDb } from "@/lib/db";
 import { deploySandbox, stopSandbox } from "@/lib/sandbox";
+import { ASSIST_TEMPLATE, deployAssistWorker, normalizeAssistConfig } from "@/lib/agent-assist";
 
 export async function GET(
   _req: NextRequest,
@@ -64,11 +65,36 @@ export async function PATCH(
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
 
-  await db.updateSandboxAppSettings(parseInt(id, 10), JSON.stringify(settings));
+  const incoming = settings as Record<string, unknown>;
+
+  // The assist config is what the worker runs on, so it is validated here rather
+  // than trusted from the dialog — every field of it ends up in the worker's
+  // environment.
+  if (app.template === ASSIST_TEMPLATE && incoming.assist) {
+    incoming.assist = normalizeAssistConfig(incoming.assist);
+  }
+
+  await db.updateSandboxAppSettings(parseInt(id, 10), JSON.stringify(incoming));
+
+  // A worker this sandbox owns has to be redeployed too: its models, turn
+  // detector and prompt live in its `.env.local`, which is only written at
+  // deploy. Saving the dialog and seeing nothing change would be the bug.
+  let workerWarning: string | null = null;
+  const ownedWorker = typeof incoming.assistWorker === "string" ? incoming.assistWorker : "";
+  if (app.template === ASSIST_TEMPLATE && ownedWorker && incoming.assist) {
+    try {
+      await deployAssistWorker(app.name, normalizeAssistConfig(incoming.assist), {
+        email: session.email,
+        name: `${session.firstName} ${session.lastName}`.trim() || session.email,
+      });
+    } catch (err) {
+      workerWarning = err instanceof Error ? err.message : String(err);
+    }
+  }
 
   // Always redeploy so .env.local reflects the saved settings (agent name,
   // etc.) and NEXT_PUBLIC_* env vars are re-inlined into the dev build.
-  const newDispatch = (settings as { agentDispatch?: string }).agentDispatch || "";
+  const newDispatch = (incoming.agentDispatch as string) || "";
   const agentName = newDispatch === "__auto__" ? "" : newDispatch;
   try {
     stopSandbox(app.name);
@@ -81,8 +107,8 @@ export async function PATCH(
       agentName
     );
   } catch (err) {
-    return NextResponse.json({ success: true, warning: String(err) });
+    return NextResponse.json({ success: true, warning: String(err), workerWarning });
   }
 
-  return NextResponse.json({ success: true, redeployed: true });
+  return NextResponse.json({ success: true, redeployed: true, workerWarning });
 }

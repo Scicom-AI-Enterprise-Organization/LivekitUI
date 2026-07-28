@@ -52,6 +52,12 @@ Two things about the audio window are easy to get wrong:
 
 `MetricsPanel` looks windows up from the same function, so a row highlights and seeks over exactly the span its bar covers.
 
+### A lane per speaker
+
+A metric may carry a `speaker` (identity, name, role), and `metricLaneKey()` — not `kind` — is what buckets the plot. A voice agent measures one person and never sets it; an agent-assist call runs an `AgentSession` per human on **one room topic**, so without it a conversation between two people drew a single STT lane and a slow turn could not be attributed to whoever caused it. Kinds still read top-to-bottom in `LANE_ORDER`; within a kind, one lane per speaker in the order they first spoke (the sort is stable, so the Map's insertion order carries that).
+
+The turn-detector lane is the one to be careful with. The audio detector (`inference.TurnDetector`) reports `detection_delay` — how long after the speech its verdict landed — and the bar's solid head is that wait. A **text** detector has no audio-relative number to report, only the round trip it measured, so it fills `total_duration` alone and the bar is drawn hollow; `metricRowCells` relabels its latency "inference" rather than passing a round trip off as a detection delay.
+
 ### Transcript lines
 
 A `TranscriptLine` carries `via: "voice" | "text"`. Typed turns never pass through STT, so they produce no transcription and have to be collected from the chat topic (`lk.chat`) — the console merges `useChat()` messages into the transcript, and the observer registers the same topic. Panels mark them, since a transcript read as evidence of what was *heard* shouldn't silently include what was typed.

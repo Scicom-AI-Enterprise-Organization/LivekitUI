@@ -1,13 +1,14 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { toast } from "sonner";
 import { TopBar } from "@/components/livekit/top-bar";
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import {
-  Info,
   AudioLines,
   Video,
+  Headphones,
   Loader2,
   Trash2,
   Code,
@@ -22,7 +23,6 @@ import {
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { Alert, AlertTitle, AlertDescription } from "@/components/ui/alert";
 import { useRuntimeConfig } from "@/components/runtime-config-provider";
 import {
   Collapsible,
@@ -37,6 +37,13 @@ import {
   DialogDescription,
   DialogFooter,
 } from "@/components/ui/dialog";
+import { AssistSettings } from "@/components/livekit/assist-settings";
+import {
+  ASSIST_TEMPLATE,
+  DEFAULT_ASSIST_CONFIG,
+  type AssistWorkerConfig,
+} from "@/lib/agent-assist-config";
+import type { Provider } from "@/lib/providers";
 
 const templates = [
   {
@@ -54,6 +61,14 @@ const templates = [
     icon: Video,
     href: "/sandboxes/meet",
     template: "meet",
+  },
+  {
+    name: "Agent assist",
+    description:
+      "Two people on one call, transcribed live, with real-time suggestions for the one taking it",
+    icon: Headphones,
+    href: "/sandboxes/agent-assist",
+    template: ASSIST_TEMPLATE,
   },
 ];
 
@@ -87,6 +102,10 @@ function CopyCommand({ command }: { command: string }) {
 
 interface SandboxSettings {
   agentDispatch?: string; // "" or "__auto__" for auto-dispatch
+  /** agent-assist only: what its worker runs on. */
+  assist?: AssistWorkerConfig;
+  /** agent-assist only: the worker this sandbox deployed, if it deployed one. */
+  assistWorker?: string;
   capabilities?: {
     camera?: boolean;
     screenShare?: boolean;
@@ -132,10 +151,17 @@ function EditSandboxDialog({
     darkLogo: "",
   });
   const [agents, setAgents] = useState<{ agentName: string }[]>([]);
+  const [providers, setProviders] = useState<Provider[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [optionalOpen, setOptionalOpen] = useState(false);
   const [appearanceOpen, setAppearanceOpen] = useState(false);
+
+  const isAssist = app.template === ASSIST_TEMPLATE;
+  // A worker the sandbox dispatches but did not deploy — one assist worker can
+  // serve many of these sandboxes, each in its own room.
+  const dispatch = settings.agentDispatch === "__auto__" ? "" : settings.agentDispatch || "";
+  const sharedWorker = isAssist && !settings.assistWorker ? dispatch : "";
 
   useEffect(() => {
     fetch(`/api/sandbox-apps/${app.id}`)
@@ -153,14 +179,40 @@ function EditSandboxDialog({
       .catch(() => {});
   }, [app.id]);
 
+  useEffect(() => {
+    if (!isAssist) return;
+    fetch("/api/providers")
+      .then((res) => res.json())
+      .then((data) => setProviders(data.providers ?? []))
+      .catch(() => {});
+  }, [isAssist]);
+
   const save = async () => {
     setSaving(true);
-    await fetch(`/api/sandbox-apps/${app.id}`, {
+    const res = await fetch(`/api/sandbox-apps/${app.id}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ settings }),
     });
+    const data = await res.json().catch(() => ({}));
     setSaving(false);
+
+    if (!res.ok) {
+      toast.error(data.error || "Could not save the sandbox");
+    } else if (data.workerWarning) {
+      // Settings are saved; the worker itself failed to come back up. Keeping
+      // this on screen matters — the sandbox now points at a worker that is not
+      // running, which looks identical to a silent call.
+      toast.error(`Saved, but the assist worker did not restart: ${data.workerWarning}`, {
+        duration: Infinity,
+        closeButton: true,
+      });
+    } else if (isAssist && settings.assistWorker) {
+      toast.success(`Saved — redeployed ${settings.assistWorker}`);
+    } else {
+      toast.success("Sandbox saved");
+    }
+
     onSaved();
     onClose();
   };
@@ -175,7 +227,11 @@ function EditSandboxDialog({
     }));
   };
 
-  const title = app.template === "meet" ? `Edit video conference` : `Edit web voice agent`;
+  const title = isAssist
+    ? `Edit agent assist`
+    : app.template === "meet"
+      ? `Edit video conference`
+      : `Edit web voice agent`;
 
   return (
     <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
@@ -194,6 +250,47 @@ function EditSandboxDialog({
           </div>
         ) : (
           <div className="space-y-6 py-2">
+            {isAssist ? (
+              <>
+                <div className="rounded-lg border border-border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+                  Both people open{" "}
+                  <a
+                    href={app.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-primary hover:underline"
+                  >
+                    {app.url}
+                  </a>{" "}
+                  and take a seat. Room: <code>assist-{app.name}</code>.
+                  <br />
+                  {settings.assistWorker ? (
+                    <>
+                      Worker: <code>{settings.assistWorker}</code> — this sandbox owns it, so saving
+                      here redeploys it and deleting the sandbox deletes it.
+                    </>
+                  ) : sharedWorker ? (
+                    <>
+                      Dispatching <code>{sharedWorker}</code>, which this sandbox does not own.
+                      Changes below are stored but <strong>not</strong> applied — edit that worker
+                      where it was created, or it keeps running its own settings.
+                    </>
+                  ) : (
+                    <>
+                      No worker is attached to this sandbox, so nothing transcribes the call.
+                      Recreate it with a worker.
+                    </>
+                  )}
+                </div>
+                <AssistSettings
+                  config={settings.assist ?? DEFAULT_ASSIST_CONFIG}
+                  providers={providers}
+                  agents={agents}
+                  onChange={(assist) => setSettings((s) => ({ ...s, assist }))}
+                />
+              </>
+            ) : (
+              <>
             {/* Dispatch to agent */}
             <div className="space-y-2">
               <label className="text-sm font-medium text-foreground">Dispatch to agent</label>
@@ -397,6 +494,8 @@ function EditSandboxDialog({
                 </div>
               </CollapsibleContent>
             </Collapsible>
+              </>
+            )}
           </div>
         )}
 
@@ -588,15 +687,6 @@ export default function SandboxPage() {
           </div>
         </div>
 
-        {/* Info banner */}
-        <Alert>
-          <Info className="size-4" />
-          <AlertTitle>Sandbox</AlertTitle>
-          <AlertDescription>
-            Create sandbox apps from templates to quickly prototype and test your agents. Each sandbox runs locally and is accessible through the dashboard proxy.
-          </AlertDescription>
-        </Alert>
-
         {/* Sandbox apps */}
         <div className="space-y-4">
           <div className="flex items-center justify-between">
@@ -673,21 +763,25 @@ export default function SandboxPage() {
                           >
                             <ScrollText className="size-4" />
                           </Button>
-                          <Button
-                            variant="ghost"
-                            size="icon-sm"
-                            className="text-muted-foreground hover:text-foreground"
-                            title="Source code"
-                            asChild
-                          >
-                            <a
-                              href={`https://github.com/livekit-examples/${app.template}`}
-                              target="_blank"
-                              rel="noopener noreferrer"
+                          {/* agent-assist lives in this repo, not in
+                              livekit-examples, so there is no upstream to link. */}
+                          {app.template !== ASSIST_TEMPLATE && (
+                            <Button
+                              variant="ghost"
+                              size="icon-sm"
+                              className="text-muted-foreground hover:text-foreground"
+                              title="Source code"
+                              asChild
                             >
-                              <Code className="size-4" />
-                            </a>
-                          </Button>
+                              <a
+                                href={`https://github.com/livekit-examples/${app.template}`}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                              >
+                                <Code className="size-4" />
+                              </a>
+                            </Button>
+                          )}
                           <Button
                             variant="ghost"
                             size="icon-sm"

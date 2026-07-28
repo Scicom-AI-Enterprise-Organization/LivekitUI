@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getSession } from "@/lib/auth";
 import { ensureDb } from "@/lib/db";
 import { deployAgent } from "@/lib/agent-runner";
+import { redeployWorkersSourcedFrom } from "@/lib/agent-assist";
 
 export async function POST(
   request: NextRequest,
@@ -49,7 +50,21 @@ export async function POST(
     const deployerName = `${session.firstName} ${session.lastName}`.trim() || session.email;
     const version = await db.addAgentVersion(id, session.email, deployerName);
 
-    return NextResponse.json({ pid, logFile, status: "deployed", version });
+    // An agent-assist worker that takes its models from this agent has them baked
+    // into an `.env.local` written at *its* deploy, so it has to be redeployed too
+    // or "the agent is the source of truth" quietly stops being true.
+    const assistWorkers = await redeployWorkersSourcedFrom(id, {
+      email: session.email,
+      name: deployerName,
+    });
+
+    return NextResponse.json({
+      pid,
+      logFile,
+      status: "deployed",
+      version,
+      assistWorkers: assistWorkers.length > 0 ? assistWorkers : undefined,
+    });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     return NextResponse.json({ error: message }, { status: 500 });

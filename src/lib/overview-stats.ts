@@ -8,10 +8,11 @@
  * (`recordAnalyticsEvent` below), and the page aggregates those.
  *
  * What is genuinely unavailable self-hosted is marked `available: false` rather
- * than reported as zero — see `UNAVAILABLE_SELF_HOSTED`. Client OS, transport
- * protocol and geo-IP are LiveKit Cloud analytics fields; the OSS server never
- * emits them, on any endpoint, so a zero there would be a lie rather than a
- * measurement.
+ * than reported as zero — see `UNAVAILABLE_SELF_HOSTED`. Client OS and transport
+ * protocol are LiveKit Cloud analytics fields; the OSS server never emits them,
+ * on any endpoint, so a zero there would be a lie rather than a measurement.
+ * Geo-IP is the same, and the Overview no longer has a panel for it at all —
+ * a card that only ever says "not reported" is not worth the space.
  */
 import type { Database, DbParticipantSession, DbRoomSession } from "./db";
 
@@ -19,8 +20,6 @@ import type { Database, DbParticipantSession, DbRoomSession } from "./db";
 export const UNAVAILABLE_SELF_HOSTED = {
   platform:
     "Client OS and SDK are only reported by LiveKit Cloud analytics. The OSS server does not record them, so this stays empty unless a participant sets a platform attribute itself — the dashboard does that for sessions it starts.",
-  country:
-    "Geo-IP lookup is a LiveKit Cloud feature. The OSS server exposes a country label on its metrics but always leaves it empty.",
   connectionType:
     "UDP / TCP / TURN-relay breakdown is a LiveKit Cloud analytics field. The OSS server reports peer-connection state but not the transport that was negotiated.",
 } as const;

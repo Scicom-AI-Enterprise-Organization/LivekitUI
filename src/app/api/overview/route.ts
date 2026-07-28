@@ -94,7 +94,6 @@ export async function GET(request: NextRequest) {
       // of a zero, which would read as "measured none".
       unavailable: {
         platforms: stats.platforms.length === 0 ? UNAVAILABLE_SELF_HOSTED.platform : null,
-        topCountries: UNAVAILABLE_SELF_HOSTED.country,
         connectionTypes: UNAVAILABLE_SELF_HOSTED.connectionType,
       },
     });
