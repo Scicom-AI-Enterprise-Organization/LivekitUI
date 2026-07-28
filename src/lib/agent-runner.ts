@@ -45,6 +45,10 @@ const AGENT_PIP_PACKAGES = [
   "livekit-plugins-noise-cancellation",
   "python-dotenv",
   "aiohttp",
+  // Scicom's remote turn detector, offered alongside the stock one in the
+  // builder's Models & Voice tab. Without it, agents configured that way exit
+  // on `ModuleNotFoundError: stt_api`.
+  "'stt-api @ git+https://github.com/Scicom-AI-Enterprise-Organization/STT-API.git'",
 ].join(" ");
 
 function getPythonBin(): string {
@@ -68,8 +72,13 @@ function getPythonBin(): string {
       `  cd example/agent-starter-python\n` +
       `  python3 -m venv venv\n` +
       `  ./venv/bin/pip install ${AGENT_PIP_PACKAGES}\n` +
-      "Then pre-download the model weights so agents start quickly:\n" +
-      "  ./venv/bin/python src/agent.py download-files\n" +
+      // Only the text turn detectors need these; the builder's default audio
+      // one ships its weights in the wheel. Not an optimisation either way:
+      // the text plugin loads with local_files_only=True, so an agent missing
+      // them registers as a worker and then dies on `model_q8.onnx`.
+      "Then download the text turn-detector weights (skip only if every agent\n" +
+      "uses the default audio detector):\n" +
+      "  ./venv/bin/python -m livekit.agents download-files\n" +
       "Already have an interpreter with these packages? Set AGENT_PYTHON_BIN to it."
   );
 }

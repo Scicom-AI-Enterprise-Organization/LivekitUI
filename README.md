@@ -373,12 +373,36 @@ pip install "livekit-agents[mcp]~=1.5" \
   livekit-plugins-groq livekit-plugins-deepgram livekit-plugins-cartesia \
   livekit-plugins-elevenlabs livekit-plugins-silero \
   livekit-plugins-turn-detector livekit-plugins-noise-cancellation \
-  python-dotenv aiohttp
-python src/agent.py download-files
+  python-dotenv aiohttp \
+  "stt-api @ git+https://github.com/Scicom-AI-Enterprise-Organization/STT-API.git"
+python -m livekit.agents download-files   # required, not an optimisation — see below
 cp .env.example .env.local   # edit with LiveKit + OpenAI credentials
 ```
 
 This venv is also what **Deploy agent** runs in the agent builder, so it needs every plugin the builder can generate — one per provider in **Settings > Providers** — plus `silero`, `turn-detector`, and `noise-cancellation` for the voice pipeline and `[mcp]` for MCP tools. A partial install deploys fine but the agent process exits on an `ImportError`; check **View logs** in the builder if an agent goes OFFLINE right after deploying.
+
+`download-files` is needed for the two **text** turn detectors below — not for the default audio one, whose weights ship in the wheel. That plugin loads its ONNX weights with `local_files_only=True` and never fetches them at run time, so without this step an agent using it registers as a worker and *looks* healthy while its inference process dies on `Could not find file "model_q8.onnx"`. It downloads ~460 MB into the HuggingFace cache; the Docker image bakes the same thing in at build time.
+
+### Turn detection
+
+**Models & Voice > Turn detection** picks which end-of-turn model a generated agent uses.
+
+| | **Audio (v1-mini)** — default | Text, multilingual | Text, Scicom vLLM |
+|---|---|---|---|
+| Reads | the audio | the transcript | the transcript |
+| Import | `livekit.agents.inference` | `livekit.plugins.turn_detector.multilingual` | `stt_api.livekit_plugin.turn_detector` |
+| Inference | in-process, native | ONNX, in-process | POST to a vLLM engine |
+| Model weights | in the wheel | ~460 MB via `download-files` | ~67 MB via `download-files` |
+| Extra config | none | none | `LIVEKIT_REMOTE_EOT_URL` |
+
+**Audio (v1-mini)** is [LiveKit's current recommendation](https://docs.livekit.io/agents/logic/turns/turn-detector/) and needs no setup: the weights are compiled into `livekit-local-inference`, which `livekit-agents` already depends on. It works offline with no LiveKit account. Self-hosted always resolves to v1-mini — the more accurate full v1 runs only on LiveKit Cloud, and `TurnDetector()` picks it automatically there.
+
+The two text options share the older plugin, which **LiveKit has deprecated for removal in SDK 2.0**. They also need a transcript, so they are STT-pipeline only. The remote one is [Scicom's drop-in](https://github.com/Scicom-AI-Enterprise-Organization/STT-API/tree/main/stt_api/livekit_plugin/turn_detector): set the vLLM base URL in the builder and the generated agent seeds `LIVEKIT_REMOTE_EOT_URL` itself, or leave it blank to supply the variable from **Settings > Secrets**.
+
+Two traps in the text options:
+
+- **Scicom does not remove the weights requirement.** The stock package registers its *English* runner at import scope unconditionally, and the Scicom plugin imports that package, so the 67 MB English model is still loaded. Only the 393 MB multilingual half is skipped.
+- **The two text plugins read `LIVEKIT_REMOTE_EOT_URL` differently** — Scicom appends `/v1/completions`, the stock plugin appends `/eot/multi`. Setting it globally in Settings > Secrets therefore also flips the stock detector into a remote mode that expects a different API. Prefer the per-agent field unless you mean to change both.
 
 If you already have a suitable interpreter elsewhere, point the dashboard at it instead of creating this venv:
 

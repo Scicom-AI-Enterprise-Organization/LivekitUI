@@ -34,6 +34,42 @@ RUN python3 -m pip install --no-cache-dir --break-system-packages \
     "livekit-plugins-noise-cancellation~=0.2" \
     python-dotenv aiohttp
 
+# Scicom's drop-in turn detector, selectable in the agent builder. Same
+# MultilingualModel API as the stock plugin, but each prediction goes to a vLLM
+# endpoint instead of a local ONNX runner. Installed unconditionally because the
+# builder can emit either variant at any time. Pulls transformers, which it uses
+# for the tokenizer; `git` is already in the system deps above for this.
+RUN python3 -m pip install --no-cache-dir --break-system-packages \
+    "stt-api @ git+https://github.com/Scicom-AI-Enterprise-Organization/STT-API.git"
+
+# ── Turn-detector model weights ──
+# For the two TEXT turn detectors only. The builder's default is now the audio
+# v1-mini model, whose weights are compiled into livekit-local-inference (a
+# livekit-agents dependency) and which downloads nothing — so this layer could
+# go the day the text options are retired, but not before.
+#
+# The stock text plugin loads its weights with local_files_only=True and will
+# NEVER fetch them at run time. Without this step an agent using it logs
+# `Could not find file "model_q8.onnx"` and the inference proc dies; the worker
+# still registers, so it looks healthy while turn detection is broken.
+#
+# This also serves the Scicom variant, which needs no ONNX of its own but does
+# load the same repo's tokenizer at the same revision — already in this cache.
+#
+# HF_HOME is pinned so the build-time cache is the one the agent reads later,
+# rather than depending on $HOME being identical in both phases.
+#
+# Costs ~460 MB and both halves earn their place. english.py registers its
+# runner at import scope with no condition, so ANY import of the package — the
+# Scicom variant imports .base — pulls the 67 MB English model in and the
+# inference proc initialises it. The 393 MB intl model is conditional: its
+# runner is skipped when LIVEKIT_REMOTE_EOT_URL is set. Two registered runners
+# is also why a broken image logs the model_q8.onnx traceback twice.
+# A non-zero exit fails the build, which is right: the alternative is shipping
+# an image whose agents cannot detect end-of-turn.
+ENV HF_HOME=/opt/hf-cache
+RUN python3 -m livekit.agents download-files
+
 WORKDIR /app
 
 # ── Next.js app dependencies ──

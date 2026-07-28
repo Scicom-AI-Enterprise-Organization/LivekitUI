@@ -712,6 +712,24 @@ interface CallSummaryConfig {
 /* ────────────────────────────────────
    Agent Config Type
    ──────────────────────────────────── */
+/**
+ * Which end-of-turn model the generated agent uses.
+ *
+ * - `audio` — LiveKit's v1-mini audio detector, from `livekit.agents.inference`.
+ *   Reads the audio directly, so it needs no transcript. The weights ship
+ *   compiled into `livekit-local-inference`, a hard dependency of
+ *   livekit-agents, so it needs no download and no LiveKit Cloud account.
+ *   Self-hosted always resolves to v1-mini; the full v1 is Cloud-only.
+ * - `livekit` — the older text detector. Same multilingual model as `scicom`,
+ *   run as ONNX in the agent's own inference process; the weights must already
+ *   be in the image (see the `download-files` step in the Dockerfile). LiveKit
+ *   has deprecated this plugin for removal in SDK 2.0.
+ * - `scicom` — Scicom's drop-in for that text detector, which forwards each
+ *   prediction to a vLLM endpoint instead. Needs `LIVEKIT_REMOTE_EOT_URL`, and
+ *   inherits the same 2.0 deprecation because it subclasses the stock plugin.
+ */
+type TurnDetector = "audio" | "livekit" | "scicom";
+
 interface AgentConfig {
   name: string;
   instructions: string;
@@ -722,6 +740,9 @@ interface AgentConfig {
   llmModel: string;
   sttModel: string;
   sttLanguage: string;
+  turnDetector: TurnDetector;
+  /** Base URL of the vLLM engine. Only read when turnDetector is "scicom". */
+  eotUrl: string;
   backgroundAudio: string;
 }
 
@@ -757,6 +778,8 @@ You are interacting with the user via voice, and must apply the following rules 
   llmModel: "openai/gpt-5.4-mini",
   sttModel: "deepgram/nova-3",
   sttLanguage: "en",
+  turnDetector: "audio",
+  eotUrl: "",
   backgroundAudio: "none",
 };
 
@@ -1184,6 +1207,85 @@ function ModelsVoiceTab({
             </Select>
           </div>
         </div>
+      </div>}
+
+      {/* Turn detection — pipeline only; a realtime model does its own turn-taking */}
+      {config.pipelineMode === "stt-llm-tts" && <div className="space-y-2">
+        <label className="text-sm font-medium text-foreground">Turn detection</label>
+        <p className="text-xs text-muted-foreground">
+          Decides when the user has finished speaking.{" "}
+          <a href="https://docs.livekit.io/agents/logic/turns/turn-detector/" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">Learn more</a>
+        </p>
+        <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+          <button
+            onClick={() => onChange({ turnDetector: "audio" })}
+            className={`rounded-lg border px-4 py-3 text-left text-sm transition-colors ${
+              config.turnDetector === "audio"
+                ? "border-primary bg-primary/5 text-foreground"
+                : "border-border text-muted-foreground hover:border-foreground/20"
+            }`}
+          >
+            <div className="font-medium">Audio (v1-mini)</div>
+            <div className="text-xs text-muted-foreground mt-0.5">
+              Hears the speech itself. Nothing to download.
+            </div>
+          </button>
+          <button
+            onClick={() => onChange({ turnDetector: "livekit" })}
+            className={`rounded-lg border px-4 py-3 text-left text-sm transition-colors ${
+              config.turnDetector === "livekit"
+                ? "border-primary bg-primary/5 text-foreground"
+                : "border-border text-muted-foreground hover:border-foreground/20"
+            }`}
+          >
+            <div className="font-medium">Text, multilingual</div>
+            <div className="text-xs text-muted-foreground mt-0.5">
+              Reads the transcript. ONNX, in-process.
+            </div>
+          </button>
+          <button
+            onClick={() => onChange({ turnDetector: "scicom" })}
+            className={`rounded-lg border px-4 py-3 text-left text-sm transition-colors ${
+              config.turnDetector === "scicom"
+                ? "border-primary bg-primary/5 text-foreground"
+                : "border-border text-muted-foreground hover:border-foreground/20"
+            }`}
+          >
+            <div className="font-medium">Text, Scicom vLLM</div>
+            <div className="text-xs text-muted-foreground mt-0.5">
+              Same text model, served remotely.
+            </div>
+          </button>
+        </div>
+
+        {config.turnDetector !== "audio" && (
+          <p className="text-xs text-muted-foreground">
+            Both text options use a plugin LiveKit has deprecated for removal in SDK 2.0, and
+            they need a transcript, so they only work with an STT pipeline.
+          </p>
+        )}
+
+        {config.turnDetector === "scicom" && (
+          <div className="space-y-1.5 pt-1">
+            <span className="text-xs text-muted-foreground block">vLLM engine URL</span>
+            <input
+              value={config.eotUrl}
+              onChange={(e) => onChange({ eotUrl: e.target.value })}
+              placeholder="http://vllm-eot:8000"
+              className="w-full rounded-md border border-border bg-card px-3 py-2 text-sm text-foreground outline-none focus:border-primary focus:ring-1 focus:ring-primary/30"
+            />
+            <p className="text-xs text-muted-foreground">
+              Base URL only — the plugin appends{" "}
+              <code className="rounded bg-muted px-1 py-0.5">/v1/completions</code>. Sets{" "}
+              <code className="rounded bg-muted px-1 py-0.5">LIVEKIT_REMOTE_EOT_URL</code> in the
+              generated agent. Leave blank to take it from{" "}
+              <Link href="/settings/secrets" className="text-primary hover:underline">
+                Settings &gt; Secrets
+              </Link>{" "}
+              instead.
+            </p>
+          </div>
+        )}
       </div>}
 
       {/* Background audio */}
@@ -2183,8 +2285,15 @@ function generateAgentCode(
   const usedModels: ResolvedModel[] = [llmInfo];
   if (!isRealtime) usedModels.push(sttInfo, ttsInfo);
   if (hasCallSummary) usedModels.push(summaryInfo);
-  // `os` is only needed when a provider pulls its API key from a secret.
-  const needsOs = usedModels.some((info) => !!info.apiKeySecret);
+  // Turn detection is only wired up for the STT pipeline — a realtime model
+  // handles its own turn-taking and takes no turn_detection argument. The audio
+  // detector would in principle work there too, since it needs no transcript,
+  // but switching realtime agents onto it is a behaviour change of its own.
+  const usesAudioEou = !isRealtime && config.turnDetector === "audio";
+  const usesRemoteEou = !isRealtime && config.turnDetector === "scicom";
+  // `os` is needed when a provider pulls its API key from a secret, and to set
+  // LIVEKIT_REMOTE_EOT_URL for the remote turn detector.
+  const needsOs = usedModels.some((info) => !!info.apiKeySecret) || usesRemoteEou;
 
   const typeMap: Record<string, string> = {
     string: "str",
@@ -2334,6 +2443,12 @@ ${payloadCode}
     "        "
   );
 
+  // Both text detectors expose the same MultilingualModel(); only their import
+  // differs. The audio one is a different class entirely.
+  const turnDetectionExpr = usesAudioEou
+    ? `inference.TurnDetector(version="v1-mini")`
+    : "MultilingualModel()";
+
   let sessionBlock: string;
   if (isRealtime) {
     sessionBlock = `    session = AgentSession(
@@ -2361,7 +2476,7 @@ ${payloadCode}
         stt=${sttCall},
         llm=${llmCall},
         tts=${ttsCall},
-        turn_handling=TurnHandlingOptions(turn_detection=MultilingualModel()),
+        turn_handling=TurnHandlingOptions(turn_detection=${turnDetectionExpr}),
         vad=ctx.proc.userdata["vad"],
         preemptive_generation=True,
     )`;
@@ -2397,6 +2512,11 @@ ${payloadCode}
   ];
   if (hasMcpServers) {
     agentImports.push("mcp");
+  }
+  if (usesAudioEou) {
+    // The v1-mini weights ride along in livekit-local-inference, a hard
+    // dependency of livekit-agents — no plugin package, no model download.
+    agentImports.push("inference");
   }
   agentImports.push("room_io");
   if (hasAnyTools) {
@@ -2566,6 +2686,32 @@ async def _on_session_end_func(ctx: JobContext) -> None:
   for (const info of usedModels) pluginsSet.add(info.plugin);
   const pluginsImportStr = Array.from(pluginsSet).sort().map((p) => `    ${p},\n`).join("");
 
+  // Turn detector import. Nothing to emit for the audio detector (it rides in
+  // on `inference`, already in the livekit.agents import list) or for realtime,
+  // which takes no turn_detection argument at all. Importing a text plugin in
+  // either case would still spin up an ONNX runner the agent never consults.
+  //
+  // The remote variant is import-order sensitive. stt_api registers a *local*
+  // runner at module scope unless LIVEKIT_REMOTE_EOT_URL is already set, so the
+  // env has to be in place before the import line — which is why load_dotenv
+  // moves up here rather than staying with the rest of the setup below.
+  let turnDetectorImport = "";
+  if (usesRemoteEou) {
+    const seed = config.eotUrl.trim()
+      ? `os.environ.setdefault("LIVEKIT_REMOTE_EOT_URL", "${config.eotUrl.trim().replace(/\/$/, "")}")\n`
+      : "";
+    turnDetectorImport =
+      `\n# ── Remote end-of-turn detection ─────────────────────────────────────────────\n` +
+      `# The plugin below decides at import time whether to register a local ONNX\n` +
+      `# runner — it skips it only when LIVEKIT_REMOTE_EOT_URL is already set. Both\n` +
+      `# lines therefore have to run before the import, not after it.\n` +
+      `load_dotenv(".env.local")\n` +
+      seed +
+      `\nfrom stt_api.livekit_plugin.turn_detector import MultilingualModel  # noqa: E402\n`;
+  } else if (!isRealtime && !usesAudioEou) {
+    turnDetectorImport = "from livekit.plugins.turn_detector.multilingual import MultilingualModel\n";
+  }
+
   return `import logging
 
 ${extraTopImports}from dotenv import load_dotenv
@@ -2575,8 +2721,7 @@ ${agentImportsStr}
 )
 ${endCallImportLine}from livekit.plugins import (
 ${pluginsImportStr})
-from livekit.plugins.turn_detector.multilingual import MultilingualModel
-
+${turnDetectorImport}
 logger = logging.getLogger("agent-${agentSlug}")
 
 load_dotenv(".env.local")
@@ -2712,7 +2857,7 @@ function highlightPython(code: string) {
       html = html.replace(/\b(load_dotenv|logging|getLogger|setLevel|append|connect|start|say|run_app|load|print|super|info|get_job_context)\b/g, '<span style="color:#d2a8ff">$1</span>');
 
       // Class names / types
-      html = html.replace(/\b(Agent|AgentServer|AgentSession|JobContext|JobProcess|MetricsCollectedEvent|RunContext|ToolError|TurnHandlingOptions|EndCallTool|ChatContext|MultilingualModel|VAD|STT|LLM|TTS|RoomOptions|AudioInputOptions)\b/g, '<span style="color:#79c0ff">$1</span>');
+      html = html.replace(/\b(Agent|AgentServer|AgentSession|JobContext|JobProcess|MetricsCollectedEvent|RunContext|ToolError|TurnHandlingOptions|EndCallTool|ChatContext|MultilingualModel|TurnDetector|VAD|STT|LLM|TTS|RoomOptions|AudioInputOptions)\b/g, '<span style="color:#79c0ff">$1</span>');
 
       // function_tool decorator (special case since it has parentheses with args)
       html = html.replace(/\b(function_tool)\b/g, '<span style="color:#79c0ff">$1</span>');
