@@ -54,12 +54,20 @@ function encryptionKey(): Buffer {
   if (explicit) {
     const buf = Buffer.from(explicit, "hex");
     if (buf.length === 32) return buf;
-    throw new Error("API_KEYS_ENC_KEY must be 32 bytes of hex (64 characters)");
+    // These messages reach an operator in the UI (a toast on Settings > Storage,
+    // the API keys page), so they carry the command rather than just the rule.
+    // `Buffer.from(…, "hex")` stops at the first non-hex character instead of
+    // throwing, so a passphrase set here decodes to a short buffer and lands
+    // on exactly the same complaint as a too-short key — hence naming both
+    // possibilities rather than only the length.
+    throw new Error(
+      `API_KEYS_ENC_KEY must be 64 hex characters (32 bytes) — got ${explicit.length} characters decoding to ${buf.length}. Generate one with: openssl rand -hex 32`
+    );
   }
   const session = process.env.SESSION_SECRET;
   if (!session) {
     throw new Error(
-      "Set API_KEYS_ENC_KEY (64 hex chars) or SESSION_SECRET to encrypt issued API key secrets"
+      "Set API_KEYS_ENC_KEY (64 hex chars, `openssl rand -hex 32`) or SESSION_SECRET to encrypt issued API key secrets"
     );
   }
   // Fixed salt: the derived key has to be stable across restarts and across

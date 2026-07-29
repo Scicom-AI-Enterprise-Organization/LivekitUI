@@ -75,7 +75,20 @@ export async function PUT(request: NextRequest) {
   const invalid = validateStorage(next);
   if (invalid) return NextResponse.json({ error: invalid }, { status: 400 });
 
-  await saveStorageSettings({ ...next, secretAccessKey });
+  try {
+    await saveStorageSettings({ ...next, secretAccessKey });
+  } catch (err) {
+    // Saving a new secret access key encrypts it, so a deployment with no
+    // usable API_KEYS_ENC_KEY / SESSION_SECRET fails here and nowhere else —
+    // `loadStorageSettings` treats an unreadable blob as unset, so the page
+    // loads fine and only saving explodes. Uncaught, that reached the UI as a
+    // bare "HTTP 500" and the actual message was only in the container log.
+    // Same shape as POST /api/api-keys, which has always reported it.
+    return NextResponse.json(
+      { error: err instanceof Error ? err.message : "Could not save storage settings" },
+      { status: 500 }
+    );
+  }
 
   const saved = await loadStorageSettings();
   return NextResponse.json({ storage: publicView(saved) });

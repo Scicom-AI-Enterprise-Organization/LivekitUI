@@ -170,13 +170,13 @@ function createToken({
     // Dispatch is applied when the room is created, so carrying this on both
     // participants' tokens is safe — whoever arrives first brings the worker in,
     // and the second join does not add a duplicate.
-    const rc = new RoomConfiguration({ agents: [{ agentName: AGENT_NAME }] });
-    // `tags` makes LiveKit servers older than 1.11 fail to decode the config.
-    const json = rc.toJson();
-    if (json && typeof json === 'object' && !Array.isArray(json)) {
-      delete json.tags;
-    }
-    at.roomConfig = RoomConfiguration.fromJson(json);
+    // Built directly, never round-tripped through toJson()/fromJson(). The
+    // re-parse used to exist to strip `tags` for servers older than 1.11, but a
+    // fresh RoomConfiguration emits no `tags`, so it removed nothing and instead
+    // threw whenever the two calls resolved to different `@livekit/protocol`
+    // copies — a sandbox routinely installs more than one. See the long note in
+    // agent-starter-react's copy of this route for the failure it caused.
+    at.roomConfig = new RoomConfiguration({ agents: [{ agentName: AGENT_NAME }] });
   }
 
   return at.toJwt();

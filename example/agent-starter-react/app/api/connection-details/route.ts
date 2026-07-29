@@ -82,14 +82,25 @@ function createParticipantToken(
   at.addGrant(grant);
 
   if (agentName) {
-    // Use roomConfig without tags to avoid decode errors on older LiveKit servers
-    const rc = new RoomConfiguration({
-      agents: [{ agentName }],
-    });
-    // Strip tags field if present (not supported by server < 1.11)
-    const rcJson = rc.toJson() as Record<string, unknown>;
-    delete rcJson['tags'];
-    at.roomConfig = RoomConfiguration.fromJson(rcJson);
+    // Build the message directly — do NOT round-trip it through
+    // toJson()/fromJson().
+    //
+    // That round-trip was here to strip `tags` for servers older than 1.11, but
+    // a fresh RoomConfiguration never emits `tags` in the first place, so it
+    // deleted nothing and only added a failure mode. `@livekit/protocol` gets
+    // installed more than once under a sandbox (1.45.3 hoisted, 1.44.0 nested
+    // under livekit-client at the time of writing), and when `toJson()` and
+    // `fromJson()` resolve to different copies the re-parse throws on whichever
+    // field the older one has not heard of:
+    //
+    //   cannot decode message livekit.RoomAgentDispatch from JSON:
+    //   key "restartPolicy" is unknown
+    //
+    // The route answers that as a 500 with `error.message`, so the sandbox shows
+    // "There was an error connecting to the agent" and the browser never even
+    // dials LiveKit — which reads like a signalling or token problem and is
+    // neither. Constructing the message once cannot skew against itself.
+    at.roomConfig = new RoomConfiguration({ agents: [{ agentName }] });
   }
 
   return at.toJwt();
