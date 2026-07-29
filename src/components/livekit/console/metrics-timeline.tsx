@@ -41,6 +41,8 @@ import {
 const LANE_ORDER: MetricKind[] = [
   "eou",
   "eot",
+  // Runs on the audio path before anything recognises it.
+  "nc",
   "stt",
   "llm",
   "realtime",
@@ -60,6 +62,7 @@ const KIND_COLOR: Record<MetricKind, string> = {
   tts: "#f59e0b",
   interrupt: "#fb7185",
   vad: "#94a3b8",
+  nc: "#22d3ee",
   unknown: "#64748b",
 };
 
@@ -490,6 +493,13 @@ export function MetricsTimeline({
         <span className="text-muted-foreground/70">
           · STT: solid = speech, faint = vad padding, tail = waiting for the transcript
         </span>
+        {/* Only when the lane is actually drawn — it is off by default, and a
+            legend for a lane that isn't there is noise. */}
+        {lanes.some((lane) => lane.kind === "nc") && (
+          <span className="text-muted-foreground/70">
+            · NC: bar = a window of audio, solid = the compute the filter spent on it
+          </span>
+        )}
         {onSeek && <span className="text-muted-foreground/70">· click or drag to seek</span>}
         {live && <span className="text-muted-foreground/70">· live</span>}
       </div>

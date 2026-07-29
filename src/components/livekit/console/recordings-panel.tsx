@@ -8,7 +8,9 @@ import { formatDuration } from "@/lib/console-metrics";
 import {
   RECORDING_KIND_LABEL,
   formatBytes,
-  recordingSrc,
+  recordingAgent,
+  recordingKey,
+  recordingSrcOf,
   type SavedRecording,
 } from "./session-types";
 
@@ -25,13 +27,19 @@ export function RecordingRow({
 }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const src = recordingSrc(agentName, recording.file);
+  // Addressed by the recording's own agent, not the page's: a session's
+  // recordings are looked up by room, and a room's captures can belong to several
+  // — each observer job names its capture after its own participant identity.
+  // Streaming, downloading and deleting all have to agree on which one, or the
+  // row shown and the bytes acted on are from different calls.
+  const owner = recordingAgent(recording, agentName);
+  const src = recordingSrcOf(recording, agentName);
 
   const remove = async () => {
     setBusy(true);
     setError("");
     try {
-      const res = await fetch(`/api/agents/${encodeURIComponent(agentName)}/recordings`, {
+      const res = await fetch(`/api/agents/${encodeURIComponent(owner)}/recordings`, {
         method: "DELETE",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ file: recording.file }),
@@ -129,7 +137,7 @@ export function SavedAudioList({
         <div className="space-y-2">
           {recordings.map((r) => (
             <RecordingRow
-              key={r.file}
+              key={recordingKey(r)}
               agentName={agentName}
               recording={r}
               onDeleted={onDeleted}

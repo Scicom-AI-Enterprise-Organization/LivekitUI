@@ -62,8 +62,13 @@ export function MetricsPanel({
   audio: TimelineAudio;
   transportEmptyLabel?: string;
 }) {
-  // VAD is off by default: it fires twice a second and says nothing about a turn.
-  const [hidden, setHidden] = useState<MetricKind[]>(["vad"]);
+  // Off by default, both for the same reason: they describe the whole call rather
+  // than a turn, so they cover the plot without answering the question it is read
+  // for. VAD fires twice a second; noise cancellation tiles the entire session in
+  // five-second windows, one per speaker, and next to a 300 ms STT bar it reads as
+  // a solid band. The chips below are the switch — turn NC on to ask whether the
+  // filter is keeping up, then turn it off again.
+  const [hidden, setHidden] = useState<MetricKind[]>(["vad", "nc"]);
 
   const traces = useMemo(() => buildTurnTraces(metrics), [metrics]);
 

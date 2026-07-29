@@ -54,6 +54,8 @@ import { useTimelineAudio } from "@/components/livekit/console/timeline-audio";
 import {
   RECORDING_KIND_LABEL,
   formatClockMs,
+  recordingClock,
+  recordingKey,
   type AgentConfigView,
   type ConsoleEvent,
   type SavedRecording,
@@ -173,6 +175,9 @@ function SessionReplayPage() {
     agentName: session?.agentName ?? "",
     roomName: session?.room ?? null,
     recordings,
+    // Which call this replay is of. A room name can be reused, so its recordings
+    // may span several calls and only one of them shares this session's clock.
+    sessionStartedAt: session?.startedAt ?? null,
   });
 
   const events = session?.events ?? [];
@@ -571,14 +576,18 @@ function PlaybackStage({
         </div>
 
         {recordings.length > 1 && (
-          <Select value={audio.selected.file} onValueChange={audio.choose}>
+          // Keyed by `agent/file`: a room that took more than one call has a
+          // recording per call, all sharing one file name under different agents,
+          // so `file` is neither a unique React key nor an unambiguous value.
+          <Select value={recordingKey(audio.selected)} onValueChange={audio.choose}>
             <SelectTrigger size="sm" className="w-full text-xs">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
               {recordings.map((r) => (
-                <SelectItem key={r.file} value={r.file} className="text-xs">
+                <SelectItem key={recordingKey(r)} value={recordingKey(r)} className="text-xs">
                   {RECORDING_KIND_LABEL[r.kind] ?? r.kind} · {formatDuration(r.durationMs)}
+                  {recordingClock(r) && ` · ${recordingClock(r)}`}
                 </SelectItem>
               ))}
             </SelectContent>

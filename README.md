@@ -164,6 +164,26 @@ curl -s -X POST http://localhost:3000/api/assist-sim \
 `$TOKEN` comes from **Settings > Access tokens**. Full options, and how to run the
 script without the dashboard, are in `example/agent-assist-sim/README.md`.
 
+### Simulating a voice-agent call
+
+The same idea for the **Web Voice Agent** template, where the point is different: a
+voice agent's timeline is the only one with the whole chain in it — speech
+recognised, turn ended, model answered, voice synthesised — and it stays empty
+until somebody talks to the agent.
+
+```bash
+curl -s -X POST http://localhost:3000/api/voice-sim \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"sandbox": "my-voice-app"}' | jq .run.summary
+```
+
+One synthetic caller joins, takes turns with the agent (reading its
+`lk.agent.state` rather than sleeping), and publishes **nothing of its own** — so
+every metric the timeline draws came from the agent, exactly as for a human caller.
+Both simulators are also a flask button on the sandbox's row in **Sandboxes**. See
+`example/agent-voice-sim/README.md`.
+
 To configure a custom domain for production:
 
 ```env

@@ -881,7 +881,15 @@ function ConsoleShell({
 
   // One player for the whole console: the Events timeline, its log and the
   // transcript all seek the same recording, and it keeps playing across tabs.
-  const timelineAudio = useTimelineAudio({ agentName, roomName, recordings });
+  // The start narrows the room's recordings to this call's. A console room is
+  // uniquely named per session so there is only ever one, but the replay view
+  // reads rooms that get reused and the two hosts share this hook.
+  const timelineAudio = useTimelineAudio({
+    agentName,
+    roomName,
+    recordings,
+    sessionStartedAt: startedAt === null ? null : new Date(startedAt).toISOString(),
+  });
 
   /**
    * Takes a turn by typing. The agent's session listens on the chat topic and

@@ -83,6 +83,77 @@ function toProvider(row: DbProvider): Provider {
   };
 }
 
+/** Providers in the shape `resolveModel` wants, from the database. */
+export async function loadProviders(): Promise<Provider[]> {
+  const db = await ensureDb();
+  return (await db.getAllProviders()).map(toProvider);
+}
+
+/** Secret values by name, for turning a provider's `apiKeySecret` into a key. */
+export async function loadSecrets(): Promise<Record<string, string>> {
+  const db = await ensureDb();
+  const secrets: Record<string, string> = {};
+  for (const s of await db.getAllSecrets()) secrets[s.name] = s.value;
+  return secrets;
+}
+
+/**
+ * The TTS an agent speaks with, resolved for a *simulated* speaker to borrow.
+ * There is nothing else to borrow from: a voice is configured on agents, not on
+ * sandboxes, and an assist worker has none at all.
+ */
+export async function ttsFromAgent(
+  agentName: string
+): Promise<{ plugin: string; model: string; baseUrl: string; apiKey: string; format: string; voice: string }> {
+  const db = await ensureDb();
+  const row = await db.findAgentByName(agentName);
+  if (!row) throw new Error(`No agent named "${agentName}".`);
+
+  let ttsModel = "";
+  let ttsVoice = "";
+  try {
+    const config = JSON.parse(row.config || "{}") as Record<string, unknown>;
+    ttsModel = typeof config.ttsModel === "string" ? config.ttsModel : "";
+    ttsVoice = typeof config.ttsVoice === "string" ? config.ttsVoice : "";
+  } catch {}
+  if (!ttsModel) {
+    throw new Error(`"${agentName}" has no TTS configured, so there is no voice to speak with.`);
+  }
+
+  const tts = resolveModel(ttsModel, await loadProviders());
+  const secrets = await loadSecrets();
+  return {
+    plugin: tts.plugin,
+    model: tts.model,
+    baseUrl: tts.baseUrl || "",
+    apiKey: tts.apiKeySecret ? secrets[tts.apiKeySecret] || "" : "",
+    format: tts.audioFormat || "",
+    voice: ttsVoice,
+  };
+}
+
+/**
+ * The agents a simulation can use, and which of them can lend a voice.
+ *
+ * Read from the `agents` table rather than from live workers, so the list is the
+ * things you can name — `/api/agents` also reports ephemeral job identities like
+ * `agent-AJ_…`, which are useless as a choice. `hasVoice` is false for an assist
+ * worker: it is an agent with the speaking half removed, so there is no TTS in it
+ * to borrow.
+ */
+export async function listSimAgents(): Promise<{ name: string; hasVoice: boolean }[]> {
+  const db = await ensureDb();
+  return (await db.getAllAgents())
+    .map((row) => {
+      let ttsModel = "";
+      try {
+        ttsModel = (JSON.parse(row.config || "{}") as { ttsModel?: string }).ttsModel ?? "";
+      } catch {}
+      return { name: row.name, hasVoice: Boolean(ttsModel) };
+    })
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
 export interface SimRequest {
   /** Sandbox to test; supplies the room, the worker to dispatch and the voice. */
   sandbox?: string;
@@ -90,6 +161,13 @@ export interface SimRequest {
   room?: string;
   /** Agent whose TTS the speakers borrow. Defaults to the sandbox's source agent. */
   agent?: string;
+  /**
+   * Per-speaker voices, each naming an agent to borrow one from. Two speakers in
+   * one voice is hard to follow in the recording, and telling them apart by ear is
+   * half of reviewing an assist call.
+   */
+  agentVoice?: string;
+  customerVoice?: string;
   turns?: SimTurn[];
   gapMs?: number;
   warmupMs?: number;
@@ -165,6 +243,22 @@ export async function resolveSim(request: SimRequest): Promise<ResolvedSim> {
   const secrets: Record<string, string> = {};
   for (const s of await db.getAllSecrets()) secrets[s.name] = s.value;
 
+  // Only the voice *string* is taken per speaker, not a whole spec: both speakers
+  // share one TTS client in the script, so two agents on different providers
+  // would need a second one. Same provider, two voices is the case worth having.
+  const voiceOf = async (name?: string) => {
+    if (!name) return ttsVoice;
+    try {
+      return (await ttsFromAgent(name)).voice || ttsVoice;
+    } catch {
+      return ttsVoice;
+    }
+  };
+  const voices = {
+    agent: await voiceOf(request.agentVoice),
+    customer: await voiceOf(request.customerVoice),
+  };
+
   const config = {
     url: process.env.LIVEKIT_URL || "ws://localhost:7880",
     apiKey: process.env.LIVEKIT_API_KEY || "",
@@ -179,9 +273,7 @@ export async function resolveSim(request: SimRequest): Promise<ResolvedSim> {
       baseUrl: tts.baseUrl || "",
       apiKey: tts.apiKeySecret ? secrets[tts.apiKeySecret] || "" : "",
       format: tts.audioFormat || "",
-      // One voice, two speakers: the STT does not care and a second voice would
-      // need a second provider lookup for no test coverage.
-      voices: { agent: ttsVoice, customer: ttsVoice },
+      voices,
     },
     turns: request.turns?.length ? request.turns : DEFAULT_TURNS,
     gapMs: request.gapMs ?? 1500,
@@ -208,12 +300,43 @@ export async function runSim(
   request: SimRequest & { wait?: boolean; timeoutMs?: number }
 ): Promise<SimRun | SimResult> {
   const { config, room, dispatch } = await resolveSim(request);
+  return runSimulator({
+    script: path.join(process.cwd(), "example", "agent-assist-sim", "simulate.py"),
+    config,
+    room,
+    dispatch,
+    wait: request.wait,
+    timeoutMs: request.timeoutMs,
+  });
+}
 
+/**
+ * Runs a simulator script against a config, and reports what it left behind.
+ *
+ * Shared with the voice-agent simulator (`voice-sim.ts`): the two speak to
+ * different things, but starting a detached Python child, keeping its log where a
+ * finished run can still be inspected, and reading its summary back are the same
+ * job either way.
+ */
+export async function runSimulator({
+  script,
+  config,
+  room,
+  dispatch,
+  wait,
+  timeoutMs,
+}: {
+  script: string;
+  config: Record<string, unknown>;
+  room: string;
+  dispatch: string;
+  wait?: boolean;
+  timeoutMs?: number;
+}): Promise<SimRun | SimResult> {
   if (!config.apiKey || !config.apiSecret) {
     throw new Error("LIVEKIT_API_KEY and LIVEKIT_API_SECRET must be set to join a room.");
   }
 
-  const script = path.join(process.cwd(), "example", "agent-assist-sim", "simulate.py");
   if (!fs.existsSync(script)) throw new Error(`Simulator not found at ${script}`);
 
   fs.mkdirSync(simDir(), { recursive: true });
@@ -247,14 +370,14 @@ export async function runSim(
   };
   runs.set(id, run);
 
-  if (!request.wait) return run;
+  if (!wait) return run;
 
-  const timeoutMs = request.timeoutMs ?? 240_000;
+  const limit = timeoutMs ?? 240_000;
   const exitCode = await new Promise<number | null>((resolve) => {
     const timer = setTimeout(() => {
       child.kill("SIGTERM");
       resolve(null);
-    }, timeoutMs);
+    }, limit);
     child.on("close", (code) => {
       clearTimeout(timer);
       resolve(code);

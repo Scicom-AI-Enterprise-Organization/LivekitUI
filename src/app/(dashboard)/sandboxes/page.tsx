@@ -42,6 +42,7 @@ import { AssistSettings } from "@/components/livekit/assist-settings";
 import { AssistSimDialog } from "@/components/livekit/assist-sim-dialog";
 import { CodeBlock } from "@/components/livekit/code-block";
 import {
+  ASSIST_SOURCE_URL,
   ASSIST_TEMPLATE,
   DEFAULT_ASSIST_CONFIG,
   type AssistWorkerConfig,
@@ -654,13 +655,26 @@ export default function SandboxPage() {
     fetchApps();
   }, []);
 
-  // Auto-open edit dialog when URL contains a sandbox name (e.g. /sandboxes/emery)
+  // Open whichever dialog the URL asks for: `/sandboxes/emery` edits that sandbox,
+  // `?simulate=emery` runs a simulated call on it. Read from the URL rather than
+  // only from a click, so either link survives a reload or a paste to a colleague.
+  // One effect for both, and `window.location` rather than `useSearchParams`,
+  // which would need a Suspense boundary around this whole page.
   useEffect(() => {
-    if (!autoEditName || apps.length === 0) return;
-    const match = apps.find(
-      (a) => a.name.toLowerCase() === autoEditName.toLowerCase()
-    );
-    if (match) setEditApp(match);
+    if (apps.length === 0) return;
+    const byName = (name: string) =>
+      apps.find((a) => a.name.toLowerCase() === name.toLowerCase());
+
+    if (autoEditName) {
+      const match = byName(autoEditName);
+      if (match) setEditApp(match);
+    }
+
+    const simulate = new URLSearchParams(window.location.search).get("simulate");
+    if (simulate) {
+      const match = byName(simulate);
+      if (match) setSimApp(match);
+    }
   }, [autoEditName, apps]);
 
   // Update URL without triggering Next.js navigation (no remount/re-fetch)
@@ -670,6 +684,15 @@ export default function SandboxPage() {
   };
   const closeEdit = () => {
     setEditApp(null);
+    window.history.replaceState(null, "", "/sandboxes");
+  };
+
+  const openSim = (app: SandboxApp) => {
+    setSimApp(app);
+    window.history.replaceState(null, "", `/sandboxes?simulate=${encodeURIComponent(app.name)}`);
+  };
+  const closeSim = () => {
+    setSimApp(null);
     window.history.replaceState(null, "", "/sandboxes");
   };
 
@@ -807,39 +830,43 @@ export default function SandboxPage() {
                           >
                             <ScrollText className="size-4" />
                           </Button>
-                          {/* This template needs two people on one link, so it
-                              is the one sandbox you cannot try from a single
-                              browser. The simulator is how it gets tested. */}
-                          {app.template === ASSIST_TEMPLATE && (
+                          {/* Assist needs two people on one link; a voice agent
+                              needs somebody to talk to it before its timeline has
+                              anything in it. Both get a synthetic caller. */}
+                          {(app.template === ASSIST_TEMPLATE ||
+                            app.template === "agent-starter-react") && (
                             <Button
                               variant="ghost"
                               size="icon-sm"
                               className="text-muted-foreground hover:text-foreground"
                               title="Simulate a call"
-                              onClick={() => setSimApp(app)}
+                              onClick={() => openSim(app)}
                             >
                               <FlaskConical className="size-4" />
                             </Button>
                           )}
-                          {/* agent-assist lives in this repo, not in
-                              livekit-examples, so there is no upstream to link. */}
-                          {app.template !== ASSIST_TEMPLATE && (
-                            <Button
-                              variant="ghost"
-                              size="icon-sm"
-                              className="text-muted-foreground hover:text-foreground"
-                              title="Source code"
-                              asChild
+                          {/* agent-assist is not in livekit-examples — it ships
+                              in this repo, so it points at the worker the
+                              dashboard actually deploys. */}
+                          <Button
+                            variant="ghost"
+                            size="icon-sm"
+                            className="text-muted-foreground hover:text-foreground"
+                            title="Source code"
+                            asChild
+                          >
+                            <a
+                              href={
+                                app.template === ASSIST_TEMPLATE
+                                  ? ASSIST_SOURCE_URL
+                                  : `https://github.com/livekit-examples/${app.template}`
+                              }
+                              target="_blank"
+                              rel="noopener noreferrer"
                             >
-                              <a
-                                href={`https://github.com/livekit-examples/${app.template}`}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                              >
-                                <Code className="size-4" />
-                              </a>
-                            </Button>
-                          )}
+                              <Code className="size-4" />
+                            </a>
+                          </Button>
                           <Button
                             variant="ghost"
                             size="icon-sm"
@@ -871,7 +898,13 @@ export default function SandboxPage() {
 
       {/* Log viewer overlay */}
       {logsApp && <LogViewer name={logsApp} onClose={() => setLogsApp(null)} />}
-      {simApp && <AssistSimDialog app={simApp} onClose={() => setSimApp(null)} />}
+      {simApp && (
+        <AssistSimDialog
+          app={simApp}
+          mode={simApp.template === ASSIST_TEMPLATE ? "assist" : "voice"}
+          onClose={closeSim}
+        />
+      )}
 
       {/* Edit sandbox dialog */}
       {editApp && (

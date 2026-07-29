@@ -14,7 +14,9 @@ import { formatDuration } from "@/lib/console-metrics";
 import {
   RECORDING_KIND_LABEL,
   formatClockMs,
-  recordingSrc,
+  recordingClock,
+  recordingKey,
+  recordingSrcOf,
   type SavedRecording,
 } from "./session-types";
 
@@ -25,17 +27,62 @@ import {
  */
 export type TimelineAudio = ReturnType<typeof useTimelineAudio>;
 
+/**
+ * The candidate closest to when the call began, or the first one when there is
+ * nothing to compare against.
+ *
+ * Nearest rather than first: a room that took more than one call has a recording
+ * per call, and only one of them shares a clock with this session's events. The
+ * others are not merely the wrong audio — every marker is positioned through the
+ * selected recording's window, so picking one from hours earlier stretches the
+ * axis across the gap.
+ */
+function nearestToStart(
+  candidates: SavedRecording[],
+  startedAt?: string | null
+): SavedRecording | undefined {
+  if (candidates.length < 2 || !startedAt) return candidates[0];
+  const target = new Date(startedAt).getTime();
+  if (Number.isNaN(target)) return candidates[0];
+
+  let best = candidates[0];
+  let bestGap = Number.POSITIVE_INFINITY;
+  for (const candidate of candidates) {
+    const at = new Date(candidate.startedAt).getTime();
+    // A row with no usable start cannot be ranked; it stays the fallback only.
+    if (Number.isNaN(at)) continue;
+    const gap = Math.abs(at - target);
+    if (gap < bestGap) {
+      best = candidate;
+      bestGap = gap;
+    }
+  }
+  return best;
+}
+
 export function useTimelineAudio({
   agentName,
   roomName,
   recordings,
   /** Play as soon as the audio is ready. Used by the replay view. */
   autoSelectKind = "mixed",
+  sessionStartedAt,
 }: {
   agentName: string;
   roomName: string | null;
   recordings: SavedRecording[];
   autoSelectKind?: string;
+  /**
+   * When the call this view is about began (ISO). Recordings are looked up by
+   * **room**, and a room name can be reused — the assist sandbox uses one room
+   * per sandbox, and a SIP rule can funnel every caller into one — so a session's
+   * room may hold a recording per call. This is what says which of them is *this*
+   * call's. Without it the first row won, which on a reused room meant audio from
+   * a different day: every instant on the plot is mapped through the recording's
+   * window, so the axis stretched to span the gap and the whole session collapsed
+   * into a sliver at one end.
+   */
+  sessionStartedAt?: string | null;
 }) {
   const elRef = useRef<HTMLAudioElement | null>(null);
   /**
@@ -48,7 +95,10 @@ export function useTimelineAudio({
   const pendingSeekRef = useRef<number | null>(null);
   /** Latest position, readable from callbacks that must not re-create on it. */
   const positionRef = useRef(0);
-  const [chosenFile, setChosenFile] = useState<string | null>(null);
+  // Keyed by `agent/file`, not by file: one room's captures can carry the same
+  // file name under different agents, and picking by file alone selected whichever
+  // came first.
+  const [chosenKey, setChosenKey] = useState<string | null>(null);
   const [playing, setPlaying] = useState(false);
   const [positionMs, setPositionMs] = useState(0);
   // Keyed by src so switching recordings can't be read as the new one's length,
@@ -57,22 +107,27 @@ export function useTimelineAudio({
 
   // Prefer this session's mixed recording, else the newest one on record.
   const selected = useMemo(() => {
-    if (chosenFile) {
-      const pick = recordings.find((r) => r.file === chosenFile);
+    if (chosenKey) {
+      const pick = recordings.find((r) => recordingKey(r) === chosenKey);
       if (pick) return pick;
     }
     const ofRoom = recordings.filter((r) => r.room === roomName);
+    const ofKind = ofRoom.filter((r) => r.kind === autoSelectKind);
+    // Of this room's recordings, the one from *this* call — the recorder starts a
+    // moment after the room connects, so the right one is the nearest in time, not
+    // the first on record.
+    const pool = ofKind.length > 0 ? ofKind : ofRoom;
     return (
-      ofRoom.find((r) => r.kind === autoSelectKind) ??
-      ofRoom[0] ??
+      nearestToStart(pool, sessionStartedAt) ??
       recordings.find((r) => r.kind === autoSelectKind) ??
       recordings[0] ??
       null
     );
-  }, [chosenFile, recordings, roomName, autoSelectKind]);
+  }, [chosenKey, recordings, roomName, autoSelectKind, sessionStartedAt]);
 
   const startMs = selected ? new Date(selected.startedAt).getTime() : null;
-  const src = selected ? recordingSrc(agentName, selected.file) : null;
+  // The recording's own agent addresses its bytes; the page's is only a fallback.
+  const src = selected ? recordingSrcOf(selected, agentName) : null;
 
   /**
    * The file's own length wins over the length the recorder wrote down.
@@ -261,8 +316,9 @@ export function useTimelineAudio({
     durationMs,
     window: startMs === null ? null : { start: startMs, end: startMs + durationMs },
     playheadAt: startMs === null ? null : startMs + positionMs,
-    choose: (file: string) => {
-      setChosenFile(file);
+    /** Takes a `recordingKey()`, not a file name. */
+    choose: (key: string) => {
+      setChosenKey(key);
       positionRef.current = 0;
       pendingSeekRef.current = null;
       setPositionMs(0);
@@ -318,15 +374,18 @@ export function TimelineTransport({
       </span>
 
       {recordings.length > 1 && (
-        <Select value={audio.selected.file} onValueChange={audio.choose}>
+        <Select value={recordingKey(audio.selected)} onValueChange={audio.choose}>
           <SelectTrigger size="sm" className="ml-1 h-7 min-w-[220px] text-xs">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
             {recordings.map((r) => (
-              <SelectItem key={r.file} value={r.file} className="text-xs">
+              <SelectItem key={recordingKey(r)} value={recordingKey(r)} className="text-xs">
                 {RECORDING_KIND_LABEL[r.kind] ?? r.kind} · {r.room.slice(-13)} ·{" "}
                 {formatDuration(r.durationMs)}
+                {/* Two calls into one room are the same kind and much the same
+                    length; the clock is what tells them apart. */}
+                {recordingClock(r) && ` · ${recordingClock(r)}`}
               </SelectItem>
             ))}
           </SelectContent>

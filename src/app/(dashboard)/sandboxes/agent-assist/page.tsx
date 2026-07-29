@@ -34,6 +34,7 @@ import {
 import { ChevronDown, Code, Headphones, Info, Loader2, Sparkles } from "lucide-react";
 import { AssistSettings } from "@/components/livekit/assist-settings";
 import {
+  ASSIST_SOURCE_URL,
   ASSIST_TEMPLATE,
   ASSIST_WORKER_SUFFIX,
   DEFAULT_ASSIST_CONFIG,
@@ -319,6 +320,21 @@ export default function AgentAssistTemplatePage() {
                   </div>
                 ))}
               </div>
+            </div>
+
+            <div className="space-y-2">
+              <h3 className="text-sm font-semibold text-foreground">Source code</h3>
+              {/* Not in livekit-examples like the other templates — the worker
+                  ships in this repo, and this is the copy that gets deployed. */}
+              <a
+                href={ASSIST_SOURCE_URL}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex items-center gap-1.5 text-sm text-primary hover:underline"
+              >
+                <Code className="size-3.5" />
+                example/agent-assist-python
+              </a>
             </div>
 
             <div className="space-y-2">

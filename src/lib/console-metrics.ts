@@ -23,6 +23,7 @@ export type MetricKind =
   | "interrupt"
   | "realtime"
   | "vad"
+  | "nc"
   | "unknown";
 
 /**
@@ -81,6 +82,24 @@ export interface ConsoleMetric {
   tokensPerSecond?: number;
   charactersCount?: number;
 
+  // Noise cancellation. The filter runs inline on the audio path and reports
+  // nothing of its own, so the agent times it and sends a rolling summary — one
+  // metric per window of audio rather than one per chunk, which at 20 chunks a
+  // second per stream would bury everything else on the topic.
+  /** Chunks processed in the window. */
+  frames?: number;
+  /** Wall-clock the window covered — what the bar spans. */
+  windowDuration?: number;
+  /** Compute ÷ audio. 1.0 is real time: above it, the filter is falling behind. */
+  rtf?: number;
+  /** Mean and worst time one chunk took. */
+  frameAvg?: number;
+  frameMax?: number;
+  /** Audio in one chunk — 50 ms at the SDK's default `frame_size_ms`. */
+  chunkDuration?: number;
+  /** Rate the filter ran at, which for GTCRN should be its native 16 kHz. */
+  sampleRate?: number;
+
   cancelled?: boolean;
   /**
    * Whether the plugin streamed rather than sending one request. It decides what
@@ -138,6 +157,9 @@ export function metricLaneKey(m: ConsoleMetric): string {
 /** Maps a class name ("LLMMetrics") or type tag ("llm_metrics") to a kind. */
 export function metricKindOf(raw: Record<string, unknown>): MetricKind {
   const hint = `${str(raw.kind) ?? ""} ${str(raw.type) ?? ""}`.toLowerCase();
+  // Matched on "noise", never on a bare "nc": the lane is called NC, but that
+  // substring also lives inside "inference".
+  if (hint.includes("noise") || hint.includes("nc_metrics")) return "nc";
   // "eot" before "eou": both start with "eo" but mean different things.
   if (hint.includes("eot") || hint.includes("end_of_turn")) return "eot";
   if (hint.includes("interruption")) return "interrupt";
@@ -159,6 +181,7 @@ export const METRIC_KIND_LABEL: Record<MetricKind, string> = {
   interrupt: "INTR",
   realtime: "RT",
   vad: "VAD",
+  nc: "NC",
   unknown: "Other",
 };
 
@@ -172,6 +195,7 @@ export const METRIC_KIND_TITLE: Record<MetricKind, string> = {
   interrupt: "Interruptions",
   realtime: "Realtime model",
   vad: "Voice activity (high volume)",
+  nc: "Noise cancellation",
   unknown: "Other",
 };
 
@@ -219,6 +243,13 @@ export function parseConsoleMetric(
     totalTokens: num(raw.total_tokens) ?? num(raw.totalTokens),
     tokensPerSecond: num(raw.tokens_per_second) ?? num(raw.tokensPerSecond),
     charactersCount: num(raw.characters_count) ?? num(raw.charactersCount),
+    frames: num(raw.frames),
+    windowDuration: num(raw.window_duration) ?? num(raw.windowDuration),
+    rtf: num(raw.rtf),
+    frameAvg: num(raw.frame_avg) ?? num(raw.frameAvg),
+    frameMax: num(raw.frame_max) ?? num(raw.frameMax),
+    chunkDuration: num(raw.chunk_duration) ?? num(raw.chunkDuration),
+    sampleRate: num(raw.sample_rate) ?? num(raw.sampleRate),
     cancelled: typeof raw.cancelled === "boolean" ? raw.cancelled : undefined,
     streamed: typeof raw.streamed === "boolean" ? raw.streamed : undefined,
     vadPadding: paddingOf(raw.vadPadding),
@@ -346,6 +377,19 @@ function baseWindow(m: ConsoleMetric): MetricWindow {
         from,
         to: m.at,
         solidTo: m.detectionDelay !== undefined ? from + ms(m.detectionDelay) : undefined,
+      };
+    }
+    case "nc": {
+      // Not one piece of work but a window of them: the filter runs on every
+      // chunk of inbound audio, and the agent reports a rolling summary rather
+      // than 20 metrics a second. The bar therefore spans the window it covers,
+      // and its solid head is the compute inside — a filter keeping up shows a
+      // sliver, one falling behind fills the bar.
+      const from = m.at - ms(m.windowDuration ?? m.audioDuration ?? m.duration);
+      return {
+        from,
+        to: m.at,
+        solidTo: m.duration !== undefined ? from + ms(m.duration) : undefined,
       };
     }
     default:
@@ -732,6 +776,30 @@ export function metricRowCells(m: ConsoleMetric): MetricRowCells {
             ? `total ${formatSeconds(m.totalDuration)} · prediction ${formatSeconds(m.predictionDuration)}`
             : `round trip ${formatSeconds(m.totalDuration)}`,
       };
+    case "nc": {
+      // What one chunk cost is the number to read: it has to stay well inside
+      // the chunk's own duration, or the filter is adding latency to the audio
+      // it is cleaning. `rtf` says the same thing as a ratio.
+      const chunk = m.chunkDuration !== undefined ? `chunk ${formatSeconds(m.chunkDuration)}` : "";
+      const rate = m.sampleRate !== undefined ? `${Math.round(m.sampleRate / 1000)} kHz` : "";
+      return {
+        latency: formatSeconds(m.frameAvg),
+        latencyLabel: "per chunk",
+        duration: formatSeconds(m.duration),
+        audio: formatSeconds(m.audioDuration),
+        tokens: m.frames !== undefined ? `${formatCount(m.frames)} chunks` : "—",
+        // `rtf` belongs to no column here — it goes in the detail below rather
+        // than under a header that says TPS.
+        tps: "—",
+        detail: [
+          m.rtf !== undefined ? `rtf ${m.rtf.toFixed(3)}` : null,
+          m.frameMax !== undefined ? `worst chunk ${formatSeconds(m.frameMax)}` : null,
+          [chunk, rate].filter(Boolean).join(" @ ") || null,
+        ]
+          .filter(Boolean)
+          .join(" · "),
+      };
+    }
     case "interrupt":
       return {
         latency: formatSeconds(m.detectionDelay),

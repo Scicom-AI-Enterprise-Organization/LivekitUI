@@ -19,6 +19,7 @@ import {
   assistConfigFromAgent,
   type AssistWorkerConfig,
 } from "@/lib/agent-assist-config";
+import { AUDIO_CHUNK_OPTIONS, DEFAULT_AUDIO_CHUNK_MS } from "@/lib/audio-input";
 
 /** Sentinel: a Select item may not carry an empty value. */
 const NO_SOURCE = "__manual__";
@@ -182,6 +183,34 @@ export function AssistSettings({
             </SelectContent>
           </Select>
           <p className="text-xs text-muted-foreground">{ncHint}</p>
+          {config.noiseCancellation === "gtcrn" && (
+            <p className="text-xs text-muted-foreground">
+              Reports what it costs per window of audio to the session&apos;s{" "}
+              <code>NC</code> metrics lane, per speaker.
+            </p>
+          )}
+        </div>
+        <div className="space-y-1.5">
+          <Label className="text-xs">Audio chunk size</Label>
+          <Select
+            value={String(config.audioChunkMs ?? DEFAULT_AUDIO_CHUNK_MS)}
+            onValueChange={(v) => set("audioChunkMs", Number(v))}
+          >
+            <SelectTrigger className="w-full">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {AUDIO_CHUNK_OPTIONS.map((o) => (
+                <SelectItem key={o.ms} value={String(o.ms)}>
+                  {o.ms} ms — {o.hint}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <p className="text-xs text-muted-foreground">
+            Audio handed to the filter per call — 50 ms is 800 samples at 16 kHz. Both
+            speakers&apos; streams use it, so it is twice this many calls a second.
+          </p>
         </div>
         <div className="space-y-1.5">
           <Label className="text-xs">Turn detector</Label>
@@ -278,6 +307,7 @@ function InheritedSummary({ config }: { config: AssistWorkerConfig }) {
     ["Coaching model", config.llmModel],
     ["Noise cancellation", NOISE_CANCELLATION_OPTIONS.find((o) => o.id === config.noiseCancellation)?.label || config.noiseCancellation],
     ["Turn detector", TURN_DETECTOR_OPTIONS.find((o) => o.id === config.turnDetector)?.label || config.turnDetector],
+    ["Audio chunk", `${config.audioChunkMs ?? DEFAULT_AUDIO_CHUNK_MS} ms`],
     ["Language", config.language || "auto-detect"],
   ];
 

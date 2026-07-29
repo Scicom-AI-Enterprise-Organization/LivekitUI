@@ -7,11 +7,21 @@
  * from `fs`, `path` or a server-only module may appear here.
  */
 
+import { DEFAULT_AUDIO_CHUNK_MS, normalizeAudioChunkMs } from "./audio-input";
+
 /** Template directory under `example/`, and the sandbox's `template` column. */
 export const ASSIST_TEMPLATE = "agent-assist-react";
 
 /** Appended to the sandbox name to get the worker's agent name. */
 export const ASSIST_WORKER_SUFFIX = "-assist";
+
+/**
+ * Where the worker's source lives. Unlike the other templates this one is not in
+ * `livekit-examples` — it ships in this repo, so the link points at the copy the
+ * dashboard actually deploys.
+ */
+export const ASSIST_SOURCE_URL =
+  "https://github.com/Scicom-AI-Enterprise-Organization/LivekitUI/tree/main/example/agent-assist-python";
 
 export function assistWorkerName(sandboxName: string): string {
   return `${sandboxName}${ASSIST_WORKER_SUFFIX}`;
@@ -42,6 +52,11 @@ export interface AssistWorkerConfig {
   language: string;
   turnDetector: AssistTurnDetector;
   noiseCancellation: AssistNoiseCancellation;
+  /**
+   * Audio handed to the filter (and the VAD, and the STT) per call, in ms. The
+   * same decision the builder exposes, and one a source agent carries over.
+   */
+  audioChunkMs: number;
   /** vLLM endpoint. Only read when turnDetector is "scicom". */
   eotUrl: string;
   suggestFor: AssistSuggestFor;
@@ -61,6 +76,7 @@ export const DEFAULT_ASSIST_CONFIG: AssistWorkerConfig = {
   language: "",
   turnDetector: "audio",
   noiseCancellation: "gtcrn",
+  audioChunkMs: DEFAULT_AUDIO_CHUNK_MS,
   eotUrl: "",
   suggestFor: "customer",
   instructions: "",
@@ -191,6 +207,10 @@ export function assistConfigFromAgent(
     notes.push("That agent uses Krisp, which does nothing on a self-hosted server — using GTCRN.");
   }
 
+  // Carried over like the rest: it is a property of the audio path, and an agent
+  // whose filter was tuned for 20 ms chunks wants the same here.
+  next.audioChunkMs = normalizeAudioChunkMs(agentConfig.audioChunkMs);
+
   return { config: next, notes };
 }
 
@@ -217,6 +237,7 @@ export function normalizeAssistConfig(input: unknown): AssistWorkerConfig {
       NOISE_CANCELLATIONS,
       DEFAULT_ASSIST_CONFIG.noiseCancellation
     ),
+    audioChunkMs: normalizeAudioChunkMs(raw.audioChunkMs),
     eotUrl: str(raw.eotUrl).replace(/\/$/, ""),
     suggestFor: pick(raw.suggestFor, SUGGEST_FOR, DEFAULT_ASSIST_CONFIG.suggestFor),
     instructions: typeof raw.instructions === "string" ? raw.instructions : "",

@@ -1,24 +1,19 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSession } from "@/lib/auth";
-import {
-  DEFAULT_TURNS,
-  getSimRun,
-  listSimAgents,
-  runSim,
-  type SimTurn,
-} from "@/lib/assist-sim";
+import { getSimRun, listSimAgents } from "@/lib/assist-sim";
+import { DEFAULT_TURNS, runVoiceSim } from "@/lib/voice-sim";
 
 /**
- * Runs a simulated two-speaker call, for testing an agent-assist room.
+ * Runs a simulated call against a voice-agent sandbox.
  *
- * The template needs two humans in two browsers, so nothing else here can be
- * exercised end to end without them — and the per-speaker metrics timeline the
- * worker feeds cannot be checked at all. POST joins the room twice, speaks a
- * scripted conversation through the project's TTS, and (with `wait`) returns
- * what came back: the transcript, the coaching notes, and a count of metrics per
- * speaker, which is exactly what the timeline draws lanes from.
+ * A voice agent's timeline is the only one with the whole chain in it — speech
+ * recognised, turn ended, model answered, voice synthesised — and it stays empty
+ * until somebody talks to the agent. This is that somebody: one synthetic caller,
+ * taking turns, publishing no metrics of its own so everything the timeline draws
+ * came from the agent.
  *
- * Admin-only: it spawns a process and joins a room as two participants.
+ * The two-humans case is `/api/assist-sim`. Admin-only, like it: this spawns a
+ * process and joins a room.
  */
 
 export async function POST(request: NextRequest) {
@@ -34,13 +29,8 @@ export async function POST(request: NextRequest) {
 
   const turns = Array.isArray(body.turns)
     ? (body.turns as unknown[])
-        .map((t) => {
-          const turn = (t ?? {}) as Record<string, unknown>;
-          const role = turn.role === "agent" ? "agent" : "customer";
-          const text = typeof turn.text === "string" ? turn.text.trim() : "";
-          return { role, text } as SimTurn;
-        })
-        .filter((t) => t.text)
+        .map((t) => (typeof t === "string" ? t.trim() : ""))
+        .filter((t) => t.length > 0)
     : undefined;
 
   const num = (value: unknown, fallback: number, max: number) => {
@@ -49,18 +39,15 @@ export async function POST(request: NextRequest) {
   };
 
   try {
-    const result = await runSim({
+    const result = await runVoiceSim({
       sandbox: typeof body.sandbox === "string" ? body.sandbox : undefined,
       room: typeof body.room === "string" ? body.room : undefined,
       agent: typeof body.agent === "string" ? body.agent : undefined,
-      agentVoice: typeof body.agentVoice === "string" ? body.agentVoice : undefined,
-      customerVoice: typeof body.customerVoice === "string" ? body.customerVoice : undefined,
+      callerAgent: typeof body.callerAgent === "string" ? body.callerAgent : undefined,
       turns,
-      gapMs: num(body.gapMs, 1500, 10_000),
-      warmupMs: num(body.warmupMs, 6000, 60_000),
-      drainMs: num(body.drainMs, 8000, 60_000),
-      // Waiting is the default: a run whose result you have to poll for is a
-      // worse test than one curl that answers.
+      gapMs: num(body.gapMs, 800, 10_000),
+      replyTimeoutMs: num(body.replyTimeoutMs, 25_000, 120_000),
+      drainMs: num(body.drainMs, 4000, 60_000),
       wait: body.wait !== false,
       timeoutMs: num(body.timeoutMs, 240_000, 600_000),
     });
@@ -73,7 +60,7 @@ export async function POST(request: NextRequest) {
   }
 }
 
-/** A run's log, for one started with `wait: false`. */
+/** A run's log, for one started with `wait: false`. Shared store with assist runs. */
 export async function GET(request: NextRequest) {
   const session = await getSession();
   if (!session) {

@@ -183,6 +183,13 @@ TRANSCRIBE_INTERIM = _env_flag("ASSIST_INTERIM_TRANSCRIPTS", True)
 # STT and the VAD want anyway.
 GTCRN_SAMPLE_RATE = 16000
 
+# Audio handed to the filter per call, and from there to the VAD and the STT.
+# 50 ms is the SDK's own default: 800 samples at 16 kHz, twenty calls a second
+# per speaker — twice that here, since two people are being filtered. It changes
+# how often the model is called, never how it works: GTCRN always runs 256-sample
+# hops through a 512-point window whatever it is handed.
+AUDIO_CHUNK_MS = max(1, int(_env("ASSIST_AUDIO_CHUNK_MS", "50") or 50))
+
 
 # ── Noise cancellation ───────────────────────────────────────────────────────
 # `AudioInputOptions.noise_cancellation` accepts either Krisp's Cloud-authorised
@@ -190,10 +197,96 @@ GTCRN_SAMPLE_RATE = 16000
 # second kind: nothing to authorise, no external service. Krisp's own plugin on
 # a self-hosted server logs `noise cancellation is not authorized (404)` and
 # passes audio through untouched, which is why it is not an option here.
-if NOISE_CANCELLATION == "gtcrn":
-    from stt_api.livekit_plugin.noise_cancellation import GTCRN
-else:
+NC_METRICS_WINDOW = 5.0
+"""Seconds of audio each published noise-cancellation summary covers."""
+
+if NOISE_CANCELLATION != "gtcrn":
     GTCRN = None  # type: ignore[assignment]
+    MeteredGTCRN = None  # type: ignore[assignment]
+else:
+    from stt_api.livekit_plugin.noise_cancellation import GTCRN
+
+    # Defined here rather than at module scope because it has nowhere to inherit
+    # from without the plugin: subclassing keeps every `FrameProcessor` hook the
+    # SDK may call intact, which a delegating wrapper would silently swallow.
+    class MeteredGTCRN(GTCRN):  # type: ignore[misc, valid-type]
+        """
+        GTCRN, with what it costs published to the Console.
+
+        The filter is the one thing on the audio path that reports nothing about
+        itself — `AudioInputOptions.noise_cancellation` has no metrics hook — so a
+        model falling behind would surface as a slow recogniser and nothing else.
+        `_process` is called once per chunk the SFU delivers (50 ms by default),
+        on the event loop, so the time it takes is latency the call pays for.
+
+        Summarised per window of audio rather than per chunk: 20 metrics a second,
+        times two speakers, would bury the topic exactly as VAD would. The model's
+        own granularity is unrelated and fixed — 256-sample hops through a
+        512-point window — so what is timed here is the SDK's call into it.
+        """
+
+        def __init__(self, on_metrics) -> None:
+            super().__init__()
+            self._on_metrics = on_metrics
+            self._rate = 0
+            self._chunks = 0
+            self._audio = 0.0
+            self._compute = 0.0
+            self._worst = 0.0
+            self._window_from = 0.0
+
+        def _process(self, frame: rtc.AudioFrame) -> rtc.AudioFrame:
+            if not self._chunks:
+                # Wall-clock start of the window, so the bar spans the audio it
+                # summarises even when the microphone was muted for part of it.
+                self._window_from = time.time()
+            started = time.perf_counter()
+            try:
+                return super()._process(frame)
+            finally:
+                elapsed = time.perf_counter() - started
+                self._rate = frame.sample_rate
+                self._chunks += 1
+                self._audio += frame.samples_per_channel / frame.sample_rate
+                self._compute += elapsed
+                self._worst = max(self._worst, elapsed)
+                if self._audio >= NC_METRICS_WINDOW:
+                    self._publish()
+
+        def _publish(self) -> None:
+            if not self._chunks:
+                return
+            now = time.time()
+            self._on_metrics(
+                {
+                    "type": "noise_cancellation_metrics",
+                    "kind": "NoiseCancellationMetrics",
+                    "label": "GTCRN",
+                    "timestamp": now,
+                    # Compute against audio: the filter's share of one core, and
+                    # the number that says whether it is keeping up. At 1.0 it is
+                    # no longer removing noise faster than the noise arrives.
+                    "duration": self._compute,
+                    "audio_duration": self._audio,
+                    "window_duration": max(now - self._window_from, self._audio),
+                    "rtf": self._compute / self._audio if self._audio else None,
+                    "frames": self._chunks,
+                    "frame_avg": self._compute / self._chunks,
+                    "frame_max": self._worst,
+                    "chunk_duration": self._audio / self._chunks,
+                    "sample_rate": self._rate,
+                }
+            )
+            self._chunks = 0
+            self._audio = 0.0
+            self._compute = 0.0
+            self._worst = 0.0
+
+        def _close(self) -> None:
+            # A stream ending mid-window still reports what it did, or the tail
+            # of every call is missing from the plot.
+            self._publish()
+            super()._close()
 
 
 # ── Turn detection ───────────────────────────────────────────────────────────
@@ -593,6 +686,13 @@ class AssistedCall:
                 },
             )
 
+        def _noise_cancellation(params):
+            # A selector, not one instance: each stream needs its own recurrent
+            # caches, and sharing them across participants would cross-contaminate
+            # the two voices. Its metrics carry this speaker for the same reason
+            # the turn detector's do — one topic, two people being filtered.
+            return MeteredGTCRN(lambda m: self._publish_metrics(m, speaker))
+
         try:
             await session.start(
                 agent=Transcriber(role, self._on_turn),
@@ -601,10 +701,8 @@ class AssistedCall:
                     participant_identity=participant.identity,
                     audio_input=room_io.AudioInputOptions(
                         sample_rate=GTCRN_SAMPLE_RATE if GTCRN else 24000,
-                        # A selector, not one instance: each stream needs its own
-                        # recurrent caches, and sharing them across participants
-                        # would cross-contaminate the two voices.
-                        noise_cancellation=(lambda params: GTCRN()) if GTCRN else None,
+                        frame_size_ms=AUDIO_CHUNK_MS,
+                        noise_cancellation=_noise_cancellation if GTCRN else None,
                         # This worker joins a call already in progress and there
                         # is a second session on the same room; both make the
                         # pre-connect audio buffer pointless and its byte-stream

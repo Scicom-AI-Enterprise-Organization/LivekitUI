@@ -33,6 +33,7 @@ import {
   assistWorkerName,
   type AssistWorkerConfig,
 } from "./agent-assist-config";
+import { normalizeAudioChunkMs } from "./audio-input";
 
 export {
   ASSIST_TEMPLATE,
@@ -142,6 +143,7 @@ export async function buildAssistEnv(
     ASSIST_LANGUAGE: effective.language,
     ASSIST_TURN_DETECTOR: effective.turnDetector,
     ASSIST_NOISE_CANCELLATION: effective.noiseCancellation,
+    ASSIST_AUDIO_CHUNK_MS: String(normalizeAudioChunkMs(effective.audioChunkMs)),
     ASSIST_SUGGEST_FOR: effective.suggestFor,
   };
 

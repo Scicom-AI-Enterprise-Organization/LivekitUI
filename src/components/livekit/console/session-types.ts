@@ -72,6 +72,51 @@ export function recordingSrc(agentName: string, file: string): string {
   return `/api/agents/${encodeURIComponent(agentName)}/recordings/${encodeURIComponent(file)}`;
 }
 
+/**
+ * Which agent's recordings the API should be asked for.
+ *
+ * The recording's **own** agent, not the page's. `file` names the stored object
+ * within one agent (`session_recordings` is `UNIQUE(agent_name, file)`), so the
+ * two together are what addresses the bytes. A session's recordings are looked up
+ * by *room*, and a room's captures do not all belong to the page's agent: each
+ * observer job names its capture after its own participant identity, which is new
+ * every job. Passing the page's agent then streams a different call's audio, or
+ * 404s. The fallback covers a row from before `agent` was reported.
+ */
+export function recordingAgent(recording: SavedRecording, fallback: string): string {
+  return recording.agent || fallback;
+}
+
+export function recordingSrcOf(recording: SavedRecording, fallbackAgent: string): string {
+  return recordingSrc(recordingAgent(recording, fallbackAgent), recording.file);
+}
+
+/**
+ * Stable identity of one recording, for React keys and for a `<Select>` value.
+ *
+ * **Not `file` alone.** Two calls into the same room produce the same file name
+ * under different agents, so keying on `file` gave React duplicate keys and made
+ * a picker ambiguous — choosing the third entry selected the first, and the
+ * timeline was then plotted against the wrong recording's `startedAt`.
+ */
+export function recordingKey(recording: SavedRecording): string {
+  return `${recording.agent}/${recording.file}`;
+}
+
+/**
+ * When a recording was made, short enough for a picker.
+ *
+ * A room that took more than one call has a recording per call, all the same kind
+ * and much the same length — "Mixed · 00:54" three times over says nothing about
+ * which is which, and the clock is the one thing that does.
+ */
+export function recordingClock(recording: SavedRecording): string {
+  const at = new Date(recording.startedAt);
+  return Number.isNaN(at.getTime())
+    ? ""
+    : at.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+}
+
 export function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;

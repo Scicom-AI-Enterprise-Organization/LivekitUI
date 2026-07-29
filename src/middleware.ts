@@ -8,7 +8,7 @@ const DASHBOARD_PREFIXES = [
   "/api/providers", "/api/secrets", "/api/access-tokens",
   "/api/egresses", "/api/ingresses", "/api/sip-trunks", "/api/dispatch-rules",
   "/api/calls", "/api/overview", "/api/metrics", "/api/sessions", "/api/storage",
-  "/api/tools", "/api/assist-sim",
+  "/api/tools", "/api/assist-sim", "/api/voice-sim",
   "/settings", "/agents", "/sessions", "/telephony", "/egresses", "/ingresses",
   "/billing", "/hub", "/api-docs",
 ];

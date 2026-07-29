@@ -33,6 +33,12 @@ const LANES: { kind: MetricKind; color: string; what: string }[] = [
       "The turn detector, one bar per prediction. A text detector reports only its round trip, so the bar is hollow; the audio detector also reports how long after the speech its verdict landed, drawn as a solid head. Typically under 200 ms — rarely what makes a turn slow.",
   },
   {
+    kind: "nc",
+    color: "#22d3ee",
+    what:
+      "Noise cancellation — off by default, like VAD: turn on the NC chip under Show to see it. One bar per window of inbound audio rather than per chunk, because the filter runs on every 50 ms the SFU delivers and reporting each would be 20 metrics a second per speaker. The windows tile the whole call, which is why the lane is hidden until asked for. The solid head is the compute inside a window: a sliver means the filter is keeping up, a bar that fills means it is adding latency to everything downstream of it. Only the self-hosted GTCRN filter reports this; Krisp does not.",
+  },
+  {
     kind: "stt",
     color: "#2dd4bf",
     what:

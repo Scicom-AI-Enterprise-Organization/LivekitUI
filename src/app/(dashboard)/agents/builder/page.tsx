@@ -6,6 +6,11 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { CONSOLE_METRICS_TOPIC } from "@/lib/console-metrics";
 import {
+  AUDIO_CHUNK_OPTIONS,
+  DEFAULT_AUDIO_CHUNK_MS,
+  normalizeAudioChunkMs,
+} from "@/lib/audio-input";
+import {
   LiveKitRoom,
   RoomAudioRenderer,
   useVoiceAssistant,
@@ -750,6 +755,7 @@ const NC_SAMPLE_RATE: Record<NoiseCancellation, number | null> = {
   krisp: null,
 };
 
+
 interface AgentConfig {
   name: string;
   instructions: string;
@@ -769,6 +775,12 @@ interface AgentConfig {
    * before this existed have no value, and they were all emitting Krisp.
    */
   noiseCancellation?: NoiseCancellation;
+  /**
+   * Audio handed to the filter (and the VAD, and the STT) at a time, in ms.
+   * Optional for the same reason: agents saved before it existed ran on the
+   * SDK's own 50 ms.
+   */
+  audioChunkMs?: number;
 }
 
 const AGENT_NAME_POOL = [
@@ -807,6 +819,7 @@ You are interacting with the user via voice, and must apply the following rules 
   eotUrl: "",
   backgroundAudio: "none",
   noiseCancellation: DEFAULT_NOISE_CANCELLATION,
+  audioChunkMs: DEFAULT_AUDIO_CHUNK_MS,
 };
 
 /* ────────────────────────────────────
@@ -1336,6 +1349,9 @@ function ModelsVoiceTab({
             <div className="text-xs text-muted-foreground mt-0.5">
               ONNX, in-process. +10 dB SNR, 32 ms, 3% of a core.
             </div>
+            <div className="text-xs text-muted-foreground/70 mt-0.5">
+              Reports what it costs to the Console.
+            </div>
           </button>
           <button
             onClick={() => onChange({ noiseCancellation: "krisp" })}
@@ -1379,9 +1395,45 @@ function ModelsVoiceTab({
         {(config.noiseCancellation ?? DEFAULT_NOISE_CANCELLATION) === "gtcrn" && (
           <p className="text-xs text-muted-foreground">
             Sets the agent&apos;s input to 16 kHz, the model&apos;s native rate — which is
-            also what the STT and the VAD want.
+            also what the STT and the VAD want. The model consumes it in{" "}
+            <strong className="font-medium text-foreground">256-sample hops</strong> (16 ms)
+            through a 512-point window, whatever chunk size it is handed, and adds 32 ms of
+            delay at 16 kHz. Every window of audio it filters is reported to the Console as
+            an <code className="rounded bg-muted px-1 py-0.5">NC</code> lane on the metrics
+            timeline, so a filter falling behind is visible instead of reading as a slow
+            recogniser.
           </p>
         )}
+      </div>
+
+      {/* Chunk size. Physically an input-wide setting, but it is the noise
+          filter's call granularity that makes it worth exposing, so it sits
+          under it. */}
+      <div className="space-y-2">
+        <label className="text-sm font-medium text-foreground">Audio chunk size</label>
+        <p className="text-xs text-muted-foreground">
+          How much audio the agent is handed at a time. One chunk is one call into the noise
+          filter, and from there into the VAD and the STT stream — at the default{" "}
+          <strong className="font-medium text-foreground">50 ms</strong> that is 800 samples
+          at 16 kHz, twenty times a second per speaker. Smaller chunks reach the filter
+          sooner and cost proportionally more calls; larger ones buffer longer before
+          anything downstream sees the audio.
+        </p>
+        <Select
+          value={String(config.audioChunkMs ?? DEFAULT_AUDIO_CHUNK_MS)}
+          onValueChange={(v) => onChange({ audioChunkMs: Number(v) })}
+        >
+          <SelectTrigger>
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {AUDIO_CHUNK_OPTIONS.map((option) => (
+              <SelectItem key={option.ms} value={String(option.ms)}>
+                {option.ms} ms — {option.hint}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
       </div>
 
       {/* Background audio */}
@@ -2600,7 +2652,9 @@ ${payloadCode}
   // metrics as JSON from a background task.
   topImportLines.push("import asyncio");
   topImportLines.push("import json");
-  if (usesTextEou) topImportLines.push("import time");
+  // Timing: a text turn detector's round trip, and the noise filter's per-chunk
+  // cost. Either one alone needs it.
+  if (usesTextEou || noiseCancellation === "gtcrn") topImportLines.push("import time");
   topImportLines.push("from dataclasses import asdict, is_dataclass");
   if (hasCallSummary) {
     topImportLines.push("from datetime import UTC, datetime");
@@ -2809,17 +2863,128 @@ async def _on_session_end_func(ctx: JobContext) -> None:
       ? "from stt_api.livekit_plugin.noise_cancellation import GTCRN\n"
       : "";
 
+  // Audio per call into the filter. Read here as well as in the options below,
+  // since it is what the metric block's comment is describing. Normalised rather
+  // than read straight off the config: it is interpolated into Python, and the
+  // config is a JSON blob the API stores as it was sent.
+  const chunkMs = normalizeAudioChunkMs(config.audioChunkMs);
+
+  // The filter is the one thing on the audio path that reports nothing about
+  // itself — `AudioInputOptions.noise_cancellation` has no metrics hook — so a
+  // model that started falling behind would surface as a slow recogniser and
+  // nothing else. Wrapping it is the whole fix: `_process` is called once per
+  // chunk, on the event loop, so the time it takes is latency every utterance
+  // pays for. Krisp gets no wrapper: its options are not a `FrameProcessor`, and
+  // the native library does its work where Python cannot time it.
+  const ncMetricsBlock =
+    noiseCancellation === "gtcrn"
+      ? `
+
+# ── Noise cancellation metrics ───────────────────────────────────────────────
+# One summary per window of audio, not one per chunk: at ${chunkMs} ms a chunk that
+# would be ${Math.round(1000 / chunkMs)} metrics a second per speaker, which buries the topic exactly
+# as VAD would. The model's own granularity is unrelated and fixed — 256-sample
+# hops through a 512-point window — so this measures how long the SDK's call into
+# it took, which is the number that matters on the audio path.
+NC_METRICS_WINDOW = 5.0
+"""Seconds of audio each published summary covers."""
+
+
+class MeteredNoiseCancellation(GTCRN):
+    """GTCRN, with what it costs published to the Console."""
+
+    def __init__(self, ctx: JobContext, identity: str = "") -> None:
+        super().__init__()
+        self._ctx = ctx
+        self._identity = identity
+        self._rate = 0
+        self._chunks = 0
+        self._audio = 0.0
+        self._compute = 0.0
+        self._worst = 0.0
+        self._window_from = 0.0
+
+    def _process(self, frame: rtc.AudioFrame) -> rtc.AudioFrame:
+        if not self._chunks:
+            # Wall-clock start of the window, so the bar spans the audio it
+            # summarises even when the microphone was muted for part of it.
+            self._window_from = time.time()
+        started = time.perf_counter()
+        try:
+            return super()._process(frame)
+        finally:
+            elapsed = time.perf_counter() - started
+            self._rate = frame.sample_rate
+            self._chunks += 1
+            self._audio += frame.samples_per_channel / frame.sample_rate
+            self._compute += elapsed
+            self._worst = max(self._worst, elapsed)
+            if self._audio >= NC_METRICS_WINDOW:
+                self._publish()
+
+    def _publish(self) -> None:
+        if not self._chunks:
+            return
+        now = time.time()
+        publish_console_metrics(
+            self._ctx,
+            {
+                "type": "noise_cancellation_metrics",
+                "kind": "NoiseCancellationMetrics",
+                "label": "GTCRN",
+                "timestamp": now,
+                # Compute against audio: the filter's share of one core, and the
+                # number that says whether it is keeping up. At 1.0 it is no
+                # longer removing noise faster than the noise arrives.
+                "duration": self._compute,
+                "audio_duration": self._audio,
+                "window_duration": max(now - self._window_from, self._audio),
+                "rtf": self._compute / self._audio if self._audio else None,
+                "frames": self._chunks,
+                "frame_avg": self._compute / self._chunks,
+                "frame_max": self._worst,
+                "chunk_duration": self._audio / self._chunks,
+                "sample_rate": self._rate,
+                # Whose microphone. One instance per stream, so a room with two
+                # people publishes two lanes instead of one mixed together.
+                "speaker": {"identity": self._identity} if self._identity else None,
+            },
+        )
+        self._chunks = 0
+        self._audio = 0.0
+        self._compute = 0.0
+        self._worst = 0.0
+
+    def _close(self) -> None:
+        # A stream ending mid-window still reports what it did, or the tail of
+        # every call is missing from the plot.
+        self._publish()
+        super()._close()
+`
+      : "";
+
   // A selector rather than one instance: each participant stream needs its own
   // model state. Krisp keeps its telephony-specific model for SIP callers.
+  //
+  // GTCRN is wrapped so the filter reports what it costs — the identity comes
+  // from the selector's own params, which is the only place the stream's owner is
+  // known, and one instance per stream means a room with two people publishes two
+  // lanes rather than one mixed together.
   const ncSelector =
     noiseCancellation === "gtcrn"
-      ? "lambda params: GTCRN()"
+      ? "lambda params: MeteredNoiseCancellation(ctx, params.participant.identity)"
       : noiseCancellation === "krisp"
         ? "lambda params: noise_cancellation.BVCTelephony() if params.participant.kind == rtc.ParticipantKind.PARTICIPANT_KIND_SIP else noise_cancellation.BVC()"
         : "";
   const ncRate = NC_SAMPLE_RATE[noiseCancellation];
   const audioInputLines = [
     ncRate === null ? "" : `                sample_rate=${ncRate},\n`,
+    // Emitted whenever a filter is running, even at the SDK's own 50 ms: this is
+    // the size of one call into it, and reading it out of the generated file
+    // beats remembering what the default was.
+    ncSelector || chunkMs !== DEFAULT_AUDIO_CHUNK_MS
+      ? `                frame_size_ms=${chunkMs},\n`
+      : "",
     ncSelector ? `                noise_cancellation=${ncSelector},\n` : "",
   ].join("");
   // Nothing to configure on the input? Then don't emit `room_options` at all —
@@ -2983,7 +3148,7 @@ def publish_console_metrics(ctx: JobContext, m: object) -> None:
     except RuntimeError:
         logger.debug("console metrics dropped: no running event loop")
 
-${turnDetectorTimerBlock}
+${ncMetricsBlock}${turnDetectorTimerBlock}
 class DefaultAgent(Agent):
     def __init__(self) -> None:
         super().__init__(
