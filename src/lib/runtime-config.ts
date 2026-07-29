@@ -21,6 +21,8 @@ export type RuntimeConfig = {
   livekitRegion: string;
   /** Origin this dashboard is served from, used to build sandbox links. */
   sandboxDomain: string;
+  /** Build identifier shown in the sidebar footer. Cosmetic. */
+  appVersion: string;
 };
 
 /**
@@ -52,5 +54,11 @@ export function getRuntimeConfig(): RuntimeConfig {
       process.env.NEXT_PUBLIC_SANDBOX_DOMAIN ||
       "http://localhost:3000"
     ).replace(/\/$/, ""),
+    // Set per image (`ENV APP_VERSION=<git short sha>` in the Dockerfile, or a
+    // compose override). "dev" for an unversioned local run, so the footer is
+    // never blank — a missing version reads as a broken footer, not as "nobody
+    // stamped this build".
+    appVersion:
+      process.env.APP_VERSION || process.env.NEXT_PUBLIC_APP_VERSION || "dev",
   };
 }

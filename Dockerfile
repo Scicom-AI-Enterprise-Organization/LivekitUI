@@ -114,6 +114,10 @@ ENV LIVEKIT_PUBLIC_URL=ws://localhost:7880
 ENV LIVEKIT_GATEWAY_PUBLIC_URL=ws://localhost:7885
 ENV SANDBOX_DOMAIN=http://localhost:3000
 ENV LIVEKIT_REGION=local
+# Shown in the sidebar footer. Pass `--build-arg APP_VERSION=<git short sha>`;
+# defaults to "dev" for a local build.
+ARG APP_VERSION=dev
+ENV APP_VERSION=${APP_VERSION}
 # No venv in the image — agents run on the system interpreter that got the
 # plugins above. Without this, deploying an agent fails looking for a venv.
 ENV AGENT_PYTHON_BIN=/usr/bin/python3

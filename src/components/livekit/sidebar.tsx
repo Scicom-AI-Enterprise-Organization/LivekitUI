@@ -28,6 +28,7 @@ import {
 } from "lucide-react";
 import { useState, useEffect } from "react";
 import { ThemeToggle } from "@/components/theme-toggle";
+import { useRuntimeConfig } from "@/components/runtime-config-provider";
 
 interface NavChild {
   label: string;
@@ -113,6 +114,7 @@ const navItems: NavItem[] = [
 export function LiveKitSidebar() {
   const pathname = usePathname();
   const router = useRouter();
+  const { appVersion } = useRuntimeConfig();
   const [user, setUser] = useState<{ firstName: string; lastName: string; email: string; role: string } | null>(null);
 
   useEffect(() => {
@@ -159,10 +161,20 @@ export function LiveKitSidebar() {
 
   return (
     <aside className="flex h-screen w-[220px] flex-col border-r bg-sidebar shrink-0">
-      {/* Logo */}
-      <div className="flex items-center gap-2 px-5 py-4">
+      {/* Logo, with the build version beside it. Resolved on the server and
+          handed down through RuntimeConfigProvider, like every other deployment
+          value here — read as NEXT_PUBLIC_* from this client component it would
+          freeze at image-build time and every deployment of that image would
+          claim the same version. */}
+      <div className="flex items-baseline gap-2 px-5 py-4">
         <span className="text-lg font-bold tracking-tight text-sidebar-foreground">
           Live<span className="text-primary">Kit</span>
+        </span>
+        <span
+          className="truncate font-mono text-[10px] text-muted-foreground"
+          title={`Build ${appVersion}`}
+        >
+          v{appVersion}
         </span>
       </div>
 
