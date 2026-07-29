@@ -14,6 +14,8 @@
  * on the server.
  */
 
+import { execFileSync } from "node:child_process";
+
 export type RuntimeConfig = {
   /** ws/wss URL the browser dials to reach `livekit-server`. */
   livekitUrl: string;
@@ -44,6 +46,36 @@ function publicLivekitUrl(): string {
   return raw.trim().replace(/^http(s?):\/\//, "ws$1://").replace(/\/$/, "");
 }
 
+/**
+ * The commit this tree is at — the fallback for a run with no `APP_VERSION`,
+ * which means `npm run dev` or `npm start` from a checkout.
+ *
+ * Resolved **once per process**: it cannot change while the server is up, and
+ * `getRuntimeConfig()` is called on every request that renders the dashboard.
+ *
+ * This is deliberately not the path a container takes. `.git` is dockerignored,
+ * so an image has no repository to ask — CI stamps `APP_VERSION` as a build arg
+ * instead (see `.github/workflows/ci.yml`) and this is never reached there.
+ */
+let localCommit: string | undefined;
+function gitCommit(): string {
+  if (localCommit === undefined) {
+    try {
+      localCommit = execFileSync("git", ["rev-parse", "--short=7", "HEAD"], {
+        // Inherit nothing: git's own stderr on a non-repo would otherwise land
+        // in the server log looking like an application error.
+        stdio: ["ignore", "pipe", "ignore"],
+      })
+        .toString()
+        .trim();
+    } catch {
+      // No git, not a repo, or a checkout with no history. "dev" is honest.
+      localCommit = "";
+    }
+  }
+  return localCommit || "dev";
+}
+
 export function getRuntimeConfig(): RuntimeConfig {
   return {
     livekitUrl: publicLivekitUrl(),
@@ -54,11 +86,11 @@ export function getRuntimeConfig(): RuntimeConfig {
       process.env.NEXT_PUBLIC_SANDBOX_DOMAIN ||
       "http://localhost:3000"
     ).replace(/\/$/, ""),
-    // Set per image (`ENV APP_VERSION=<git short sha>` in the Dockerfile, or a
-    // compose override). "dev" for an unversioned local run, so the footer is
-    // never blank — a missing version reads as a broken footer, not as "nobody
-    // stamped this build".
+    // Stamped into the image by CI as `<release>+<commit>`. Falling back to the
+    // working tree's commit rather than a literal "dev", so the footer answers
+    // "which code is this?" in every way the app runs — the question a version
+    // in the sidebar exists to answer at all.
     appVersion:
-      process.env.APP_VERSION || process.env.NEXT_PUBLIC_APP_VERSION || "dev",
+      process.env.APP_VERSION || process.env.NEXT_PUBLIC_APP_VERSION || gitCommit(),
   };
 }

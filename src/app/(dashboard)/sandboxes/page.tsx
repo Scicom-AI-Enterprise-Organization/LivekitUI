@@ -254,7 +254,10 @@ function EditSandboxDialog({
 
   return (
     <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
-      <DialogContent className="max-w-lg max-h-[85vh] overflow-y-auto">
+      {/* `[&>*]:min-w-0` — same grid-item overflow as the simulate dialog; see
+          assist-sim-dialog.tsx. Without it the CodeBlock below stretches the
+          column and the whole dialog scrolls sideways instead of the code. */}
+      <DialogContent className="max-w-lg max-h-[85vh] overflow-y-auto [&>*]:min-w-0">
         <DialogHeader>
           <DialogTitle>{title}</DialogTitle>
           <DialogDescription>

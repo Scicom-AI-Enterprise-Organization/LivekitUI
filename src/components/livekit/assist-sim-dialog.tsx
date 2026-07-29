@@ -156,7 +156,18 @@ export function AssistSimDialog({
 
   return (
     <Dialog open onOpenChange={(open) => !open && onClose()}>
-      <DialogContent className="max-w-lg max-h-[85vh] overflow-y-auto">
+      {/*
+        `[&>*]:min-w-0` is load-bearing. DialogContent is a grid, and a grid item
+        defaults to `min-width: auto` — it refuses to shrink below its content, so
+        the curl block's longest line (which grows once both agents are chosen,
+        adding `"callerAgent":…,"agent":…`) widened the column past the dialog.
+        Because `overflow-y-auto` forces `overflow-x` to `auto` as well, the whole
+        dialog scrolled sideways and clipped the header, the selects and the hint
+        text — while the CodeBlock's own `overflow-x-auto` never engaged, its
+        containing block having already been stretched to fit. Letting the item
+        shrink puts the scrolling back inside the CodeBlock, where it belongs.
+      */}
+      <DialogContent className="max-w-lg max-h-[85vh] overflow-y-auto [&>*]:min-w-0">
         <DialogHeader>
           <DialogTitle>Simulate a call on {app.name}</DialogTitle>
           <DialogDescription>

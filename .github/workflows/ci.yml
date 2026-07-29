@@ -32,7 +32,10 @@
 #   - Repo VARIABLE ENABLE_ECR_PUSH=true (kill-switch, same as sgpu).
 #   - ECR repository scicom/livekitui must exist.
 # No NEXT_PUBLIC_* variables are needed: the image carries no deployment
-# addresses, they are read at runtime (src/lib/runtime-config.ts).
+# addresses, they are read at runtime (src/lib/runtime-config.ts). The one value
+# that *is* baked in is APP_VERSION — the release plus the commit, shown in the
+# sidebar footer. It has to be a build arg: `.git` is dockerignored, so the
+# container has no repository to ask.
 name: CI
 
 on:
@@ -80,10 +83,17 @@ jobs:
       push: ${{ steps.d.outputs.push }}
       # Image tag: semver with the v- prefix stripped (v1.2.3 -> 1.2.3).
       img_tag: ${{ steps.d.outputs.img_tag }}
+      # Baked into the image and shown in the sidebar footer. The release *and*
+      # the commit: the tag says which version was cut, the sha says exactly
+      # what is in the running container — which is the question you actually
+      # have when a deployed instance behaves unlike the tree in front of you.
+      app_version: ${{ steps.d.outputs.app_version }}
     steps:
       - id: d
         run: |
-          echo "img_tag=$(echo '${{ github.ref_name }}' | sed 's/^v//')" >> "$GITHUB_OUTPUT"
+          TAG=$(echo '${{ github.ref_name }}' | sed 's/^v//')
+          echo "img_tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "app_version=${TAG}+${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
           if [ "${{ vars.ENABLE_ECR_PUSH }}" = "true" ]; then
             echo "push=true" >> "$GITHUB_OUTPUT"
           else
@@ -202,6 +212,12 @@ jobs:
           context: .
           file: ./Dockerfile
           platforms: ${{ matrix.platform }}
+          # The one thing this build stamps in. Its `ARG` sits after `npm run
+          # build` in the Dockerfile, so a value that changes every commit
+          # invalidates only the trailing ENV layers — keep it there, or every
+          # release repays the apt/pip/npm layers from scratch.
+          build-args: |
+            APP_VERSION=${{ needs.meta.outputs.app_version }}
           # False only when ENABLE_ECR_PUSH is off — the build still runs, so
           # the kill-switch proves the Dockerfile without publishing.
           push: ${{ needs.meta.outputs.push == 'true' }}
