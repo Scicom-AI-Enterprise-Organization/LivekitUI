@@ -11,19 +11,26 @@
 #   - GHA layer cache, scoped per arch so the legs don't evict each other.
 #
 # WHAT RUNS WHEN
-#   push to main / PR  -> checks only (typecheck, unit tests, lint ratchet,
-#                         next build). One small runner, a couple of minutes.
+#   pull request -> checks only (typecheck, unit tests, lint ratchet, next
+#                   build). One small runner, a couple of minutes.
 #   push a vX.Y.Z tag  -> checks, then the multi-arch image build and push:
 #                         image tags X.Y.Z + latest, for argocd-image-updater
 #                         updateStrategy: semver.
+#   push to a branch (main included) -> nothing.
 #
-# The image build is deliberately NOT on main. It occupies two runners for
-# ~20 min a go, and every main push paying that to publish a main-<sha7> tag
-# nothing deploys from is waste. Cut a release with ./release.sh.
+# Nothing runs on a branch push by design: `on.push` lists tags only. Work that
+# should be verified goes through a PR, and a release is a tag. A commit pushed
+# straight to main is therefore unverified until one or the other — if you want
+# it checked without opening a PR, tag it or run `npm run build && npm test`
+# locally.
+#
+# The image build is deliberately NOT on main either. It occupies two runners
+# for ~20 min a go, and paying that to publish a main-<sha7> tag nothing
+# deploys from is waste. Cut a release with ./release.sh.
 #
 # The tradeoff: a Dockerfile that no longer builds now surfaces when you tag,
-# not on the PR that broke it. `checks` still runs `next build` on every push,
-# so app-level breakage is caught early — it is the container layers (apt, pip,
+# not on the PR that broke it. `checks` still runs `next build` on every PR,
+# so app-level breakage is caught there — it is the container layers (apt, pip,
 # the sandbox npm ci legs) that go unverified until release.
 #
 # Setup required before first push (see PR description / runbook):
@@ -40,7 +47,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    # Tags only — no `branches:` key, so a push to main (or any branch) runs
+    # nothing. Adding `branches: [main]` back would restore checks on every
+    # main push; see WHAT RUNS WHEN above before doing that.
     tags: ["v*.*.*"] # semver releases: v1.2.3 -> image tags 1.2.3 + latest
   pull_request:
     branches: [main]
