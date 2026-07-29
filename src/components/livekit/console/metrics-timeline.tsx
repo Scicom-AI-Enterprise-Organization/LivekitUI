@@ -489,7 +489,15 @@ export function MetricsTimeline({
 
       <div className="ml-[112px] flex flex-wrap items-center gap-3 pt-2 font-mono text-[9px] uppercase tracking-wide text-muted-foreground">
         <span>solid head = the wait (TTFT / TTFB / EOU)</span>
-        <span className="text-muted-foreground/70">· TTS runs over the speech it played</span>
+        {/* A TTS bar with no head is the question this lane actually raises: it
+            is a later chunk of one reply, whose TTFB elapsed while the agent was
+            still speaking the chunk before it. See `metricWindows`. */}
+        {lanes.some((lane) => lane.kind === "tts") && (
+          <span className="text-muted-foreground/70">
+            · TTS: solid = ttfb, faint = the speech playing, no head = heard straight after the
+            previous chunk
+          </span>
+        )}
         <span className="text-muted-foreground/70">
           · STT: solid = speech, faint = vad padding, tail = waiting for the transcript
         </span>

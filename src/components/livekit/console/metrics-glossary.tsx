@@ -54,7 +54,7 @@ const LANES: { kind: MetricKind; color: string; what: string }[] = [
     kind: "tts",
     color: "#f59e0b",
     what:
-      "Heard, not computed: from the request, through the wait for the first audio (solid), then over the speech it played — which runs past the instant the metric arrived. A reply split into sentences is chained, because the pieces are heard back to back.",
+      "Heard, not computed: from the request, through the wait for the first audio (solid), then over the speech it played — which runs past the instant the metric arrived. A reply split into sentences is chained, because the pieces are heard back to back: a chunk that starts where the one before it stopped playing is drawn with no solid head at all, since its own wait for audio elapsed while the agent was still speaking and the caller sat through none of it.",
   },
   {
     kind: "interrupt",

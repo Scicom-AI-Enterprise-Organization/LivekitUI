@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { toast } from "sonner";
-import { CheckCircle2, HardDrive, Loader2, Cloud, Save, TestTube2 } from "lucide-react";
+import { CheckCircle2, XCircle, HardDrive, Loader2, Cloud, Save, TestTube2 } from "lucide-react";
 import { TopBar } from "@/components/livekit/top-bar";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -137,13 +137,12 @@ export default function StorageSettingsPage() {
         ok: !!data.ok,
         message: data.message || data.error || `HTTP ${res.status}`,
       };
+      // No toast: the result renders inline under the form, right where the
+      // endpoint and credentials being tested are. A toast alongside it says the
+      // same thing twice and floats the message away from the fields it is about.
       setTestResult(result);
-      if (result.ok) toast.success("Storage is reachable", { description: result.message });
-      else toast.error("Storage test failed", { description: result.message, duration: Infinity, closeButton: true });
     } catch {
-      const message = "Could not reach the dashboard API";
-      setTestResult({ ok: false, message });
-      toast.error(message);
+      setTestResult({ ok: false, message: "Could not reach the dashboard API" });
     } finally {
       setTesting(false);
     }
@@ -367,7 +366,11 @@ export default function StorageSettingsPage() {
                         : "border-destructive/30 bg-destructive/10 text-destructive"
                     )}
                   >
-                    <CheckCircle2 className="mt-0.5 size-4 shrink-0" />
+                    {testResult.ok ? (
+                      <CheckCircle2 className="mt-0.5 size-4 shrink-0" />
+                    ) : (
+                      <XCircle className="mt-0.5 size-4 shrink-0" />
+                    )}
                     <span className="min-w-0 break-words">{testResult.message}</span>
                   </div>
                 )}
