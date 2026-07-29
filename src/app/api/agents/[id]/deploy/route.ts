@@ -3,6 +3,7 @@ import { getSession } from "@/lib/auth";
 import { ensureDb } from "@/lib/db";
 import { deployAgent } from "@/lib/agent-runner";
 import { redeployWorkersSourcedFrom } from "@/lib/agent-assist";
+import { redeployDualWorkersSourcedFrom } from "@/lib/agent-assist-dual";
 
 export async function POST(
   request: NextRequest,
@@ -50,13 +51,16 @@ export async function POST(
     const deployerName = `${session.firstName} ${session.lastName}`.trim() || session.email;
     const version = await db.addAgentVersion(id, session.email, deployerName);
 
-    // An agent-assist worker that takes its models from this agent has them baked
-    // into an `.env.local` written at *its* deploy, so it has to be redeployed too
-    // or "the agent is the source of truth" quietly stops being true.
-    const assistWorkers = await redeployWorkersSourcedFrom(id, {
-      email: session.email,
-      name: deployerName,
-    });
+    // An assist worker that takes its models from this agent has them baked into an
+    // `.env.local` written at *its* deploy, so it has to be redeployed too or "the
+    // agent is the source of truth" quietly stops being true. Both flavours are
+    // swept — the per-participant transcriber and the dual-track one — since either
+    // can name this agent as its source.
+    const deployer = { email: session.email, name: deployerName };
+    const assistWorkers = [
+      ...(await redeployWorkersSourcedFrom(id, deployer)),
+      ...(await redeployDualWorkersSourcedFrom(id, deployer)),
+    ];
 
     return NextResponse.json({
       pid,

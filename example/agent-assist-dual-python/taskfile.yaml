@@ -1,0 +1,19 @@
+version: "3"
+output: interleaved
+dotenv: [".env.local"]
+vars:
+  PYTHON_MAIN: "src/agent.py"
+
+tasks:
+  install:
+    desc: "Bootstrap for local development"
+    cmds:
+      - "uv sync"
+  dev:
+    desc: "Run the worker against the local LiveKit server"
+    interactive: true
+    cmds:
+      - "uv run {{ .PYTHON_MAIN }} dev"
+  lint:
+    cmds:
+      - "uv run ruff check src"

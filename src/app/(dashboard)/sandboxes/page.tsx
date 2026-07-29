@@ -20,6 +20,7 @@ import {
   RefreshCw,
   X,
   RotateCw,
+  PhoneCall,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -39,6 +40,7 @@ import {
   DialogFooter,
 } from "@/components/ui/dialog";
 import { AssistSettings } from "@/components/livekit/assist-settings";
+import { MicRoleField } from "@/components/livekit/dual-mic-role-field";
 import { AssistSimDialog } from "@/components/livekit/assist-sim-dialog";
 import { CodeBlock } from "@/components/livekit/code-block";
 import {
@@ -47,6 +49,11 @@ import {
   DEFAULT_ASSIST_CONFIG,
   type AssistWorkerConfig,
 } from "@/lib/agent-assist-config";
+import {
+  ASSIST_DUAL_SOURCE_URL,
+  ASSIST_DUAL_TEMPLATE,
+  type DualMicRole,
+} from "@/lib/agent-assist-dual-config";
 import type { Provider } from "@/lib/providers";
 
 const templates = [
@@ -73,6 +80,14 @@ const templates = [
     icon: Headphones,
     href: "/sandboxes/agent-assist",
     template: ASSIST_TEMPLATE,
+  },
+  {
+    name: "Agent assist · dual track",
+    description:
+      "A phone call from one desk: microphone and softphone audio as two tracks, each transcribed on its own",
+    icon: PhoneCall,
+    href: "/sandboxes/agent-assist-dual",
+    template: ASSIST_DUAL_TEMPLATE,
   },
 ];
 
@@ -106,9 +121,16 @@ function CopyCommand({ command }: { command: string }) {
 
 interface SandboxSettings {
   agentDispatch?: string; // "" or "__auto__" for auto-dispatch
-  /** agent-assist only: what its worker runs on. */
-  assist?: AssistWorkerConfig;
-  /** agent-assist only: the worker this sandbox deployed, if it deployed one. */
+  /**
+   * Either assist template: what its worker runs on.
+   *
+   * `micRole` is the dual-track template's one extra field, optional here because
+   * the per-participant worker has no equivalent and never sets it. Both templates
+   * share this key so the dialog below, the delete path and the settings form need
+   * no branch for storage — only for which module deploys the result.
+   */
+  assist?: AssistWorkerConfig & { micRole?: DualMicRole };
+  /** Either assist template: the worker this sandbox deployed, if it deployed one. */
   assistWorker?: string;
   capabilities?: {
     camera?: boolean;
@@ -161,7 +183,11 @@ function EditSandboxDialog({
   const [optionalOpen, setOptionalOpen] = useState(false);
   const [appearanceOpen, setAppearanceOpen] = useState(false);
 
-  const isAssist = app.template === ASSIST_TEMPLATE;
+  const isDual = app.template === ASSIST_DUAL_TEMPLATE;
+  const isAssist = app.template === ASSIST_TEMPLATE || isDual;
+  // Each template names its room after itself, so two sandboxes with the same name
+  // could not collide in one deployment.
+  const roomName = `${isDual ? "dual" : "assist"}-${app.name}`;
   // The dashboard's own origin, taken from the sandbox's URL rather than from
   // `window`: reading that during render is a hydration mismatch waiting to
   // happen, and this string is already absolute and correct for a deployment.
@@ -246,11 +272,13 @@ function EditSandboxDialog({
     }));
   };
 
-  const title = isAssist
-    ? `Edit agent assist`
-    : app.template === "meet"
-      ? `Edit video conference`
-      : `Edit web voice agent`;
+  const title = isDual
+    ? `Edit agent assist · dual track`
+    : isAssist
+      ? `Edit agent assist`
+      : app.template === "meet"
+        ? `Edit video conference`
+        : `Edit web voice agent`;
 
   return (
     <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
@@ -275,7 +303,7 @@ function EditSandboxDialog({
             {isAssist ? (
               <>
                 <div className="rounded-lg border border-border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
-                  Both people open{" "}
+                  {isDual ? "The support agent opens " : "Both people open "}
                   <a
                     href={app.url}
                     target="_blank"
@@ -284,7 +312,10 @@ function EditSandboxDialog({
                   >
                     {app.url}
                   </a>{" "}
-                  and take a seat. Room: <code>assist-{app.name}</code>.
+                  {isDual
+                    ? "and publishes both legs from that one tab — microphone, plus the softphone's audio as a shared tab."
+                    : "and take a seat."}{" "}
+                  Room: <code>{roomName}</code>.
                   <br />
                   {settings.assistWorker ? (
                     <>
@@ -304,36 +335,85 @@ function EditSandboxDialog({
                     </>
                   )}
                 </div>
-                {/* Testing this template otherwise means two people in two
-                    browsers, which is why the simulator exists at all. */}
-                <div className="rounded-lg border border-border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
-                  <p className="mb-2">
-                    Or run a <strong className="text-foreground">simulated call</strong>: two
-                    synthetic speakers join and talk through this sandbox&apos;s own TTS, so the
-                    transcript, the coaching notes and the per-speaker metrics can be checked
-                    without two browsers. It answers when the call is over, and lands in{" "}
-                    <Link href="/sessions/history" className="text-primary hover:underline">
-                      Sessions → History
-                    </Link>{" "}
-                    like any other call.
-                  </p>
-                  <CodeBlock code={simulationCommand} />
-                  <p className="mt-2">
-                    <code>$TOKEN</code> comes from{" "}
-                    <Link
-                      href="/settings/access-tokens"
-                      className="text-primary hover:underline"
-                    >
-                      Settings → Access tokens
-                    </Link>
-                    . Pass <code>turns</code> to say your own lines.
-                  </p>
-                </div>
+                {isDual ? (
+                  /* No simulator for this one. `/api/assist-sim` joins as two
+                     participants carrying `assistRole` attributes, which is exactly
+                     the shape this worker does *not* read — both of their
+                     microphones would resolve to the same leg. One browser is
+                     enough here anyway, which is the point of the template. */
+                  <div className="rounded-lg border border-border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+                    <p>
+                      <strong className="text-foreground">Testing it takes one browser.</strong> Open
+                      the link, unmute, and share a tab that is playing anything with speech in it —
+                      that tab becomes the customer. The composer also sends a typed turn{" "}
+                      <em>as either side</em>, so one line typed as the customer exercises the whole
+                      chain (turn → coaching model → note) with no audio at all.
+                    </p>
+                    <p className="mt-2">
+                      The simulator on{" "}
+                      <Link href="/sandboxes" className="text-primary hover:underline">
+                        agent assist
+                      </Link>{" "}
+                      does not apply: it joins as two participants with roles in their attributes,
+                      and this worker resolves a leg from the track, not the participant.
+                    </p>
+                  </div>
+                ) : (
+                  /* Testing that template otherwise means two people in two
+                     browsers, which is why the simulator exists at all. */
+                  <div className="rounded-lg border border-border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+                    <p className="mb-2">
+                      Or run a <strong className="text-foreground">simulated call</strong>: two
+                      synthetic speakers join and talk through this sandbox&apos;s own TTS, so the
+                      transcript, the coaching notes and the per-speaker metrics can be checked
+                      without two browsers. It answers when the call is over, and lands in{" "}
+                      <Link href="/sessions/history" className="text-primary hover:underline">
+                        Sessions → History
+                      </Link>{" "}
+                      like any other call.
+                    </p>
+                    <CodeBlock code={simulationCommand} />
+                    <p className="mt-2">
+                      <code>$TOKEN</code> comes from{" "}
+                      <Link
+                        href="/settings/access-tokens"
+                        className="text-primary hover:underline"
+                      >
+                        Settings → Access tokens
+                      </Link>
+                      . Pass <code>turns</code> to say your own lines.
+                    </p>
+                  </div>
+                )}
+                {isDual && (
+                  <MicRoleField
+                    value={settings.assist?.micRole ?? "agent"}
+                    onChange={(micRole) =>
+                      setSettings((s) => ({
+                        ...s,
+                        assist: { ...(s.assist ?? DEFAULT_ASSIST_CONFIG), micRole },
+                      }))
+                    }
+                  />
+                )}
                 <AssistSettings
                   config={settings.assist ?? DEFAULT_ASSIST_CONFIG}
                   providers={providers}
                   agents={agents}
-                  onChange={(assist) => setSettings((s) => ({ ...s, assist }))}
+                  onChange={(assist) =>
+                    setSettings((s) => ({
+                      ...s,
+                      // `micRole` is the dual template's own field and
+                      // `AssistSettings` knows nothing about it — its onChange hands
+                      // back an `AssistWorkerConfig`. Carried across explicitly
+                      // rather than trusting the form's spread to have kept it: if
+                      // it were dropped, the server's normalizer would quietly
+                      // default it back to `agent` and re-point the legs.
+                      assist: isDual
+                        ? { ...assist, micRole: s.assist?.micRole ?? "agent" }
+                        : assist,
+                    }))
+                  }
                 />
               </>
             ) : (
@@ -738,8 +818,12 @@ export default function SandboxPage() {
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             {templates.map((t) => (
-              <Link key={t.name} href={t.href}>
-                <Card className="group relative hover:border-primary/40 transition-colors cursor-pointer">
+              <Link key={t.name} href={t.href} className="block h-full">
+                {/* `h-full` on both, or a row is only as tall as each card's own
+                    text: the Link is the grid item and stretches to the row, the
+                    Card inside it does not, so two templates whose descriptions
+                    wrap to a different number of lines drew mismatched cards. */}
+                <Card className="group relative h-full hover:border-primary/40 transition-colors cursor-pointer">
                   <CardContent className="p-5">
                     <div className="mb-4 flex h-20 items-center justify-center rounded-md">
                       <t.icon className="size-10 text-muted-foreground" />
@@ -835,7 +919,12 @@ export default function SandboxPage() {
                           </Button>
                           {/* Assist needs two people on one link; a voice agent
                               needs somebody to talk to it before its timeline has
-                              anything in it. Both get a synthetic caller. */}
+                              anything in it. Both get a synthetic caller.
+                              Deliberately not the dual-track template: the
+                              simulator joins as two participants carrying roles in
+                              their attributes, which that worker does not read —
+                              both of their microphones would land on one leg. It
+                              needs only one browser anyway. */}
                           {(app.template === ASSIST_TEMPLATE ||
                             app.template === "agent-starter-react") && (
                             <Button
@@ -848,8 +937,8 @@ export default function SandboxPage() {
                               <FlaskConical className="size-4" />
                             </Button>
                           )}
-                          {/* agent-assist is not in livekit-examples — it ships
-                              in this repo, so it points at the worker the
+                          {/* Neither assist template is in livekit-examples — both
+                              ship in this repo, so these point at the worker the
                               dashboard actually deploys. */}
                           <Button
                             variant="ghost"
@@ -862,7 +951,9 @@ export default function SandboxPage() {
                               href={
                                 app.template === ASSIST_TEMPLATE
                                   ? ASSIST_SOURCE_URL
-                                  : `https://github.com/livekit-examples/${app.template}`
+                                  : app.template === ASSIST_DUAL_TEMPLATE
+                                    ? ASSIST_DUAL_SOURCE_URL
+                                    : `https://github.com/livekit-examples/${app.template}`
                               }
                               target="_blank"
                               rel="noopener noreferrer"

@@ -90,7 +90,7 @@ export const TURN_DETECTOR_OPTIONS: {
   {
     id: "audio",
     label: "Audio (LiveKit v1-mini)",
-    hint: "Runs in the worker process. Weights ship with livekit-agents — nothing to download, no Cloud account.",
+    hint: "Runs in the worker process. Weights ship with livekit-agents — nothing to download, no Cloud account. Draws no turn-detector lane: only LiveKit Cloud's transport reports EOT metrics, so self-hosted the detection works and the timing is invisible.",
   },
   {
     id: "livekit",

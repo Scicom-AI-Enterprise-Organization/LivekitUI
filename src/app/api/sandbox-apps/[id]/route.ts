@@ -4,6 +4,11 @@ import { getRuntimeConfig } from "@/lib/runtime-config";
 import { ensureDb } from "@/lib/db";
 import { deploySandbox, stopSandbox } from "@/lib/sandbox";
 import { ASSIST_TEMPLATE, deployAssistWorker, normalizeAssistConfig } from "@/lib/agent-assist";
+import {
+  ASSIST_DUAL_TEMPLATE,
+  deployDualWorker,
+  normalizeDualConfig,
+} from "@/lib/agent-assist-dual";
 
 export async function GET(
   _req: NextRequest,
@@ -69,9 +74,14 @@ export async function PATCH(
 
   // The assist config is what the worker runs on, so it is validated here rather
   // than trusted from the dialog — every field of it ends up in the worker's
-  // environment.
-  if (app.template === ASSIST_TEMPLATE && incoming.assist) {
-    incoming.assist = normalizeAssistConfig(incoming.assist);
+  // environment. The dual-track template carries one extra field (`micRole`), and
+  // running it through the per-participant normalizer would silently drop it and
+  // re-point the legs on the next deploy.
+  const isDual = app.template === ASSIST_DUAL_TEMPLATE;
+  const isAssistLike = isDual || app.template === ASSIST_TEMPLATE;
+  const normalizeConfig = isDual ? normalizeDualConfig : normalizeAssistConfig;
+  if (isAssistLike && incoming.assist) {
+    incoming.assist = normalizeConfig(incoming.assist);
   }
 
   await db.updateSandboxAppSettings(parseInt(id, 10), JSON.stringify(incoming));
@@ -81,12 +91,17 @@ export async function PATCH(
   // deploy. Saving the dialog and seeing nothing change would be the bug.
   let workerWarning: string | null = null;
   const ownedWorker = typeof incoming.assistWorker === "string" ? incoming.assistWorker : "";
-  if (app.template === ASSIST_TEMPLATE && ownedWorker && incoming.assist) {
+  if (isAssistLike && ownedWorker && incoming.assist) {
     try {
-      await deployAssistWorker(app.name, normalizeAssistConfig(incoming.assist), {
+      const deployer = {
         email: session.email,
         name: `${session.firstName} ${session.lastName}`.trim() || session.email,
-      });
+      };
+      if (isDual) {
+        await deployDualWorker(app.name, normalizeDualConfig(incoming.assist), deployer);
+      } else {
+        await deployAssistWorker(app.name, normalizeAssistConfig(incoming.assist), deployer);
+      }
     } catch (err) {
       workerWarning = err instanceof Error ? err.message : String(err);
     }

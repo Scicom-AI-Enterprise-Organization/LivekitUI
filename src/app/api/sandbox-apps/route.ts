@@ -9,6 +9,12 @@ import {
   deployAssistWorker,
   normalizeAssistConfig,
 } from "@/lib/agent-assist";
+import {
+  ASSIST_DUAL_TEMPLATE,
+  deployDualWorker,
+  dualWorkerName,
+  normalizeDualConfig,
+} from "@/lib/agent-assist-dual";
 import { deleteAgentFiles, stopAgent } from "@/lib/agent-runner";
 import { sameSandboxName, validateSandboxName } from "@/lib/sandbox-name";
 
@@ -72,16 +78,32 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  // An agent-assist sandbox can bring its own worker: the dual-track transcriber
-  // is a different shape of agent than the builder emits, so there is nothing to
-  // pick from the dispatch list until one exists. Its name is derived from the
-  // sandbox, which is why the sandbox can be told what to dispatch before the
-  // worker is actually up — and why a failed worker deploy does not have to undo
-  // the sandbox.
+  // Either assist sandbox can bring its own worker: a transcriber that listens to
+  // two people is a different shape of agent than the builder emits, so there is
+  // nothing to pick from the dispatch list until one exists. Its name is derived
+  // from the sandbox, which is why the sandbox can be told what to dispatch before
+  // the worker is actually up — and why a failed worker deploy does not have to
+  // undo the sandbox.
+  //
+  // The two differ only in which module deploys them and which config validates:
+  // `agent-assist` binds a session per *participant*, `agent-assist-dual` binds one
+  // per *track* on a single participant. Both store the result under `assist` /
+  // `assistWorker`, so the edit dialog and the delete path need no branch — but the
+  // redeploy scans in each module are template-filtered, or one would write the
+  // other's environment.
   const isAssist = template === ASSIST_TEMPLATE;
-  const wantsWorker = isAssist && deployAssist !== false;
-  const assistConfig = isAssist ? normalizeAssistConfig(assist) : null;
-  const dispatchName: string = wantsWorker ? assistWorkerName(name) : agentName || "";
+  const isDual = template === ASSIST_DUAL_TEMPLATE;
+  const wantsWorker = (isAssist || isDual) && deployAssist !== false;
+  const assistConfig = isDual
+    ? normalizeDualConfig(assist)
+    : isAssist
+      ? normalizeAssistConfig(assist)
+      : null;
+  const dispatchName: string = wantsWorker
+    ? isDual
+      ? dualWorkerName(name)
+      : assistWorkerName(name)
+    : agentName || "";
 
   try {
     const { url, port } = await deploySandbox(
@@ -100,10 +122,15 @@ export async function POST(request: NextRequest) {
     let workerError: string | null = null;
     if (wantsWorker && assistConfig) {
       try {
-        await deployAssistWorker(name, assistConfig, {
+        const deployer = {
           email: session.email,
           name: `${session.firstName} ${session.lastName}`.trim() || session.email,
-        });
+        };
+        if (isDual) {
+          await deployDualWorker(name, normalizeDualConfig(assistConfig), deployer);
+        } else {
+          await deployAssistWorker(name, assistConfig, deployer);
+        }
       } catch (err) {
         // The sandbox is still worth having — two people can talk in it, and the
         // worker can be redeployed once the cause (usually a missing Python venv)

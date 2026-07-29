@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agent-assist-dual-python"
+version = "1.0.0"
+description = "Live transcription and coaching for a phone call arriving as two tracks on one participant"
+requires-python = ">=3.10, <3.14"
+
+dependencies = [
+    "livekit-agents[silero,turn-detector,openai]~=1.6",
+    "python-dotenv",
+    # GTCRN noise cancellation and the remote turn detector. Not optional for the
+    # defaults this worker ships with (DUAL_NOISE_CANCELLATION=gtcrn).
+    "stt-api @ git+https://github.com/Scicom-AI-Enterprise-Organization/STT-API.git",
+]
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "ruff",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-dir]
+"" = "src"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "B", "A", "C4", "UP", "SIM", "RUF"]
+ignore = ["E501"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"

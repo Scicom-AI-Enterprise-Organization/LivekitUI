@@ -1,23 +1,26 @@
 /* eslint-disable @typescript-eslint/no-require-imports, @typescript-eslint/no-explicit-any */
 
 /**
- * Deploying the **agent assist** worker: the silent Python participant that
- * transcribes a call between two humans and coaches the one taking it.
+ * Deploying the **dual-track assist** worker: the silent Python participant that
+ * transcribes a phone call arriving as two audio tracks on one participant.
  *
- * Unlike the agent builder, nothing here generates code.
- * `example/agent-assist-python/src/agent.py` is configured entirely through
- * environment variables, so the deployed copy is byte-identical to the one in
- * the repo and this module only decides what goes in `.env.local`. Editing the
- * worker therefore means editing one Python file rather than a template string
- * inside a TSX page, and a redeploy picks the edit up.
+ * Same deploy shape as `agent-assist.ts` — nothing here generates code.
+ * `example/agent-assist-dual-python/src/agent.py` is configured entirely through
+ * environment variables, so the deployed copy is byte-identical to the one in the
+ * repo and this module only decides what goes in `.env.local`. Editing the worker
+ * means editing one Python file, and a redeploy picks the edit up.
  *
- * It rides on the same runner as every other agent (`deployAgent`), so the
- * worker appears on `/agents` with logs, restart, stop and per-agent secrets
- * without any of that being reimplemented here.
+ * It rides on the same runner as every other agent (`deployAgent`), so the worker
+ * appears on `/agents` with logs, restart, stop and per-agent secrets without any
+ * of that being reimplemented.
  *
- * The config shape, its defaults and its validation live in
- * `agent-assist-config.ts`, which the sandbox pages import — this half may not
- * be reached from a client component.
+ * The environment variables are prefixed `DUAL_` rather than `ASSIST_`. The two
+ * workers never share a process — each gets its own `.env.local` — so this is not
+ * about collisions; it is so that a log line, a `.env.local` or a stray export
+ * says which worker it belongs to without having to look it up.
+ *
+ * The config shape and its validation live in `agent-assist-dual-config.ts`, which
+ * the sandbox pages import — this half may not be reached from a client component.
  */
 
 import { ensureDb, type DbProvider } from "./db";
@@ -28,35 +31,36 @@ import {
   type ProviderVoice,
 } from "./providers";
 import { deployAgent } from "./agent-runner";
+import { assistConfigFromAgent } from "./agent-assist-config";
 import {
-  ASSIST_TEMPLATE,
-  assistConfigFromAgent,
-  assistWorkerName,
-  type AssistWorkerConfig,
-} from "./agent-assist-config";
+  dualWorkerName,
+  normalizeDualConfig,
+  type DualWorkerConfig,
+} from "./agent-assist-dual-config";
 import { normalizeAudioChunkMs } from "./audio-input";
 
 export {
-  ASSIST_TEMPLATE,
-  ASSIST_WORKER_SUFFIX,
-  assistWorkerName,
-  normalizeAssistConfig,
-  DEFAULT_ASSIST_CONFIG,
-  type AssistWorkerConfig,
-} from "./agent-assist-config";
+  ASSIST_DUAL_TEMPLATE,
+  ASSIST_DUAL_WORKER_SUFFIX,
+  ASSIST_DUAL_SOURCE_URL,
+  dualWorkerName,
+  normalizeDualConfig,
+  DEFAULT_DUAL_CONFIG,
+  type DualWorkerConfig,
+} from "./agent-assist-dual-config";
 
 const fs: any = require("fs");
 const path: any = require("path");
 
 function workerSourcePath(): string {
-  return path.join(process.cwd(), "example", "agent-assist-python", "src", "agent.py");
+  return path.join(process.cwd(), "example", "agent-assist-dual-python", "src", "agent.py");
 }
 
 function readWorkerSource(): string {
   const file = workerSourcePath();
   if (!fs.existsSync(file)) {
     throw new Error(
-      `The assist worker source is missing (expected ${file}). Restore example/agent-assist-python, or create the sandbox without a worker.`
+      `The dual-track worker source is missing (expected ${file}). Restore example/agent-assist-dual-python, or create the sandbox without a worker.`
     );
   }
   return fs.readFileSync(file, "utf-8");
@@ -93,17 +97,16 @@ function toProvider(row: DbProvider): Provider {
  * What the worker will actually run, with `sourceAgent` applied.
  *
  * This is the difference between referencing an agent and copying it: the lookup
- * happens on **every** deploy, so editing the agent in the builder and
- * redeploying the worker is enough — there is no second copy of its models to
- * keep in step.
+ * happens on **every** deploy, so editing the agent in the builder and redeploying
+ * the worker is enough — there is no second copy of its models to keep in step.
  *
- * A source agent that has since been deleted falls back to the stored values,
- * which are the last thing it resolved to. Better a worker that keeps running the
- * models it had than one that refuses to start.
+ * `micRole` is never taken from the source agent. A voice agent has no concept of
+ * two tracks on one participant, so it has no opinion to inherit, and letting the
+ * copy blank it would silently re-point a working deployment's legs.
  */
 export async function resolveAgainstSourceAgent(
-  config: AssistWorkerConfig
-): Promise<AssistWorkerConfig> {
+  config: DualWorkerConfig
+): Promise<DualWorkerConfig> {
   if (!config.sourceAgent) return config;
 
   const db = await ensureDb();
@@ -111,18 +114,22 @@ export async function resolveAgainstSourceAgent(
   if (!agent) return config;
 
   const stored = parseJson<Record<string, unknown>>(agent.config, {});
-  return assistConfigFromAgent({ ...stored, name: config.sourceAgent }, config).config;
+  const { config: shared } = assistConfigFromAgent(
+    { ...stored, name: config.sourceAgent },
+    config
+  );
+  return { ...shared, micRole: config.micRole };
 }
 
 /**
- * The worker's environment, as a flat map. `deployAgent` writes it to
- * `.env.local` and passes it to the child, layered over the project's secrets —
- * so a provider's API key, referenced here by *name*, is already in scope by the
- * time the worker reads it.
+ * The worker's environment, as a flat map. `deployAgent` writes it to `.env.local`
+ * and passes it to the child, layered over the project's secrets — so a provider's
+ * API key, referenced here by *name*, is already in scope by the time the worker
+ * reads it.
  */
-export async function buildAssistEnv(
+export async function buildDualEnv(
   workerName: string,
-  config: AssistWorkerConfig
+  config: DualWorkerConfig
 ): Promise<Record<string, string>> {
   const db = await ensureDb();
   const providers = (await db.getAllProviders()).map(toProvider);
@@ -132,20 +139,21 @@ export async function buildAssistEnv(
   const llm = resolveModel(effective.llmModel, providers);
 
   const env: Record<string, string> = {
-    ASSIST_AGENT_NAME: workerName,
-    ASSIST_STT_PLUGIN: stt.plugin,
-    ASSIST_STT_MODEL: stt.model,
-    ASSIST_STT_BASE_URL: stt.baseUrl || "",
-    ASSIST_STT_API_KEY_ENV: stt.apiKeySecret || "",
-    ASSIST_LLM_PLUGIN: llm.plugin,
-    ASSIST_LLM_MODEL: llm.model,
-    ASSIST_LLM_BASE_URL: llm.baseUrl || "",
-    ASSIST_LLM_API_KEY_ENV: llm.apiKeySecret || "",
-    ASSIST_LANGUAGE: effective.language,
-    ASSIST_TURN_DETECTOR: effective.turnDetector,
-    ASSIST_NOISE_CANCELLATION: effective.noiseCancellation,
-    ASSIST_AUDIO_CHUNK_MS: String(normalizeAudioChunkMs(effective.audioChunkMs)),
-    ASSIST_SUGGEST_FOR: effective.suggestFor,
+    DUAL_AGENT_NAME: workerName,
+    DUAL_STT_PLUGIN: stt.plugin,
+    DUAL_STT_MODEL: stt.model,
+    DUAL_STT_BASE_URL: stt.baseUrl || "",
+    DUAL_STT_API_KEY_ENV: stt.apiKeySecret || "",
+    DUAL_LLM_PLUGIN: llm.plugin,
+    DUAL_LLM_MODEL: llm.model,
+    DUAL_LLM_BASE_URL: llm.baseUrl || "",
+    DUAL_LLM_API_KEY_ENV: llm.apiKeySecret || "",
+    DUAL_LANGUAGE: effective.language,
+    DUAL_TURN_DETECTOR: effective.turnDetector,
+    DUAL_NOISE_CANCELLATION: effective.noiseCancellation,
+    DUAL_AUDIO_CHUNK_MS: String(normalizeAudioChunkMs(effective.audioChunkMs)),
+    DUAL_SUGGEST_FOR: effective.suggestFor,
+    DUAL_MIC_ROLE: effective.micRole,
   };
 
   // Only when the remote detector is selected. The plugin decides at import time
@@ -158,7 +166,7 @@ export async function buildAssistEnv(
   // A prompt spans lines; `.env.local` is one pair per line. Double-quoted with
   // escaped newlines is the form python-dotenv reads back intact.
   if (effective.instructions.trim()) {
-    env.ASSIST_INSTRUCTIONS = JSON.stringify(effective.instructions);
+    env.DUAL_INSTRUCTIONS = JSON.stringify(effective.instructions);
   }
 
   return env;
@@ -168,19 +176,19 @@ export async function buildAssistEnv(
  * Writes and starts the worker for a sandbox, creating its `agents` row on the
  * first deploy and updating it after that.
  */
-export async function deployAssistWorker(
+export async function deployDualWorker(
   sandboxName: string,
-  config: AssistWorkerConfig,
+  config: DualWorkerConfig,
   deployer: { email: string; name: string }
 ): Promise<{ workerName: string; pid: number }> {
-  const workerName = assistWorkerName(sandboxName);
+  const workerName = dualWorkerName(sandboxName);
   const source = readWorkerSource();
 
   const db = await ensureDb();
   const existing = await db.findAgentByName(workerName);
   // `kind` is what tells the agents page this row is not a builder agent — its
   // config has no instructions, voice or tools to open in the builder.
-  const storedConfig = JSON.stringify({ kind: "agent-assist", assist: config });
+  const storedConfig = JSON.stringify({ kind: "agent-assist-dual", assist: config });
   if (existing) {
     await db.updateAgent(existing.id, workerName, storedConfig, "deployed");
   } else {
@@ -188,12 +196,12 @@ export async function deployAssistWorker(
   }
 
   // Project secrets first (they hold the provider API keys), then the worker's
-  // own — the same precedence the builder's deploy uses — and the assist env
-  // last, since it is derived rather than user-entered.
+  // own — the same precedence the builder's deploy uses — and the derived env
+  // last, since it is computed rather than user-entered.
   const secrets: Record<string, string> = {};
   for (const s of await db.getAllSecrets()) secrets[s.name] = s.value;
   for (const s of await db.getAgentSecrets(workerName)) secrets[s.key] = s.value;
-  Object.assign(secrets, await buildAssistEnv(workerName, config));
+  Object.assign(secrets, await buildDualEnv(workerName, config));
 
   const { pid } = await deployAgent(workerName, source, secrets);
   await db.addAgentVersion(workerName, deployer.email, deployer.name);
@@ -202,17 +210,18 @@ export async function deployAssistWorker(
 }
 
 /**
- * Redeploys every assist worker that takes its models from `agentName`.
+ * Redeploys every dual-track worker that takes its models from `agentName`.
  *
- * Called when that agent is deployed from the builder. Without it, "the agent is
- * the source of truth" would only hold until you edited the agent: the worker's
+ * Called when that agent is deployed from the builder, alongside the
+ * per-participant workers' equivalent in `agent-assist.ts`. Without it, "the agent
+ * is the source of truth" would only hold until you edited the agent: the worker's
  * models live in an `.env.local` written at deploy, so it would keep running the
  * old ones with nothing on screen saying so.
  *
  * Failures are collected, not thrown — the agent's own deploy succeeded, and that
  * is what the caller asked for.
  */
-export async function redeployWorkersSourcedFrom(
+export async function redeployDualWorkersSourcedFrom(
   agentName: string,
   deployer: { email: string; name: string }
 ): Promise<{ worker: string; error?: string }[]> {
@@ -220,12 +229,7 @@ export async function redeployWorkersSourcedFrom(
   const results: { worker: string; error?: string }[] = [];
 
   for (const app of await db.getAllSandboxApps()) {
-    // Template-checked, not shape-checked. The dual-track sandbox stores its
-    // worker under the same two settings keys, so without this a dual sandbox's
-    // worker would be redeployed from *this* module — overwriting a working
-    // `.env.local` with `ASSIST_*` variables its Python reads none of, and
-    // leaving a worker that starts, registers and transcribes nothing.
-    if (app.template !== ASSIST_TEMPLATE) continue;
+    if (app.template !== "agent-assist-dual-react") continue;
     let settings: Record<string, unknown>;
     try {
       settings = JSON.parse(app.settings || "{}");
@@ -235,19 +239,19 @@ export async function redeployWorkersSourcedFrom(
     // Only a worker this sandbox owns: one it merely dispatches belongs to
     // whichever sandbox deployed it, and that one will redeploy it itself.
     if (!settings.assistWorker || typeof settings.assist !== "object" || !settings.assist) continue;
-    const assist = settings.assist as Partial<AssistWorkerConfig>;
+    const assist = settings.assist as Partial<DualWorkerConfig>;
     if (assist.sourceAgent !== agentName) continue;
 
     try {
-      const { workerName } = await deployAssistWorker(
+      const { workerName } = await deployDualWorker(
         app.name,
-        assist as AssistWorkerConfig,
+        normalizeDualConfig(assist),
         deployer
       );
       results.push({ worker: workerName });
     } catch (err) {
       results.push({
-        worker: assistWorkerName(app.name),
+        worker: dualWorkerName(app.name),
         error: err instanceof Error ? err.message : String(err),
       });
     }
