@@ -270,30 +270,35 @@ export async function deploySandbox(
   const base = sandboxDomain || "http://localhost:3000";
   const url = `${base.replace(/\/$/, "")}/sandbox/${name}`;
 
-  // Write .env.local for THIS sandbox. The templates hand this straight to the
-  // browser from their /api/connection-details route, so it has to be the
-  // public URL — not `LIVEKIT_URL`, which under Docker is an internal hostname.
+  // The environment for THIS sandbox. The templates hand `LIVEKIT_URL` straight
+  // to the browser from their /api/connection-details route, so it has to be the
+  // public URL — not the dashboard's own `LIVEKIT_URL`, which under Docker or
+  // Kubernetes is an internal hostname.
   const livekitWsUrl = getRuntimeConfig().livekitUrl;
 
-  const envContent = [
-    `LIVEKIT_API_KEY=${livekitApiKey}`,
-    `LIVEKIT_API_SECRET=${livekitApiSecret}`,
-    `LIVEKIT_URL=${livekitWsUrl}`,
+  const sandboxEnv: Record<string, string> = {
+    LIVEKIT_API_KEY: livekitApiKey,
+    LIVEKIT_API_SECRET: livekitApiSecret,
+    LIVEKIT_URL: livekitWsUrl,
     // The server-to-server address, for a template that calls the SDK from its
     // own routes (agent-assist lists participants to show a seat as taken). The
     // public URL above is a browser address and under Docker the container may
     // not resolve it at all.
-    `LIVEKIT_SERVER_URL=${process.env.LIVEKIT_URL || livekitWsUrl}`,
+    LIVEKIT_SERVER_URL: process.env.LIVEKIT_URL || livekitWsUrl,
     // Its own name, so a template can derive a stable room from it rather than
     // inventing a random one per visit — which is what lets two people reach the
     // same call from one link.
-    `SANDBOX_NAME=${name}`,
-    `AGENT_NAME=${agentName || ""}`,
-    `NEXT_PUBLIC_AGENT_NAME=${agentName || ""}`,
-    "",
-  ].join("\n");
+    SANDBOX_NAME: name,
+    AGENT_NAME: agentName || "",
+    NEXT_PUBLIC_AGENT_NAME: agentName || "",
+  };
 
-  fs.writeFileSync(path.join(sandboxDir, ".env.local"), envContent);
+  // `.env.local` is written for the reader, but it is NOT what makes these
+  // values take effect — the spawn below is. See the `env:` note there.
+  fs.writeFileSync(
+    path.join(sandboxDir, ".env.local"),
+    Object.entries(sandboxEnv).map(([k, v]) => `${k}=${v}`).join("\n") + "\n"
+  );
 
   // The same values as a file the template can read at request time.
   //
@@ -336,9 +341,27 @@ export default nextConfig;
   const logFile = path.join(getLogsDir(), `${name}.log`);
   const logStream = fs.openSync(logFile, "w");
 
+  // `sandboxEnv` is spread AFTER `process.env`, and that order is the whole
+  // fix: the sandbox's values must override the dashboard's, not defer to them.
+  //
+  // Writing `.env.local` is not enough on its own. `@next/env` snapshots
+  // `process.env` on first load and then takes a key from an env file *only when
+  // it is absent from that snapshot* — an inherited variable is never
+  // overwritten. So under Docker or Kubernetes, where the dashboard holds
+  // `LIVEKIT_URL=http://livekit-server:7880` for its own SDK calls, the child
+  // `next dev` inherited that internal hostname and silently discarded the
+  // public URL written next to it. The template then handed the internal address
+  // to the browser as `serverUrl`.
+  //
+  // That failure does not read as a configuration problem, because the
+  // configuration was right: the console works (it goes through
+  // `runtime-config.ts`), and only sandboxes break. Behind TLS it does not even
+  // reach the network — an https page cannot open a `ws://` socket, so the
+  // browser blocks it as mixed content and reports a `SecurityError` about
+  // WebSocket construction rather than an unresolvable host.
   const child = childProcess.spawn("npx", ["next", "dev", "--turbopack", "-p", String(port)], {
     cwd: sandboxDir,
-    env: { ...process.env, PORT: String(port) },
+    env: { ...process.env, ...sandboxEnv, PORT: String(port) },
     stdio: ["ignore", logStream, logStream],
     detached: true,
   });
